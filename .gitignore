@@ -1,0 +1,50 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+dist/
+build/
+
+# InterfaceForge runtime state and generated campaign products
+.interfaceforge/
+runs/
+datasets/
+models/
+validation/
+reports/
+logs/
+
+# VASP outputs and licensed inputs
+POTCAR
+POTCAR.*
+WAVECAR
+CHGCAR
+OUTCAR
+OSZICAR
+vasprun.xml
+XDATCAR
+CONTCAR
+ML_AB
+ML_ABN
+ML_FF
+ML_FFN
+ML_LOGFILE
+
+# ML checkpoints and generated model artifacts
+*.model
+*.pt
+*.pth
+*.pb
+*.ckpt*
+lcurve.out
+results/
+
+# Scheduler output
+slurm-*.out
+slurm-*.err
+*.jobid

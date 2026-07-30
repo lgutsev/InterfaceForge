@@ -1,0 +1,7 @@
+name: local
+scheduler: local
+jobs:
+  vasp_workq: {command: vasp_gam}
+  vasp_bigmem: {command: vasp_gam}
+  mace_gpu: {command: mace_run_train}
+  deepmd_gpu: {command: dp}

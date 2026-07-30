@@ -1,0 +1,631 @@
+"""Generate restartable MACE and DeePMD training campaigns."""
+
+from __future__ import annotations
+
+import json
+import shlex
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+from .config import Campaign, load_profile
+from .errors import SafetyError
+from .scheduler import render_job, write_job
+from .state import StateStore
+
+
+def _resolve(root: Path, value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    return path.resolve() if path.is_absolute() else (root / path).resolve()
+
+
+def _prepare_root(path: Path, *, force: bool) -> None:
+    if path.exists() and any(path.iterdir()) and not force:
+        raise SafetyError(f"Training output is not empty: {path}")
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[str, Any]:
+    """Generate two-stage MACE refinement launchers from the shared extxyz data."""
+
+    settings = dict(campaign.models.get("mace", {}))
+    if not settings.get("enabled", False):
+        raise SafetyError("models.mace.enabled is false")
+    root = campaign.root / "models" / "mace"
+    _prepare_root(root, force=force)
+    profile = load_profile(campaign.profile_path)
+    profile_name = str(settings.get("profile", "mace_gpu"))
+    train_file = _resolve(
+        campaign.root, settings.get("train_file", "datasets/canonical/train.extxyz")
+    )
+    valid_file = _resolve(
+        campaign.root, settings.get("valid_file", "datasets/canonical/valid.extxyz")
+    )
+    test_file = _resolve(
+        campaign.root, settings.get("test_file", "datasets/canonical/test.extxyz")
+    )
+    e0s = settings.get("e0s", "average")
+    common = [
+        "mace_run_train",
+        "--name=interfaceforge_mace",
+        f"--train_file={shlex.quote(str(train_file))}",
+        f"--valid_file={shlex.quote(str(valid_file))}",
+        f"--test_file={shlex.quote(str(test_file))}",
+        f"--model_dir={shlex.quote(str(root / 'artifacts'))}",
+        "--device=cuda",
+        f"--batch_size={int(settings.get('batch_size', 16))}",
+        f"--num_workers={int(settings.get('num_workers', 8))}",
+        f"--E0s={shlex.quote(str(e0s))}",
+        f"--r_max={float(settings.get('r_max', 6.0))}",
+        f"--energy_key={settings.get('energy_key', 'REF_energy')}",
+        f"--forces_key={settings.get('forces_key', 'REF_forces')}",
+        f"--seed={int(settings.get('seed', 2026))}",
+        "--restart_latest",
+    ]
+    stage1 = [
+        *common,
+        f"--max_num_epochs={int(settings.get('max_num_epochs', 200))}",
+        f"--energy_weight={float(settings.get('stage1_energy_weight', 1.0))}",
+        f"--forces_weight={float(settings.get('stage1_forces_weight', 100.0))}",
+        f"--patience={int(settings.get('patience', 30))}",
+    ]
+    stage2 = [
+        *common,
+        f"--max_num_epochs={int(settings.get('stage2_max_num_epochs', 100))}",
+        f"--energy_weight={float(settings.get('stage2_energy_weight', 10.0))}",
+        f"--forces_weight={float(settings.get('stage2_forces_weight', 50.0))}",
+        f"--patience={int(settings.get('stage2_patience', 20))}",
+    ]
+    stages: list[dict[str, Any]] = []
+    for name, command in (("stage1", stage1), ("stage2", stage2)):
+        directory = root / name
+        directory.mkdir(parents=True, exist_ok=True)
+        command_text = " \\\n  ".join(command)
+        launcher = render_job(
+            profile,
+            profile_name,
+            command=command_text,
+            job_name=f"{campaign.name}_mace_{name}",
+            working_directory=str(root),
+        )
+        write_job(directory / "run.slurm", launcher, force=force)
+        stages.append(
+            {
+                "name": name,
+                "launcher": str(directory / "run.slurm"),
+                "command": command_text,
+            }
+        )
+
+    manifest = {
+        "schema_version": 1,
+        "engine": "mace",
+        "campaign": campaign.name,
+        "train_file": str(train_file),
+        "valid_file": str(valid_file),
+        "test_file": str(test_file),
+        "force_labels": "raw DFT labels; constraints are not applied",
+        "stages": stages,
+        "execution_order": ["stage1", "stage2"],
+    }
+    manifest_path = root / "training_manifest.json"
+    _write_json(manifest_path, manifest)
+    StateStore(campaign.root).artifact("mace_training_manifest", manifest_path)
+    return manifest
+
+
+def _find_deepmd_systems(split: Path) -> list[Path]:
+    return sorted({path.parent for path in split.rglob("type.raw")})
+
+
+def validate_deepmd_dataset(root: Path) -> tuple[list[str], dict[str, list[str]]]:
+    """Validate the fixed-shape DeePMD systems generated by InterfaceForge."""
+
+    type_map: list[str] | None = None
+    inventory: dict[str, list[str]] = {}
+    for split_name in ("train", "valid", "test"):
+        split = root / split_name
+        systems = _find_deepmd_systems(split) if split.is_dir() else []
+        if not systems:
+            raise SafetyError(f"No DeePMD systems found below {split}")
+        inventory[split_name] = [str(system.resolve()) for system in systems]
+        for system in systems:
+            current = (system / "type_map.raw").read_text(encoding="utf-8").split()
+            if type_map is None:
+                type_map = current
+            elif current != type_map:
+                raise SafetyError(f"Inconsistent type_map.raw in {system}")
+            for set_dir in system.glob("set.*"):
+                for name in ("coord.npy", "box.npy", "energy.npy", "force.npy"):
+                    if not (set_dir / name).is_file():
+                        raise SafetyError(f"Missing {name} in {set_dir}")
+    return type_map or [], inventory
+
+
+def _deepmd_descriptor(name: str, backend: str, seed: int) -> dict[str, Any]:
+    if name == "dpa1":
+        descriptor_type = "dpa1" if backend == "pt_expt" else "se_atten"
+        return {
+            "type": descriptor_type,
+            "sel": "auto:1.20",
+            "rcut_smth": 0.5,
+            "rcut": 6.0,
+            "neuron": [25, 50, 100],
+            "axis_neuron": 16,
+            "resnet_dt": False,
+            "attn": 128,
+            "attn_layer": 2,
+            "attn_mask": False,
+            "attn_dotr": True,
+            "activation_function": "tanh",
+            "precision": "float32",
+            "seed": seed,
+        }
+    if name == "dpa2":
+        return {
+            "type": "dpa2",
+            "repinit": {
+                "tebd_dim": 8,
+                "rcut": 6.0,
+                "rcut_smth": 0.5,
+                "nsel": "auto:1.20",
+                "neuron": [25, 50, 100],
+                "axis_neuron": 12,
+            },
+            "repformer": {
+                "rcut": 4.0,
+                "rcut_smth": 3.5,
+                "nsel": "auto:1.20",
+                "nlayers": 3,
+                "g1_dim": 128,
+                "g2_dim": 32,
+                "axis_neuron": 4,
+                "attn1_hidden": 128,
+                "attn1_nhead": 4,
+                "attn2_hidden": 32,
+                "attn2_nhead": 4,
+            },
+            "precision": "float32",
+            "seed": seed,
+        }
+    if name == "dpa3":
+        return {
+            "type": "dpa3",
+            "repflow": {
+                "n_dim": 128,
+                "e_dim": 64,
+                "a_dim": 32,
+                "nlayers": 6,
+                "e_rcut": 6.0,
+                "e_rcut_smth": 5.3,
+                "e_sel": "auto:1.20",
+                "a_rcut": 4.0,
+                "a_rcut_smth": 3.5,
+                "a_sel": "auto:1.20",
+                "axis_neuron": 4,
+                "fix_stat_std": 0.3,
+                "update_angle": True,
+            },
+            "activation_function": "silu",
+            "precision": "float32",
+            "concat_output_tebd": False,
+            "seed": seed,
+        }
+    if name == "dpa4":
+        return {
+            "type": "dpa4",
+            "sel": "auto:1.20",
+            "rcut": 6.0,
+            "channels": 64,
+            "n_radial": 16,
+            "n_blocks": 3,
+            "precision": "float32",
+            "seed": seed,
+        }
+    return {
+        "type": "se_e2_a",
+        "sel": "auto:1.20",
+        "rcut_smth": 0.5,
+        "rcut": 6.0,
+        "neuron": [25, 50, 100],
+        "axis_neuron": 16,
+        "resnet_dt": False,
+        "seed": seed,
+    }
+
+
+def deepmd_input(
+    *,
+    dataset_root: Path,
+    type_map: Sequence[str],
+    architecture: str,
+    backend: str,
+    seed: int,
+    numb_steps: int,
+    batch_atoms: int,
+    systems: Mapping[str, Sequence[str]],
+) -> dict[str, Any]:
+    if architecture == "dpa4":
+        model: dict[str, Any] = {
+            "type": "dpa4",
+            "type_map": list(type_map),
+            "descriptor": _deepmd_descriptor(architecture, backend, seed),
+            "fitting_net": {
+                "type": "dpa4_ener",
+                "neuron": [0],
+                "activation_function": "silu",
+                "precision": "float32",
+                "seed": seed + 1000,
+            },
+        }
+    else:
+        model = {
+            "type_map": list(type_map),
+            "type_embedding": {"neuron": [8], "resnet_dt": False, "seed": seed + 500}
+            if architecture in {"dpa1", "se_e2_a"}
+            else {},
+            "descriptor": _deepmd_descriptor(architecture, backend, seed),
+            "fitting_net": {
+                "type": "ener",
+                "neuron": [240, 240, 240],
+                "resnet_dt": True,
+                "activation_function": "tanh",
+                "precision": "float32",
+                "seed": seed + 1000,
+            },
+        }
+        if not model["type_embedding"]:
+            model.pop("type_embedding")
+    modern = architecture in {"dpa2", "dpa3", "dpa4"}
+    return {
+        "_comment": "InterfaceForge energy/force model; raw DFT force labels.",
+        "model": model,
+        "learning_rate": {
+            "type": "exp",
+            "start_lr": 2.0e-4 if modern else 1.0e-3,
+            "stop_lr": 1.0e-6,
+            "decay_steps": 5000,
+        },
+        "loss": {
+            "type": "ener",
+            "start_pref_e": 0.02,
+            "limit_pref_e": 1.0,
+            "start_pref_f": 1000.0,
+            "limit_pref_f": 1.0,
+            "start_pref_v": 0.0,
+            "limit_pref_v": 0.0,
+        },
+        "training": {
+            "training_data": {
+                "systems": list(systems["train"]),
+                "batch_size": f"auto:{batch_atoms}",
+                "auto_prob": "prob_uniform",
+            },
+            "validation_data": {
+                "systems": list(systems["valid"]),
+                "batch_size": f"auto:{batch_atoms}",
+                "auto_prob": "prob_uniform",
+                "numb_btch": 28,
+            },
+            "numb_steps": numb_steps,
+            "seed": seed + 2000,
+            "disp_file": "lcurve.out",
+            "disp_freq": 1000,
+            "save_freq": 20000,
+            "save_ckpt": "model.ckpt",
+            "max_ckpt_keep": 5,
+        },
+    }
+
+
+def _backend_flag(backend: str) -> tuple[str, str]:
+    if backend == "tensorflow":
+        return "--tf", "frozen_model.pb"
+    # `pt_expt` names the experimental PyTorch implementation selected in the
+    # campaign, but DeePMD's public CLI still uses `--pt`.
+    return "--pt", "frozen_model.pth"
+
+
+def _deepmd_shell_prefix(settings: Mapping[str, Any], backend: str) -> str:
+    """Return portable direct/container helpers for generated jobs."""
+
+    image = str(settings.get("container_image", "")).strip()
+    python_check = (
+        "import tensorflow as tf; g=tf.config.list_physical_devices('GPU'); "
+        "print('TensorFlow-visible GPUs:',g); assert g"
+        if backend == "tensorflow"
+        else "import torch; print('CUDA available:',torch.cuda.is_available()); "
+        "assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
+    )
+    if not image:
+        return "\n".join(
+            [
+                "dp_exec() { srun -n 1 dp \"$@\"; }",
+                "container_python() { srun -n 1 python \"$@\"; }",
+                f"container_python -c {shlex.quote(python_check)}",
+            ]
+        )
+    return "\n".join(
+        [
+            f'DEEPMD_IMAGE="${{DEEPMD_IMAGE:-{image}}}"',
+            'CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-$(command -v apptainer || command -v singularity || true)}"',
+            '[[ -n "$CONTAINER_RUNTIME" ]] || { echo "ERROR: apptainer/singularity not found"; exit 2; }',
+            '[[ -s "$DEEPMD_IMAGE" ]] || { echo "ERROR: container image not found: $DEEPMD_IMAGE"; exit 2; }',
+            "DEEPMD_BIND_ARGS=()",
+            "for bind_dir in /ddnB /project; do",
+            '  [[ -d "$bind_dir" ]] && DEEPMD_BIND_ARGS+=(--bind "$bind_dir:$bind_dir")',
+            "done",
+            'dp_exec() { srun -n 1 "$CONTAINER_RUNTIME" exec --nv "${DEEPMD_BIND_ARGS[@]}" "$DEEPMD_IMAGE" dp "$@"; }',
+            "container_python() {",
+            '  srun -n 1 "$CONTAINER_RUNTIME" exec --nv '
+            '"${DEEPMD_BIND_ARGS[@]}" "$DEEPMD_IMAGE" python "$@"',
+            "}",
+            f"container_python -c {shlex.quote(python_check)}",
+        ]
+    )
+
+
+def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict[str, Any]:
+    """Generate a seeded DeePMD committee and one Slurm array launcher."""
+
+    settings = dict(campaign.models.get("deepmd", {}))
+    if not settings.get("enabled", False):
+        raise SafetyError("models.deepmd.enabled is false")
+    root = campaign.root / "models" / "deepmd"
+    _prepare_root(root, force=force)
+    dataset_root = _resolve(
+        campaign.root,
+        settings.get("dataset_root", "datasets/canonical/deepmd"),
+    )
+    type_map, split_systems = validate_deepmd_dataset(dataset_root)
+    committee = int(settings.get("committee", 4))
+    seeds = [int(value) for value in settings.get("seeds", [11, 23, 37, 53])][:committee]
+    backend = str(settings.get("backend", "tensorflow"))
+    architectures = [str(value) for value in settings.get("architectures", [settings.get("descriptor", "dpa1")])]
+    models: list[dict[str, Any]] = []
+    for architecture_index, architecture in enumerate(architectures):
+        for index, seed in enumerate(seeds):
+            run = root / architecture / f"model_{index:03d}"
+            if run.exists() and any(run.iterdir()) and not force:
+                raise SafetyError(f"Refusing to reuse nonempty model directory: {run}")
+            run.mkdir(parents=True, exist_ok=True)
+            payload = deepmd_input(
+                dataset_root=dataset_root,
+                type_map=type_map,
+                architecture=architecture,
+                backend=backend,
+                seed=seed,
+                numb_steps=int(settings.get("numb_steps", 500000)),
+                batch_atoms=int(settings.get("batch_atoms", 1024)),
+                systems=split_systems,
+            )
+            _write_json(run / "input.json", payload)
+            models.append(
+                {
+                    "task_id": architecture_index * committee + index,
+                    "architecture": architecture,
+                    "index": index,
+                    "seed": seed,
+                    "directory": str(run),
+                }
+            )
+
+    profile = load_profile(campaign.profile_path)
+    profile_name = str(settings.get("profile", "deepmd_gpu"))
+    backend_flag, frozen_name = _backend_flag(backend)
+    architectures_array = " ".join(shlex.quote(value) for value in architectures)
+    prefix = _deepmd_shell_prefix(settings, backend)
+    checkpoint = "model.ckpt" if backend == "tensorflow" else "model.ckpt.pt"
+    restart_marker = "model.ckpt.index" if backend == "tensorflow" else checkpoint
+    freeze_checkpoint = "." if backend == "tensorflow" else checkpoint
+    command = "\n".join(
+        [
+            prefix,
+            f"ARCHITECTURES=({architectures_array})",
+            f"NMODELS={committee}",
+            'TASK_ID="${SLURM_ARRAY_TASK_ID:?Submit with sbatch}"',
+            "ARCH_INDEX=$(( TASK_ID / NMODELS ))",
+            "MODEL_INDEX=$(( TASK_ID % NMODELS ))",
+            'ARCH="${ARCHITECTURES[$ARCH_INDEX]}"',
+            'MODEL_ID="$(printf \'%03d\' "${MODEL_INDEX}")"',
+            f'RUN_DIR={shlex.quote(str(root))}/${{ARCH}}/model_${{MODEL_ID}}',
+            'cd "${RUN_DIR}"',
+            f"TRAIN_ARGS=({backend_flag} train input.json)",
+            f'if [[ -s {restart_marker} ]]; then TRAIN_ARGS+=(--restart {checkpoint}); fi',
+            'dp_exec "${TRAIN_ARGS[@]}"',
+            (
+                f'if [[ "$ARCH" == "dpa4" ]]; then '
+                f"dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name} "
+                f'|| echo "WARNING: DPA-4 freeze failed; deployment is not approved."; '
+                f"else dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name}; fi"
+            ),
+            '[[ "$ARCH" == "dpa4" && ! -s ' + frozen_name + " ]] && exit 0",
+            "mkdir -p test_results",
+            f"MODEL_FILE={shlex.quote(frozen_name)}",
+            f"mapfile -t TEST_SYSTEMS < {shlex.quote(str(root / 'test_systems.txt'))}",
+            'for TEST_INDEX in "${!TEST_SYSTEMS[@]}"; do',
+            "  printf -v TEST_LABEL 'system_%03d' \"$TEST_INDEX\"",
+            '  mkdir -p "test_results/${TEST_LABEL}"',
+            f'  dp_exec {backend_flag} test -m "$MODEL_FILE" '
+            '-s "${TEST_SYSTEMS[$TEST_INDEX]}" -n 0 '
+            '-d "test_results/${TEST_LABEL}/detail" '
+            '> "test_results/${TEST_LABEL}.log" 2>&1',
+            "done",
+        ]
+    )
+    launcher = render_job(
+        profile,
+        profile_name,
+        command=command,
+        job_name=f"{campaign.name}_deepmd",
+        array=f"0-{len(architectures) * committee - 1}%{int(settings.get('max_concurrent', 2))}",
+        working_directory=str(root),
+    )
+    write_job(root / "run_ensemble.slurm", launcher, force=force)
+    preflight_command = "\n".join(
+        [
+            prefix,
+            "nvidia-smi",
+            "dp_exec --version",
+            f"dp_exec {backend_flag} train --help >/dev/null",
+            "echo 'DeepMD GPU preflight passed.'",
+        ]
+    )
+    preflight = render_job(
+        profile,
+        profile_name,
+        command=preflight_command,
+        job_name=f"{campaign.name}_deepmd_preflight",
+        working_directory=str(root),
+    )
+    write_job(root / "run_preflight.slurm", preflight, force=force)
+
+    smoke_command = "\n".join(
+        [
+            prefix,
+            f"ARCHITECTURES=({architectures_array})",
+            'TASK_ID="${SLURM_ARRAY_TASK_ID:?Submit with sbatch}"',
+            'ARCH="${ARCHITECTURES[$TASK_ID]}"',
+            f'SOURCE_DIR={shlex.quote(str(root))}/${{ARCH}}/model_000',
+            f'SMOKE_DIR={shlex.quote(str(root))}/smoke/'
+            'job_${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID}}/${ARCH}',
+            '[[ -s "$SOURCE_DIR/input.json" ]] || { echo "ERROR: missing input.json"; exit 2; }',
+            '[[ ! -e "$SMOKE_DIR" ]] || { echo "ERROR: refusing to overwrite $SMOKE_DIR"; exit 2; }',
+            'mkdir -p "$SMOKE_DIR"',
+            'container_python - "$SOURCE_DIR/input.json" "$SMOKE_DIR/input.json" '
+            '"${SMOKE_STEPS:-20}" <<\'PY\'',
+            "import json",
+            "import sys",
+            "from pathlib import Path",
+            "source, target, steps = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3])",
+            "data = json.loads(source.read_text())",
+            'data["training"]["numb_steps"] = steps',
+            'data["training"]["disp_freq"] = 1',
+            'data["training"]["save_freq"] = max(1, steps)',
+            'target.write_text(json.dumps(data, indent=2) + "\\n")',
+            "PY",
+            'cd "$SMOKE_DIR"',
+            f"dp_exec {backend_flag} train input.json",
+            (
+                f'if [[ "$ARCH" == "dpa4" ]]; then '
+                f"dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name} "
+                f'|| echo "WARNING: DPA-4 smoke trained but freeze failed."; '
+                f"else dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name}; fi"
+            ),
+            '[[ "$ARCH" == "dpa4" && ! -s ' + frozen_name + " ]] && exit 0",
+            "mkdir -p test_results",
+            f"mapfile -t TEST_SYSTEMS < {shlex.quote(str(root / 'test_systems.txt'))}",
+            'for TEST_INDEX in "${!TEST_SYSTEMS[@]}"; do',
+            "  printf -v TEST_LABEL 'system_%03d' \"$TEST_INDEX\"",
+            '  mkdir -p "test_results/${TEST_LABEL}"',
+            f'  dp_exec {backend_flag} test -m {frozen_name} '
+            '-s "${TEST_SYSTEMS[$TEST_INDEX]}" -n 100 '
+            '-d "test_results/${TEST_LABEL}/detail" '
+            '> "test_results/${TEST_LABEL}.log" 2>&1',
+            "done",
+            'echo "DeepMD smoke test passed for $ARCH"',
+        ]
+    )
+    smoke = render_job(
+        profile,
+        profile_name,
+        command=smoke_command,
+        job_name=f"{campaign.name}_deepmd_smoke",
+        array=f"0-{len(architectures) - 1}%1",
+        working_directory=str(root),
+    )
+    write_job(root / "run_smoke.slurm", smoke, force=force)
+
+    evaluation_command = "\n".join(
+        [
+            prefix,
+            f"ARCHITECTURES=({architectures_array})",
+            f"NMODELS={committee}",
+            'ARCH="${ARCHITECTURES[${SLURM_ARRAY_TASK_ID:?Submit with sbatch}]}"',
+            f'EVAL_ROOT={shlex.quote(str(root))}/evaluation/${{ARCH}}/job_${{SLURM_JOB_ID}}',
+            'mkdir -p "$EVAL_ROOT/by_system"',
+            "MODELS=()",
+            'for MODEL_INDEX in $(seq 0 $((NMODELS - 1))); do',
+            "  printf -v MODEL_ID '%03d' \"$MODEL_INDEX\"",
+            f'  MODEL={shlex.quote(str(root))}/${{ARCH}}/model_${{MODEL_ID}}/{frozen_name}',
+            '  [[ -s "$MODEL" ]] || { echo "ERROR: missing $MODEL"; exit 2; }',
+            '  MODELS+=("$MODEL")',
+            "done",
+            f"mapfile -t TEST_SYSTEMS < {shlex.quote(str(root / 'test_systems.txt'))}",
+            'for TEST_INDEX in "${!TEST_SYSTEMS[@]}"; do',
+            "  printf -v TEST_LABEL 'system_%03d' \"$TEST_INDEX\"",
+            '  SYSTEM_ROOT="$EVAL_ROOT/by_system/$TEST_LABEL"',
+            '  mkdir -p "$SYSTEM_ROOT"',
+            '  for MODEL_INDEX in "${!MODELS[@]}"; do',
+            "    printf -v MODEL_LABEL 'model_%03d' \"$MODEL_INDEX\"",
+            f'    dp_exec {backend_flag} test -m "${{MODELS[$MODEL_INDEX]}}" '
+            '-s "${TEST_SYSTEMS[$TEST_INDEX]}" -n 0 '
+            '-d "$SYSTEM_ROOT/${MODEL_LABEL}_detail" '
+            '> "$SYSTEM_ROOT/${MODEL_LABEL}.log" 2>&1',
+            "  done",
+            f'  dp_exec {backend_flag} model-devi -m "${{MODELS[@]}}" '
+            '-s "${TEST_SYSTEMS[$TEST_INDEX]}" '
+            '-o "$SYSTEM_ROOT/model_devi.out" --real_error '
+            '> "$SYSTEM_ROOT/model_devi.log" 2>&1',
+            "done",
+            'echo "DeepMD committee evaluation completed for $ARCH"',
+        ]
+    )
+    evaluation = render_job(
+        profile,
+        profile_name,
+        command=evaluation_command,
+        job_name=f"{campaign.name}_deepmd_evaluate",
+        array=f"0-{len(architectures) - 1}%1",
+        working_directory=str(root),
+    )
+    write_job(root / "run_evaluate.slurm", evaluation, force=force)
+
+    test_systems_path = root / "test_systems.txt"
+    test_systems_path.write_text(
+        "".join(f"{path}\n" for path in split_systems["test"]),
+        encoding="utf-8",
+    )
+    manifest = {
+        "schema_version": 1,
+        "engine": "deepmd",
+        "campaign": campaign.name,
+        "backend": backend,
+        "backend_flag": backend_flag,
+        "architectures": architectures,
+        "dataset_root": str(dataset_root),
+        "type_map": type_map,
+        "split_systems": {name: len(values) for name, values in split_systems.items()},
+        "models": models,
+        "launcher": str(root / "run_ensemble.slurm"),
+        "preflight_launcher": str(root / "run_preflight.slurm"),
+        "smoke_launcher": str(root / "run_smoke.slurm"),
+        "evaluation_launcher": str(root / "run_evaluate.slurm"),
+        "execution_order": [
+            "run_preflight.slurm",
+            "run_smoke.slurm",
+            "run_ensemble.slurm",
+            "run_evaluate.slurm",
+        ],
+        "test_systems": str(test_systems_path),
+        "frozen_model_name": frozen_name,
+        "gpu_memory_controls": {
+            "DP_INFER_BATCH_SIZE": "profile-controlled; default 4096",
+            "TF_FORCE_GPU_ALLOW_GROWTH": "profile-controlled; default true",
+        },
+        "dpa4_status": (
+            "experimental; verify freeze and LAMMPS deployment before production"
+            if "dpa4" in architectures
+            else "not requested"
+        ),
+    }
+    manifest_path = root / "ensemble_manifest.json"
+    _write_json(manifest_path, manifest)
+    StateStore(campaign.root).artifact("deepmd_training_manifest", manifest_path)
+    return manifest

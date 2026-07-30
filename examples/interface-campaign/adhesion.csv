@@ -1,0 +1,3 @@
+case,model,interface_energy_ev,slab_a_energy_ev,slab_b_energy_ev,area_a2,interface_sigma_ev,slab_a_sigma_ev,slab_b_sigma_ev
+primary,dft,-102.4,-50.1,-49.8,64.0,0,0,0
+primary,mace,-102.2,-50.0,-49.7,64.0,0.08,0.04,0.04

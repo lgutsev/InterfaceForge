@@ -1,0 +1,80 @@
+schema_version: 1
+
+project:
+  name: nitride-interface-demo
+  description: Example bulk/surface/interface DFT-to-MLIP campaign
+
+profile: ../../profiles/loni.yaml
+
+reference:
+  engine: vasp
+  functional: PBE
+  inputs:
+    INCAR: inputs/INCAR
+    KPOINTS: inputs/KPOINTS
+    POTCAR: inputs/POTCAR
+
+systems:
+  - id: bulk_a_300k
+    kind: bulk
+    structure: structures/bulk_a.vasp
+    temperature: 300
+    tags: {material: phase_a}
+  - id: slab_a_300k
+    kind: surface
+    structure: structures/slab_a.vasp
+    temperature: 300
+    tags: {surface: "001"}
+  - id: interface_ab_300k
+    kind: interface
+    structure: structures/interface_ab.vasp
+    temperature: 300
+    tags: {termination: primary}
+
+stages:
+  vasp_mlff:
+    enabled: true
+    train: {nsw: 3000, potim: 1.0, profile: vasp_workq}
+    refit: {profile: vasp_workq}
+    stability: {nsw: 5000, potim: 1.0, profile: vasp_workq}
+
+dataset:
+  strategy: grouped
+  stride: 5
+  ratios: [0.8, 0.1, 0.1]
+  guard_frames: 20
+  preserve_raw_forces: true
+  include_virial: false
+  type_map: []
+
+models:
+  mace:
+    enabled: true
+    profile: mace_gpu
+    batch_size: 16
+    max_num_epochs: 200
+    stage2_max_num_epochs: 100
+  deepmd:
+    enabled: true
+    profile: deepmd_gpu
+    backend: pytorch
+    architectures: [dpa2, dpa3]
+    committee: 4
+    seeds: [11, 23, 37, 53]
+    numb_steps: 500000
+    batch_atoms: 1024
+    max_concurrent: 2
+    container_image: /path/to/deepmd-kit.sif
+
+exploration:
+  temperatures: [300, 450, 600, 900]
+  strains: [-0.03, 0.0, 0.03]
+  replicas: 2
+
+validation:
+  parity: true
+  short_md_steps: 10000
+  work_of_adhesion: true
+  separation_curve: true
+  rdf: true
+  coordination: true

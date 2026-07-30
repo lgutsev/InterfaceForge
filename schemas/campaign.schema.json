@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lgutsev/InterfaceForge/raw/main/schemas/campaign.schema.json",
+  "title": "InterfaceForge campaign",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project", "profile", "reference", "systems", "dataset"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "project": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "description": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "profile": {"type": "string", "minLength": 1},
+    "reference": {
+      "type": "object",
+      "required": ["engine"],
+      "properties": {
+        "engine": {"const": "vasp"},
+        "functional": {"type": "string"},
+        "inputs": {"type": "object", "additionalProperties": {"type": "string"}}
+      },
+      "additionalProperties": true
+    },
+    "systems": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "structure"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+          "kind": {
+            "enum": ["bulk", "surface", "interface", "molecule", "adsorbate", "other"]
+          },
+          "structure": {"type": "string", "minLength": 1},
+          "temperature": {"type": "number"},
+          "tags": {"type": "object"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "stages": {"type": "object"},
+    "dataset": {
+      "type": "object",
+      "properties": {
+        "strategy": {"enum": ["grouped", "guarded"]},
+        "stride": {"type": "integer", "minimum": 1},
+        "ratios": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"type": "number", "minimum": 0}
+        },
+        "guard_frames": {"type": "integer", "minimum": 0},
+        "preserve_raw_forces": {"const": true},
+        "include_virial": {"type": "boolean"},
+        "type_map": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      },
+      "additionalProperties": true
+    },
+    "models": {"type": "object"},
+    "exploration": {"type": "object"},
+    "validation": {"type": "object"}
+  }
+}

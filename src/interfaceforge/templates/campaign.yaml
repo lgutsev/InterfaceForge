@@ -1,0 +1,90 @@
+schema_version: 1
+
+project:
+  name: example-interface
+  description: Reproducible DFT-to-MLIP interface campaign
+
+profile: profiles/loni.yaml
+
+reference:
+  engine: vasp
+  functional: PBE
+  inputs:
+    INCAR: inputs/INCAR
+    KPOINTS: inputs/KPOINTS
+    POTCAR: inputs/POTCAR
+
+systems:
+  - id: bulk_a_300k
+    kind: bulk
+    structure: structures/bulk_a.vasp
+    temperature: 300
+    tags:
+      material: phase_a
+  - id: bulk_b_300k
+    kind: bulk
+    structure: structures/bulk_b.vasp
+    temperature: 300
+    tags:
+      material: phase_b
+  - id: interface_ab_300k
+    kind: interface
+    structure: structures/interface_ab.vasp
+    temperature: 300
+    tags:
+      termination: primary
+
+stages:
+  vasp_mlff:
+    enabled: true
+    train:
+      nsw: 3000
+      potim: 1.0
+      profile: vasp_workq
+    refit:
+      profile: vasp_workq
+    stability:
+      nsw: 3000
+      profile: vasp_workq
+
+dataset:
+  strategy: grouped
+  stride: 5
+  ratios: [0.8, 0.1, 0.1]
+  guard_frames: 20
+  preserve_raw_forces: true
+  include_virial: false
+  type_map: []
+
+models:
+  mace:
+    enabled: true
+    profile: mace_gpu
+    train_file: datasets/canonical/train.extxyz
+    valid_file: datasets/canonical/valid.extxyz
+    batch_size: 16
+    max_num_epochs: 200
+    stage2_max_num_epochs: 100
+  deepmd:
+    enabled: true
+    profile: deepmd_gpu
+    backend: tensorflow
+    descriptor: dpa1
+    architectures: [dpa1]
+    committee: 4
+    seeds: [11, 23, 37, 53]
+    numb_steps: 500000
+    batch_atoms: 1024
+
+exploration:
+  temperatures: [300, 450, 600]
+  strains: [-0.03, 0.0, 0.03]
+  replicas: 2
+
+validation:
+  parity: true
+  short_md_steps: 10000
+  work_of_adhesion: true
+  separation_curve: true
+  rdf: true
+  coordination: true

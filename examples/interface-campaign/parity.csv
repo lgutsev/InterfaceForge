@@ -1,0 +1,5 @@
+model,property,reference,predicted
+mace,energy_per_atom,-8.210,-8.205
+mace,energy_per_atom,-8.035,-8.041
+deepmd_dpa2,energy_per_atom,-8.210,-8.208
+deepmd_dpa2,energy_per_atom,-8.035,-8.038

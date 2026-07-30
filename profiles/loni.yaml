@@ -1,0 +1,69 @@
+name: loni
+scheduler: slurm
+
+jobs:
+  vasp_workq:
+    partition: workq
+    account: YOUR_LONI_ACCOUNT
+    nodes: 1
+    ntasks: 64
+    cpus_per_task: 1
+    time: "72:00:00"
+    modules:
+      - vasp6/6.5.1-cpu
+    environment:
+      OMP_NUM_THREADS: "1"
+      SINGULARITYENV_OMP_NUM_THREADS: "1"
+    command: "srun -n {ntasks} vasp_gam"
+
+  vasp_bigmem:
+    partition: bigmem
+    account: YOUR_LONI_ACCOUNT
+    nodes: 2
+    ntasks: 128
+    cpus_per_task: 1
+    time: "48:00:00"
+    modules:
+      - vasp6/6.5.1-cpu
+    environment:
+      OMP_NUM_THREADS: "1"
+      SINGULARITYENV_OMP_NUM_THREADS: "1"
+    command: "srun -n {ntasks} vasp_gam"
+
+  mace_gpu:
+    partition: gpu2
+    account: YOUR_LONI_ACCOUNT
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 8
+    gpus: 1
+    time: "72:00:00"
+    modules: []
+    preamble:
+      - 'source "${MACE_ACTIVATE_SCRIPT:?Set MACE_ACTIVATE_SCRIPT}"'
+    environment:
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      PYTHONUNBUFFERED: "1"
+
+  deepmd_gpu:
+    partition: gpu2
+    account: YOUR_LONI_ACCOUNT
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 8
+    gpus: 1
+    time: "72:00:00"
+    modules: []
+    preamble:
+      - 'if [[ -n "${DEEPMD_ACTIVATE_SCRIPT:-}" ]]; then source "${DEEPMD_ACTIVATE_SCRIPT}"; fi'
+    environment:
+      OMP_NUM_THREADS: "8"
+      TF_INTRA_OP_PARALLELISM_THREADS: "8"
+      TF_INTER_OP_PARALLELISM_THREADS: "2"
+      DP_INFER_BATCH_SIZE: "4096"
+      TF_FORCE_GPU_ALLOW_GROWTH: "true"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      CUDA_DEVICE_ORDER: "PCI_BUS_ID"
+      PYTHONUNBUFFERED: "1"
