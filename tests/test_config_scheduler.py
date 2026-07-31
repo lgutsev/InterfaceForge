@@ -11,10 +11,17 @@ from interfaceforge.errors import ConfigurationError, SafetyError
 from interfaceforge.scheduler import render_job
 
 
-def write_campaign(root: Path, *, deepmd: dict | None = None, preserve: bool = True) -> Path:
+def write_campaign(
+    root: Path,
+    *,
+    deepmd: dict | None = None,
+    mace: dict | None = None,
+    preserve: bool = True,
+    scheduler: str = "slurm",
+) -> Path:
     profile = {
         "name": "test",
-        "scheduler": "slurm",
+        "scheduler": scheduler,
         "jobs": {
             "deepmd_gpu": {
                 "partition": "gpu",
@@ -61,7 +68,10 @@ def write_campaign(root: Path, *, deepmd: dict | None = None, preserve: bool = T
             "ratios": [0.8, 0.1, 0.1],
             "preserve_raw_forces": preserve,
         },
-        "models": {"deepmd": deepmd or {"enabled": False}},
+        "models": {
+            "deepmd": deepmd or {"enabled": False},
+            "mace": mace or {"enabled": False},
+        },
     }
     path = root / "campaign.yaml"
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
@@ -108,6 +118,25 @@ class ConfigTests(unittest.TestCase):
         self.assertIn('${SLURM_ARRAY_TASK_ID:?missing}', script)
         self.assertIn("f() { echo", script)
         self.assertIn("srun -n 2 true", script)
+
+    def test_local_scheduler_rejects_array_jobs(self) -> None:
+        # A local job script has no SLURM_ARRAY_TASK_ID; silently dropping
+        # the `array` request (as the old code did) produced a script that
+        # fails confusingly at runtime instead of at generation time.
+        profile = {
+            "scheduler": "local",
+            "jobs": {"gpu": {"command": "dp train input.json"}},
+        }
+        with self.assertRaises(ConfigurationError):
+            render_job(profile, "gpu", array="0-3")
+
+    def test_local_scheduler_without_array_still_works(self) -> None:
+        profile = {
+            "scheduler": "local",
+            "jobs": {"gpu": {"command": "dp train input.json"}},
+        }
+        script = render_job(profile, "gpu")
+        self.assertIn("dp train input.json", script)
 
 
 if __name__ == "__main__":

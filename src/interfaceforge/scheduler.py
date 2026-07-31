@@ -47,6 +47,11 @@ def render_job(
         raise ConfigurationError(f"No command configured for profile job {job_key!r}")
 
     if scheduler == "local":
+        if array is not None:
+            raise ConfigurationError(
+                f"Job {job_key!r} requests a Slurm array ({array!r}), but the local "
+                "scheduler has no SLURM_ARRAY_TASK_ID; use a Slurm profile instead"
+            )
         return (
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"

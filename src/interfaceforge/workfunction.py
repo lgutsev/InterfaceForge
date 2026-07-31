@@ -43,7 +43,11 @@ def analyze_workfunction(
     density = VaspChargeDensity(str(input_path))
     cell = density.atoms[0].cell
     lengths = np.linalg.norm(cell, axis=1)
-    volume = float(np.linalg.det(cell))
+    # ASE's VaspChargeDensity divides every raw grid value (LOCPOT included) by
+    # atoms.get_volume(), which is abs(det(cell)). Multiplying back by a signed
+    # determinant would flip the sign of the recovered potential for a
+    # left-handed cell, so this must match ASE's own convention exactly.
+    volume = float(abs(np.linalg.det(cell)))
     average_axes = tuple(index for index in (0, 1, 2) if index != axis_index)
     potential = np.mean(density.chg[0], axis=average_axes) * volume
     distance = np.linspace(0, lengths[axis_index], potential.shape[0], endpoint=False)

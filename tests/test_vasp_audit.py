@@ -6,7 +6,13 @@ import zipfile
 from pathlib import Path
 
 from interfaceforge.audit import audit_run
-from interfaceforge.vasp import apply_incar_preset, package_outputs, parse_incar, update_incar
+from interfaceforge.vasp import (
+    apply_incar_preset,
+    package_outputs,
+    parse_incar,
+    prepare_recovery,
+    update_incar,
+)
 
 
 class VaspTests(unittest.TestCase):
@@ -43,6 +49,23 @@ class VaspTests(unittest.TestCase):
             with zipfile.ZipFile(output) as archive:
                 self.assertIn("INCAR", archive.namelist())
                 self.assertNotIn("POTCAR", archive.namelist())
+
+    def test_continue_recovery_does_not_self_copy_only_ml_ab(self) -> None:
+        # When ML_ABN is absent/empty, _continue_source() falls back to
+        # ML_AB itself; recovery must not shutil.copy2() that file onto
+        # itself (shutil.SameFileError) when rebuilding it as the source.
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text("ML_MODE=train\nNSW=10\nTEBEG=300\n", encoding="utf-8")
+            (run / "POTCAR").write_text("licensed\n", encoding="utf-8")
+            (run / "KPOINTS").write_text("Automatic\n0\nGamma\n1 1 1\n", encoding="utf-8")
+            (run / "CONTCAR").write_text("dummy contcar\n", encoding="utf-8")
+            (run / "ML_AB").write_text("dummy ml_ab payload\n", encoding="utf-8")
+
+            result = prepare_recovery(run, "continue")
+
+            self.assertEqual(result["operation"], "continue")
+            self.assertEqual((run / "ML_AB").read_text(encoding="utf-8"), "dummy ml_ab payload\n")
 
     def test_mode_aware_audit_recognizes_completed_training(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

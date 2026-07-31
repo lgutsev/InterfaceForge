@@ -357,7 +357,9 @@ def prepare_recovery(
     _clean_outputs(run)
 
     if operation in {"continue", "expand", "refit"}:
-        shutil.copy2(source, run / "ML_AB")
+        destination = run / "ML_AB"
+        if source != destination:
+            shutil.copy2(source, destination)
         for name in ("ML_ABN", "ML_FF", "ML_FFN"):
             (run / name).unlink(missing_ok=True)
     else:

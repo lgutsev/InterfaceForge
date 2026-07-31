@@ -2,19 +2,140 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
-from interfaceforge.data import SourceTrajectory, assign_grouped, guarded_assignments
+import interfaceforge.data as data_module
+from interfaceforge.config import load_campaign
+from interfaceforge.data import (
+    SourceTrajectory,
+    _has_constraint_source,
+    assign_grouped,
+    collect_dataset,
+    discover_outcars,
+    guarded_assignments,
+)
 from interfaceforge.selection import select_indices
 from interfaceforge.validation import (
     EV_A2_TO_J_M2,
     parity_from_csv,
     work_of_adhesion,
 )
+
+sys.path.insert(0, str(Path(__file__).parent))
+from test_config_scheduler import write_campaign  # noqa: E402
+
+
+class _FakeCell:
+    def __init__(self, array: np.ndarray) -> None:
+        self.array = array
+
+
+class _FakeAtoms:
+    """Minimal ASE-Atoms stand-in so collect_dataset can be exercised
+    end-to-end without depending on the optional `ase` package."""
+
+    def __init__(self, symbols: list[str], positions: np.ndarray, cell: np.ndarray) -> None:
+        self._symbols = list(symbols)
+        self.arrays: dict[str, np.ndarray] = {"positions": np.asarray(positions, dtype=float)}
+        self.cell = _FakeCell(np.asarray(cell, dtype=float))
+        self.info: dict = {}
+        self.constraints: list = []
+        self.calc = None
+
+    def __len__(self) -> int:
+        return len(self._symbols)
+
+    @property
+    def positions(self) -> np.ndarray:
+        return self.arrays["positions"]
+
+    def get_chemical_symbols(self) -> list[str]:
+        return list(self._symbols)
+
+    def get_potential_energy(self) -> float:
+        return -1.0
+
+    def get_forces(self, apply_constraint: bool = True) -> np.ndarray:
+        return np.zeros((len(self), 3))
+
+    def get_volume(self) -> float:
+        return float(np.linalg.det(self.cell.array))
+
+    def copy(self) -> _FakeAtoms:
+        clone = _FakeAtoms(self._symbols, self.arrays["positions"].copy(), self.cell.array.copy())
+        clone.info = dict(self.info)
+        clone.constraints = list(self.constraints)
+        return clone
+
+
+def _fake_ase_io():
+    def fake_iread(path: str, index: str = ":"):
+        yield _FakeAtoms(["H"], np.array([[0.0, 0.0, 0.0]]), np.eye(3) * 5.0)
+
+    def fake_write(path: str, atoms: _FakeAtoms, *, format: str, append: bool) -> None:
+        mode = "a" if append else "w"
+        with open(path, mode, encoding="utf-8") as handle:
+            handle.write(f"frame natoms={len(atoms)}\n")
+
+    return fake_iread, fake_write
+
+
+class ConstraintSourceTests(unittest.TestCase):
+    def test_missing_contcar_and_poscar_is_detected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            outcar = run / "OUTCAR"
+            outcar.write_text("", encoding="utf-8")
+            self.assertFalse(_has_constraint_source(outcar))
+            (run / "POSCAR").write_text("", encoding="utf-8")
+            self.assertTrue(_has_constraint_source(outcar))
+
+    def test_collect_dataset_warns_when_constraints_are_unrecoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = load_campaign(write_campaign(root))
+            source_root = root / "vasp_runs" / "run_a"
+            source_root.mkdir(parents=True)
+            (source_root / "OUTCAR").write_text("", encoding="utf-8")
+            # Deliberately no CONTCAR/POSCAR beside OUTCAR.
+
+            with patch.object(data_module, "_ase_io", side_effect=_fake_ase_io):
+                payload = collect_dataset(
+                    campaign,
+                    source_root=root / "vasp_runs",
+                    output_root=root / "canonical",
+                )
+
+            with (Path(payload["output_root"]) / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertIn("Selective Dynamics constraints", rows[0]["warnings"])
+            self.assertIn("move_mask marks every atom as mobile", rows[0]["warnings"])
+
+
+class RunIdCollisionTests(unittest.TestCase):
+    def test_colliding_sanitized_names_get_unique_run_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            # "system_A" and "system A" both sanitize to run_id "system_A".
+            (root / "system_A").mkdir()
+            (root / "system_A" / "OUTCAR").write_text("", encoding="utf-8")
+            (root / "system A").mkdir()
+            (root / "system A" / "OUTCAR").write_text("", encoding="utf-8")
+
+            sources = discover_outcars(root)
+
+            self.assertEqual(len(sources), 2)
+            run_ids = [source.run_id for source in sources]
+            self.assertEqual(len(set(run_ids)), 2, f"run_ids collided: {run_ids}")
+            self.assertIn("system_A", run_ids)
+            self.assertTrue(any(run_id.startswith("system_A__dup") for run_id in run_ids))
 
 
 class SplitTests(unittest.TestCase):

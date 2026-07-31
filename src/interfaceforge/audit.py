@@ -21,6 +21,17 @@ RUN_MARKERS = ("INCAR", "OUTCAR", "OSZICAR", "ML_LOGFILE", "ML_AB", "ML_ABN", "M
 EXCLUDED_PARTS = {".interfaceforge", "restart_archive", "refit_archive", "stability_archive"}
 MAX_TEXT_BYTES = 80 * 1024 * 1024
 
+# Heuristic health thresholds used by assess(). These are conservative
+# defaults for typical VASP-MLFF on-the-fly campaigns, not values derived
+# from a specific validation study; treat them as a starting point that may
+# need site- or system-specific tuning rather than a scientific ground truth.
+LEARNING_RATE_HEAVY_PCT = 40.0
+LEARNING_RATE_MODERATE_PCT = 15.0
+LEARNING_RATE_NEAR_REFIT_PCT = 3.0
+SFF_STRONG_EXTRAPOLATION = 0.8
+SFF_SUBSTANTIAL_EXTRAPOLATION = 0.2
+SFF_MODERATE_EXTRAPOLATION = 0.05
+
 
 def read_tail(path: Path, max_bytes: int = MAX_TEXT_BYTES) -> str:
     if not path.is_file():
@@ -184,11 +195,11 @@ def assess(row: dict[str, Any]) -> Assessment:
         rate = row["learning_event_rate_pct"]
         if rate is None:
             return Assessment("training complete; status unclear", "Inspect STATUS records, then refit.")
-        if rate >= 40:
+        if rate >= LEARNING_RATE_HEAVY_PCT:
             return Assessment("still learning heavily", "Continue focused on-the-fly training.")
-        if rate >= 15:
+        if rate >= LEARNING_RATE_MODERATE_PCT:
             return Assessment("moderately undertrained", "Run one or two focused continuation stages.")
-        if rate >= 3:
+        if rate >= LEARNING_RATE_NEAR_REFIT_PCT:
             return Assessment("near refit/validation", "Consider one continuation, then refit and validate.")
         return Assessment("ready to refit and test", "Refit, run stability MD, and validate against held-out DFT.")
     if mode == "refit":
@@ -207,11 +218,11 @@ def assess(row: dict[str, Any]) -> Assessment:
         spilling = row.get("sff_max_atom_max")
         if spilling is None:
             return Assessment("run completed; no SFF", "Enable ML_ESTBLOCK and perform held-out validation.")
-        if spilling >= 0.8:
+        if spilling >= SFF_STRONG_EXTRAPOLATION:
             return Assessment("strong extrapolation", "Stop before breakdown and relabel representative frames.")
-        if spilling >= 0.2:
+        if spilling >= SFF_SUBSTANTIAL_EXTRAPOLATION:
             return Assessment("substantial extrapolation", "Inspect and relabel high-SFF frames.")
-        if spilling >= 0.05:
+        if spilling >= SFF_MODERATE_EXTRAPOLATION:
             return Assessment("moderate extrapolation", "Prioritize high-SFF frames for DFT checks.")
         return Assessment("stable within represented space", "Proceed to paired DFT/ML validation.")
     return Assessment("unknown mode", "Set or inspect ML_MODE; supported modes are train, refit, and run.")

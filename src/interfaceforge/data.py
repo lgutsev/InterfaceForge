@@ -10,7 +10,7 @@ import re
 import shutil
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +82,29 @@ def normalize_ratios(values: Sequence[float]) -> dict[str, float]:
     return {split: value / total for split, value in zip(SPLITS, ratios, strict=True)}
 
 
+def _deduplicate_run_ids(discovered: list[SourceTrajectory]) -> list[SourceTrajectory]:
+    """Disambiguate run_ids that collide after safe_name() sanitization.
+
+    Two distinct trajectory directories (e.g. "system-A" and "system_A")
+    can sanitize to the same run_id. Left alone, _write_deepmd_system()'s
+    mkdir(exist_ok=False) would crash with a confusing FileExistsError, or
+    worse, mix two unrelated systems' frames under one directory. The first
+    occurrence of a run_id keeps it unchanged; later collisions get a
+    deterministic suffix.
+    """
+
+    seen: dict[str, int] = {}
+    deduplicated: list[SourceTrajectory] = []
+    for source in discovered:
+        count = seen.get(source.run_id, 0)
+        seen[source.run_id] = count + 1
+        if count == 0:
+            deduplicated.append(source)
+        else:
+            deduplicated.append(replace(source, run_id=f"{source.run_id}__dup{count + 1}"))
+    return deduplicated
+
+
 def discover_outcars(
     root: str | Path,
     *,
@@ -114,7 +137,7 @@ def discover_outcars(
         discovered.append(
             SourceTrajectory(path=path, run_id=run_id, category=category, group=group)
         )
-    return discovered
+    return _deduplicate_run_ids(discovered)
 
 
 def assign_grouped(
@@ -211,6 +234,18 @@ def guarded_assignments(
             guards.update(range(cursor, cursor + guard_frames))
             cursor += guard_frames
     return assignment, guards
+
+
+def _has_constraint_source(outcar_path: Path) -> bool:
+    """Report whether ASE can recover Selective Dynamics constraints.
+
+    OUTCAR does not carry Selective Dynamics flags itself; ASE's OUTCAR
+    reader only recovers them by reading a sibling CONTCAR (preferred) or
+    POSCAR in the same directory. Without one of those files, every atom's
+    constraint mask silently comes back empty, i.e. all-mobile.
+    """
+
+    return any((outcar_path.parent / name).is_file() for name in ("CONTCAR", "POSCAR"))
 
 
 def _constraint_mask(atoms: Any) -> np.ndarray:
@@ -366,6 +401,11 @@ def collect_dataset(
     global_frame_rows: list[dict[str, Any]] = []
     for trajectory_index, source_trajectory in enumerate(sources):
         record = CollectionRecord(source=source_trajectory)
+        if not _has_constraint_source(source_trajectory.path):
+            record.warnings.append(
+                "no CONTCAR/POSCAR beside OUTCAR: Selective Dynamics constraints "
+                "are unavailable, so move_mask marks every atom as mobile"
+            )
         frames = list(iter_frames(source_trajectory.path, stride=stride, include_virial=include_virial))
         record.frames_seen = frames[-1].source_index + 1 if frames else 0
         record.frames_retained = len(frames)
