@@ -81,6 +81,29 @@ exploration:
   strains: [-0.03, 0.0, 0.03]
   replicas: 2
 
+active_learning:
+  enabled: false
+  engine: ai2kit
+  approval_required: true
+  max_iterations: 1
+  output_root: runs/active_learning/ai2kit
+  ai2kit:
+    version: "1.0.9"
+    executor_name: loni
+    trainer: deepmd
+    explorer: lammps
+    labeler: vasp
+    selector: model_deviation
+    architecture: se_e2_a
+    backend: tensorflow
+    model_count: 4
+    training_artifacts: [datasets/canonical/deepmd/train]
+    validation_artifacts: [datasets/canonical/deepmd/valid]
+    exploration_artifacts: [structures/interface_ab.vasp]
+    trust_force_low: 0.15
+    trust_force_high: 0.30
+    selection_limit: 20
+
 validation:
   parity: true
   short_md_steps: 10000

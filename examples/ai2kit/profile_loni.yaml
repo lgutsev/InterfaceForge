@@ -1,0 +1,17 @@
+name: loni-ai2kit
+scheduler: slurm
+ai2kit:
+  ssh: {host: "YOUR_USER@YOUR_LONI_LOGIN"}
+  work_dir: /project/YOUR_PROJECT/ai2kit-work
+  python_cmd: /project/YOUR_PROJECT/envs/ai2kit/bin/python
+  commands: {ai2kit: ai2-kit, deepmd: dp, lammps: lmp, vasp: vasp_std}
+  jobs: {train: deepmd_gpu, explore: lammps_gpu, label: vasp_cpu}
+  potcar_source:
+    H: /project/YOUR_PROJECT/potcars/H/POTCAR
+    O: /project/YOUR_PROJECT/potcars/O/POTCAR
+  explore_concurrency: 1
+  label_concurrency: 1
+jobs:
+  deepmd_gpu: {partition: gpu2, account: YOUR_ACCOUNT, nodes: 1, ntasks: 1, cpus_per_task: 8, gpus: 1, time: "04:00:00", modules: []}
+  lammps_gpu: {partition: gpu2, account: YOUR_ACCOUNT, nodes: 1, ntasks: 1, cpus_per_task: 8, gpus: 1, time: "04:00:00", modules: []}
+  vasp_cpu: {partition: workq, account: YOUR_ACCOUNT, nodes: 1, ntasks: 64, cpus_per_task: 1, time: "04:00:00", modules: [vasp6/6.5.1-cpu]}

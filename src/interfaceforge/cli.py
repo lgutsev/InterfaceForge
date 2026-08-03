@@ -11,6 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .ai2kit import (
+    adapter_status,
+    approve_round,
+    export_adapter,
+    preflight_adapter,
+    run_adapter,
+    stage_import,
+)
 from .audit import run_audit
 from .campaign import build_plan, prepare_campaign, submit_campaign
 from .config import load_campaign
@@ -181,6 +189,51 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_report(args: argparse.Namespace) -> int:
     _json(build_report(_campaign(args), output=args.output))
+    return 0
+
+
+def cmd_ai2kit(args: argparse.Namespace) -> int:
+    campaign = _campaign(args)
+    output_root = getattr(args, "adapter_output", None)
+    if args.ai2kit_command == "export":
+        payload = export_adapter(
+            campaign,
+            output=args.output,
+            force=args.force,
+        )
+    elif args.ai2kit_command == "preflight":
+        payload = preflight_adapter(
+            campaign,
+            output_root=output_root,
+            remote=args.remote,
+            report_output=args.output,
+        )
+        _json(payload)
+        return 0 if payload["passed"] else 2
+    elif args.ai2kit_command == "run":
+        payload = run_adapter(
+            campaign,
+            output_root=output_root,
+            execute=args.execute,
+            resume=args.resume,
+            allow_multiple_iterations=args.allow_multiple_iterations,
+        )
+    elif args.ai2kit_command == "status":
+        payload = adapter_status(campaign, output_root=output_root)
+    elif args.ai2kit_command == "import":
+        payload = stage_import(
+            campaign,
+            round_number=args.round_number,
+            result_root=args.result_root,
+            output_root=output_root,
+        )
+    else:
+        payload = approve_round(
+            campaign,
+            round_number=args.round_number,
+            output_root=output_root,
+        )
+    _json(payload)
     return 0
 
 
@@ -431,6 +484,48 @@ def build_parser() -> argparse.ArgumentParser:
     add_campaign_option(report)
     report.add_argument("--output")
     report.set_defaults(func=cmd_report)
+
+    active_learning = commands.add_parser(
+        "active-learning", help="Optional supervised active-learning adapters"
+    )
+    active_backends = active_learning.add_subparsers(dest="active_backend", required=True)
+    ai2kit = active_backends.add_parser(
+        "ai2kit", help="AI2-Kit 1.0.9 DeepMD/LAMMPS/VASP closed-loop adapter"
+    )
+    ai2kit_commands = ai2kit.add_subparsers(dest="ai2kit_command", required=True)
+    ai2kit_export = ai2kit_commands.add_parser("export", help="Generate deterministic CLL configuration")
+    add_campaign_option(ai2kit_export)
+    ai2kit_export.add_argument("--output")
+    ai2kit_export.add_argument("--force", action="store_true")
+    ai2kit_export.set_defaults(func=cmd_ai2kit)
+    ai2kit_preflight = ai2kit_commands.add_parser("preflight", help="Check adapter and engine compatibility")
+    add_campaign_option(ai2kit_preflight)
+    ai2kit_preflight.add_argument("--adapter-output")
+    ai2kit_preflight.add_argument("--remote", action="store_true")
+    ai2kit_preflight.add_argument("--output", help="Optional preflight JSON path")
+    ai2kit_preflight.set_defaults(func=cmd_ai2kit)
+    ai2kit_run = ai2kit_commands.add_parser("run", help="Dry-run by default; execute only explicitly")
+    add_campaign_option(ai2kit_run)
+    ai2kit_run.add_argument("--adapter-output")
+    ai2kit_run.add_argument("--execute", action="store_true")
+    ai2kit_run.add_argument("--resume", action="store_true")
+    ai2kit_run.add_argument("--allow-multiple-iterations", action="store_true")
+    ai2kit_run.set_defaults(func=cmd_ai2kit)
+    ai2kit_status = ai2kit_commands.add_parser("status", help="Read safe manifest and log status")
+    add_campaign_option(ai2kit_status)
+    ai2kit_status.add_argument("--adapter-output")
+    ai2kit_status.set_defaults(func=cmd_ai2kit)
+    ai2kit_import = ai2kit_commands.add_parser("import", help="Stage labeled results without dataset mutation")
+    add_campaign_option(ai2kit_import)
+    ai2kit_import.add_argument("--adapter-output")
+    ai2kit_import.add_argument("--round", dest="round_number", type=int, required=True)
+    ai2kit_import.add_argument("--result-root", required=True)
+    ai2kit_import.set_defaults(func=cmd_ai2kit)
+    ai2kit_approve = ai2kit_commands.add_parser("approve", help="Approve one reviewed staged round")
+    add_campaign_option(ai2kit_approve)
+    ai2kit_approve.add_argument("--adapter-output")
+    ai2kit_approve.add_argument("--round", dest="round_number", type=int, required=True)
+    ai2kit_approve.set_defaults(func=cmd_ai2kit)
 
     vasp = commands.add_parser("vasp", help="Safe VASP utilities")
     vasp_commands = vasp.add_subparsers(dest="vasp_command", required=True)
