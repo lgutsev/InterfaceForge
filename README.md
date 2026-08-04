@@ -112,6 +112,7 @@ iface vasp geom freeze slab.vasp POSCAR --axis z --upper 5 --region inside
 iface vasp restart run/ --clean-electronic
 iface vasp recover continue run/ --temperature 450 --nsw 3000
 iface vasp recover expand run/ --ml-mb 12000
+iface vasp beef-plot runs/vasp --individual
 iface vasp band scf/ bands/ --kpoints KPOINTS.line
 iface vasp workfunction LOCPOT OUTCAR --plot-output workfunction.png
 iface vasp pack campaign_outputs.zip --root runs/vasp

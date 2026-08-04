@@ -20,6 +20,7 @@ from .ai2kit import (
     stage_import,
 )
 from .audit import run_audit
+from .beef import plot_beef_campaign
 from .campaign import build_plan, prepare_campaign, submit_campaign
 from .config import load_campaign
 from .data import collect_dataset
@@ -358,6 +359,20 @@ def cmd_vasp_submit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_vasp_beef_plot(args: argparse.Namespace) -> int:
+    _json(
+        plot_beef_campaign(
+            args.root,
+            output=args.output,
+            data_output=args.data_output,
+            include_archives=args.include_archives,
+            individual=args.individual,
+            dpi=args.dpi,
+        )
+    )
+    return 0
+
+
 def cmd_geom(args: argparse.Namespace) -> int:
     if args.geometry == "convert":
         payload = convert_structure(
@@ -649,6 +664,16 @@ def build_parser() -> argparse.ArgumentParser:
     vsubmit.add_argument("folder")
     vsubmit.add_argument("--launcher", default="run.slurm")
     vsubmit.set_defaults(func=cmd_vasp_submit)
+    beef_plot = vasp_commands.add_parser(
+        "beef-plot", help="Plot campaign Bayesian force errors and ML_CTIFOR"
+    )
+    beef_plot.add_argument("root", nargs="?", default=".")
+    beef_plot.add_argument("-o", "--output")
+    beef_plot.add_argument("--data-output")
+    beef_plot.add_argument("--include-archives", action="store_true")
+    beef_plot.add_argument("--individual", action="store_true")
+    beef_plot.add_argument("--dpi", type=int, default=160)
+    beef_plot.set_defaults(func=cmd_vasp_beef_plot)
     workfunction = vasp_commands.add_parser("workfunction", help="Analyze planar-averaged LOCPOT")
     workfunction.add_argument("locpot")
     workfunction.add_argument("outcar")

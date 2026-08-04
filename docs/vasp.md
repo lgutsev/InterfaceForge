@@ -48,5 +48,26 @@ Use `iface audit ROOT --include-archives` (or the same option with
 `iface status`) when historical archived runs should be inspected explicitly.
 InterfaceForge's internal `.interfaceforge` state directory is always excluded.
 
+## Bayesian-error plots
+
+`iface vasp beef-plot ROOT` restores the campaign-level diagnostic formerly
+provided by `ML_BayesianErrorPlot`. It reads every active `ML_LOGFILE`, uses
+each run's `POTIM` to convert steps to femtoseconds, and writes:
+
+- `ML_BayesianErrorPlot_campaign.png`, with one panel per run;
+- `ML_BayesianErrorPlot_campaign.csv`, containing the complete plotted series.
+
+Each panel shows the maximum Bayesian force-error estimate, contemporaneous
+`ML_CTIFOR`, and learning/critical event markers. Archive directories are
+excluded by default; use `--include-archives` to include them. Add
+`--individual` for separate per-run PNGs. Plotting requires the `report` or
+`all` installation extra.
+
+```bash
+iface vasp beef-plot runs/vasp
+iface vasp beef-plot runs/vasp --individual
+iface vasp beef-plot runs/vasp --include-archives -o historical_beef.png
+```
+
 The audit gives triage guidance, not a scientific acceptance certificate.
 Held-out DFT energies/forces and interface observables remain required.
