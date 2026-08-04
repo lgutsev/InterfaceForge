@@ -46,7 +46,8 @@ Run directories with `archive` anywhere in their relative path are excluded by
 default, so recovery snapshots do not distort the current campaign summary.
 Use `iface audit ROOT --include-archives` (or the same option with
 `iface status`) when historical archived runs should be inspected explicitly.
-InterfaceForge's internal `.interfaceforge` state directory is always excluded.
+InterfaceForge's internal state remains excluded, except that recovery snapshots
+below `.interfaceforge/archive` are included when `--include-archives` is set.
 
 ## Bayesian-error plots
 
@@ -62,6 +63,11 @@ Each panel shows the maximum Bayesian force-error estimate, contemporaneous
 excluded by default; use `--include-archives` to include them. Add
 `--individual` for separate per-run PNGs. Plotting requires the `report` or
 `all` installation extra.
+
+Recovery commands move the preceding `ML_LOGFILE` below
+`.interfaceforge/archive` before starting a clean segment. Consequently, use
+`--include-archives` to plot the completed historical segments while a newly
+prepared continuation has not yet written BEEF records.
 
 ```bash
 iface vasp beef-plot runs/vasp

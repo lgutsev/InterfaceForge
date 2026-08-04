@@ -100,7 +100,10 @@ class VaspTests(unittest.TestCase):
                 (run / "INCAR").write_text("ML_MODE=train\n", encoding="utf-8")
 
             self.assertEqual(find_runs(root), [active])
-            self.assertEqual(find_runs(root, include_archives=True), [active, legacy_archive])
+            self.assertEqual(
+                set(find_runs(root, include_archives=True)),
+                {active, legacy_archive, internal_archive},
+            )
 
     def test_archive_named_ancestor_outside_root_does_not_hide_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

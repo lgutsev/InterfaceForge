@@ -18,7 +18,6 @@ from .state import StateStore
 from .vasp import parse_incar
 
 RUN_MARKERS = ("INCAR", "OUTCAR", "OSZICAR", "ML_LOGFILE", "ML_AB", "ML_ABN", "ML_FF", "ML_FFN")
-ALWAYS_EXCLUDED_PARTS = {".interfaceforge"}
 MAX_TEXT_BYTES = 80 * 1024 * 1024
 
 # Heuristic health thresholds used by assess(). These are conservative
@@ -264,9 +263,13 @@ def _excluded(path: Path, root: Path, *, include_archives: bool) -> bool:
         parts = path.relative_to(root).parts
     except ValueError:
         parts = path.parts
-    if any(part.lower() in ALWAYS_EXCLUDED_PARTS for part in parts):
-        return True
-    return not include_archives and any("archive" in part.lower() for part in parts)
+    lowered = tuple(part.lower() for part in parts)
+    if ".interfaceforge" in lowered:
+        interfaceforge_index = lowered.index(".interfaceforge")
+        recovery_archive = "archive" in lowered[interfaceforge_index + 1 :]
+        if not (include_archives and recovery_archive):
+            return True
+    return not include_archives and any("archive" in part for part in lowered)
 
 
 def find_runs(

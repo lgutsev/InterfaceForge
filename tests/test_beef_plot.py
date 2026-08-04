@@ -45,11 +45,13 @@ class BeefPlotTests(unittest.TestCase):
             root = Path(temporary)
             active = root / "active"
             archived = root / "active" / "expand_archive_20260728"
+            recovery_archive = root / "active" / ".interfaceforge" / "archive" / "continue_20260804"
             write_run(active)
             write_run(archived, scale=2.0)
+            write_run(recovery_archive, scale=1.5)
 
             self.assertEqual([item.run for item in discover_beef_series(root)], [active])
-            self.assertEqual(len(discover_beef_series(root, include_archives=True)), 2)
+            self.assertEqual(len(discover_beef_series(root, include_archives=True)), 3)
 
     def test_cli_parses_campaign_plot_options(self) -> None:
         args = build_parser().parse_args(
