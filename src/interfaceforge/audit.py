@@ -18,7 +18,7 @@ from .state import StateStore
 from .vasp import parse_incar
 
 RUN_MARKERS = ("INCAR", "OUTCAR", "OSZICAR", "ML_LOGFILE", "ML_AB", "ML_ABN", "ML_FF", "ML_FFN")
-EXCLUDED_PARTS = {".interfaceforge", "restart_archive", "refit_archive", "stability_archive"}
+ALWAYS_EXCLUDED_PARTS = {".interfaceforge"}
 MAX_TEXT_BYTES = 80 * 1024 * 1024
 
 # Heuristic health thresholds used by assess(). These are conservative
@@ -31,6 +31,27 @@ LEARNING_RATE_NEAR_REFIT_PCT = 3.0
 SFF_STRONG_EXTRAPOLATION = 0.8
 SFF_SUBSTANTIAL_EXTRAPOLATION = 0.2
 SFF_MODERATE_EXTRAPOLATION = 0.05
+
+AT_A_GLANCE_COLUMNS = (
+    ("run", "Run"),
+    ("relative_path", "Relative path"),
+    ("ml_mode", "Mode"),
+    ("progress_pct", "Progress (%)"),
+    ("md_steps", "MD steps"),
+    ("nsw_target", "NSW target"),
+    ("finished_normally", "Finished normally"),
+    ("health", "Health"),
+    ("learning_event_rate_pct", "Learning events (%)"),
+    ("critical_events", "Critical events"),
+    ("bayesian_force_error_ev_a_last", "BEEF last (eV/A)"),
+    ("bayesian_force_error_ev_a_max", "BEEF max (eV/A)"),
+    ("ml_ctifor_ev_a_last", "ML_CTIFOR last (eV/A)"),
+    ("true_force_error_ev_a_last", "True force error last (eV/A)"),
+    ("sff_max_atom_max", "SFF max"),
+    ("lconf_max", "LCONF max"),
+    ("warnings", "Warnings"),
+    ("next_action", "Next action"),
+)
 
 
 def read_tail(path: Path, max_bytes: int = MAX_TEXT_BYTES) -> str:
@@ -228,18 +249,43 @@ def assess(row: dict[str, Any]) -> Assessment:
     return Assessment("unknown mode", "Set or inspect ML_MODE; supported modes are train, refit, and run.")
 
 
-def _excluded(path: Path) -> bool:
-    return any(part in EXCLUDED_PARTS or part.endswith("_archive") for part in path.parts)
+def _excluded(path: Path, root: Path, *, include_archives: bool) -> bool:
+    """Return whether a descendant should be omitted from run discovery.
+
+    Archive filtering is evaluated relative to the requested audit root. This
+    prevents an unrelated ancestor such as ``/project/archive_storage`` from
+    hiding an otherwise valid campaign. The root itself is always eligible
+    because passing an archive directory directly is an explicit request.
+    """
+
+    if path == root:
+        return False
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        parts = path.parts
+    if any(part.lower() in ALWAYS_EXCLUDED_PARTS for part in parts):
+        return True
+    return not include_archives and any("archive" in part.lower() for part in parts)
 
 
-def find_runs(root: str | Path, recursive: bool = True) -> list[Path]:
+def find_runs(
+    root: str | Path,
+    recursive: bool = True,
+    *,
+    include_archives: bool = False,
+) -> list[Path]:
     campaign_root = Path(root).resolve()
     candidates: Iterable[Path] = campaign_root.rglob("*") if recursive else campaign_root.iterdir()
     runs: set[Path] = set()
     if any((campaign_root / marker).exists() for marker in RUN_MARKERS):
         runs.add(campaign_root)
     for path in candidates:
-        if path.is_dir() and not _excluded(path) and any((path / marker).exists() for marker in RUN_MARKERS):
+        if (
+            path.is_dir()
+            and not _excluded(path, campaign_root, include_archives=include_archives)
+            and any((path / marker).exists() for marker in RUN_MARKERS)
+        ):
             runs.add(path)
     return sorted(runs)
 
@@ -291,11 +337,68 @@ def _clean(value: Any) -> Any:
     return value
 
 
+def _at_a_glance_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {label: row.get(key) for key, label in AT_A_GLANCE_COLUMNS}
+
+
+def _write_workbook(
+    path: Path,
+    summary_rows: list[dict[str, Any]],
+    full_rows: list[dict[str, Any]],
+) -> bool:
+    """Write a two-sheet Excel audit when the optional report dependency exists."""
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.worksheet.table import Table, TableStyleInfo
+    except ImportError:
+        return False
+
+    workbook = Workbook()
+    summary_sheet = workbook.active
+    summary_sheet.title = "At a glance"
+    full_sheet = workbook.create_sheet("Full audit")
+
+    def populate(sheet: Any, rows: list[dict[str, Any]], fields: list[str], table_name: str) -> None:
+        sheet.append(fields)
+        for row in rows:
+            sheet.append([row.get(field) for field in fields])
+        sheet.freeze_panes = "A2"
+        sheet.auto_filter.ref = sheet.dimensions
+        for cell in sheet[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="1F4E78")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        for column in sheet.columns:
+            values = ["" if cell.value is None else str(cell.value) for cell in column]
+            width = min(max(max(map(len, values), default=0) + 2, 10), 48)
+            sheet.column_dimensions[column[0].column_letter].width = width
+        if rows:
+            table = Table(displayName=table_name, ref=sheet.dimensions)
+            table.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium2",
+                showFirstColumn=False,
+                showLastColumn=False,
+                showRowStripes=True,
+                showColumnStripes=False,
+            )
+            sheet.add_table(table)
+
+    summary_fields = [label for _, label in AT_A_GLANCE_COLUMNS]
+    full_fields = list(dict.fromkeys(key for row in full_rows for key in row)) or ["run"]
+    populate(summary_sheet, summary_rows, summary_fields, "AuditAtAGlance")
+    populate(full_sheet, full_rows, full_fields, "AuditFull")
+    workbook.save(path)
+    return True
+
+
 def run_audit(
     root: str | Path,
     *,
     output_dir: str | Path | None = None,
     recursive: bool = True,
+    include_archives: bool = False,
 ) -> dict[str, Any]:
     """Audit all detected runs and write JSON, CSV, and Markdown summaries."""
 
@@ -304,7 +407,11 @@ def run_audit(
     destination.mkdir(parents=True, exist_ok=True)
     rows = [
         {key: _clean(value) for key, value in audit_run(run, campaign_root).items()}
-        for run in find_runs(campaign_root, recursive)
+        for run in find_runs(
+            campaign_root,
+            recursive,
+            include_archives=include_archives,
+        )
     ]
     counts = Counter(row["health"] for row in rows)
     payload = {
@@ -317,6 +424,8 @@ def run_audit(
 
     json_path = destination / "audit.json"
     csv_path = destination / "audit.csv"
+    summary_csv_path = destination / "audit_summary.csv"
+    workbook_path = destination / "audit.xlsx"
     md_path = destination / "audit.md"
     json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     fields = list(dict.fromkeys(key for row in rows for key in row))
@@ -324,6 +433,13 @@ def run_audit(
         writer = csv.DictWriter(handle, fieldnames=fields or ["run"])
         writer.writeheader()
         writer.writerows(rows)
+    summary_rows = [_at_a_glance_row(row) for row in rows]
+    summary_fields = [label for _, label in AT_A_GLANCE_COLUMNS]
+    with summary_csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=summary_fields)
+        writer.writeheader()
+        writer.writerows(summary_rows)
+    workbook_written = _write_workbook(workbook_path, summary_rows, rows)
     markdown = ["# InterfaceForge VASP audit\n", f"Audited **{len(rows)}** run folder(s).\n"]
     if counts:
         markdown.extend(
@@ -347,6 +463,16 @@ def run_audit(
     state.event("audit", runs=len(rows), destination=str(destination))
     state.artifact("audit_json", json_path)
     state.artifact("audit_csv", csv_path)
+    state.artifact("audit_summary_csv", summary_csv_path)
+    if workbook_written:
+        state.artifact("audit_workbook", workbook_path)
     state.artifact("audit_markdown", md_path)
-    payload["outputs"] = {"json": str(json_path), "csv": str(csv_path), "markdown": str(md_path)}
+    payload["outputs"] = {
+        "json": str(json_path),
+        "csv": str(csv_path),
+        "summary_csv": str(summary_csv_path),
+        "markdown": str(md_path),
+    }
+    if workbook_written:
+        payload["outputs"]["workbook"] = str(workbook_path)
     return payload

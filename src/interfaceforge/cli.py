@@ -113,13 +113,23 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
-    payload = run_audit(args.root, output_dir=args.output, recursive=not args.shallow)
+    payload = run_audit(
+        args.root,
+        output_dir=args.output,
+        recursive=not args.shallow,
+        include_archives=args.include_archives,
+    )
     _json({key: payload[key] for key in ("run_count", "health_counts", "outputs")})
     return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    payload = run_audit(args.root, output_dir=args.output, recursive=True)
+    payload = run_audit(
+        args.root,
+        output_dir=args.output,
+        recursive=True,
+        include_archives=args.include_archives,
+    )
     for row in payload["runs"]:
         progress = "" if row["progress_pct"] is None else f"{row['progress_pct']:.1f}%"
         print(f"{row['relative_path']:<52} {row['ml_mode']:<7} {progress:<8} {row['health']}")
@@ -452,12 +462,22 @@ def build_parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="Compact VASP campaign status")
     status.add_argument("root", nargs="?", default=".")
     status.add_argument("--output")
+    status.add_argument(
+        "--include-archives",
+        action="store_true",
+        help="Include run folders whose relative path contains 'archive'",
+    )
     status.set_defaults(func=cmd_status)
 
     audit = commands.add_parser("audit", help="Mode-aware VASP-MLFF audit")
     audit.add_argument("root", nargs="?", default=".")
     audit.add_argument("-o", "--output")
     audit.add_argument("--shallow", action="store_true")
+    audit.add_argument(
+        "--include-archives",
+        action="store_true",
+        help="Include run folders whose relative path contains 'archive'",
+    )
     audit.set_defaults(func=cmd_audit)
 
     collect = commands.add_parser("collect", help="Create synchronized extxyz and DeePMD datasets")

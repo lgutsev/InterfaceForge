@@ -5,7 +5,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from interfaceforge.audit import audit_run
+from interfaceforge.audit import audit_run, find_runs, run_audit
 from interfaceforge.vasp import (
     apply_incar_preset,
     package_outputs,
@@ -88,6 +88,46 @@ class VaspTests(unittest.TestCase):
             self.assertEqual(row["ml_mode"], "train")
             self.assertEqual(row["progress_pct"], 100.0)
             self.assertEqual(row["health"], "ready to refit and test")
+
+    def test_run_discovery_excludes_archives_unless_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "campaign"
+            active = root / "FAPI_001_PBGCl"
+            legacy_archive = root / "FAPI_001_PBGCl_old" / "expand_archive_20260728_125535"
+            internal_archive = root / "FAPI_001_PBGCl" / ".interfaceforge" / "archive" / "continue_20260728"
+            for run in (active, legacy_archive, internal_archive):
+                run.mkdir(parents=True, exist_ok=True)
+                (run / "INCAR").write_text("ML_MODE=train\n", encoding="utf-8")
+
+            self.assertEqual(find_runs(root), [active])
+            self.assertEqual(find_runs(root, include_archives=True), [active, legacy_archive])
+
+    def test_archive_named_ancestor_outside_root_does_not_hide_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "archive_storage" / "campaign"
+            active = root / "active_run"
+            active.mkdir(parents=True)
+            (active / "INCAR").write_text("ML_MODE=train\n", encoding="utf-8")
+
+            self.assertEqual(find_runs(root), [active])
+
+    def test_audit_writes_compact_summary_alongside_full_table(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "campaign"
+            run = root / "active_run"
+            run.mkdir(parents=True)
+            (run / "INCAR").write_text("ML_MODE=train\nNSW=2\n", encoding="utf-8")
+            (run / "OSZICAR").write_text(" 1 T= 300 E= -1\n", encoding="utf-8")
+            (run / "ML_LOGFILE").write_text("STATUS accepted\n", encoding="utf-8")
+
+            payload = run_audit(root)
+
+            summary = Path(payload["outputs"]["summary_csv"])
+            full = Path(payload["outputs"]["csv"])
+            self.assertTrue(summary.is_file())
+            self.assertTrue(full.is_file())
+            self.assertLess(len(summary.read_text().split(",")), len(full.read_text().split(",")))
+            self.assertIn("Next action", summary.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
