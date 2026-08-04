@@ -1,0 +1,4 @@
+split,source_run,source_frame,cycle_id,coefficient,scale_ev
+train,interface_ab_300k,120,adhesion_120,1,1.0
+train,slab_a_300k,80,adhesion_120,-1,1.0
+train,slab_b_300k,95,adhesion_120,-1,1.0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -160,6 +161,83 @@ def _validate_models(models: dict[str, Any]) -> None:
     if mace:
         mace["batch_size"] = int(mace.get("batch_size", 16))
         mace["max_num_epochs"] = int(mace.get("max_num_epochs", 200))
+        mace["stage2_max_num_epochs"] = int(mace.get("stage2_max_num_epochs", 100))
+        if mace["batch_size"] < 1:
+            raise ConfigurationError("models.mace.batch_size must be positive")
+        if mace["max_num_epochs"] < 1:
+            raise ConfigurationError("models.mace.max_num_epochs must be positive")
+        if mace["stage2_max_num_epochs"] < 1:
+            raise ConfigurationError("models.mace.stage2_max_num_epochs must be positive")
+
+        roi = _mapping(mace.get("roi"), "models.mace.roi")
+        if roi:
+            roi["enabled"] = bool(roi.get("enabled", False))
+            roi["cutoff"] = float(roi.get("cutoff", 3.5))
+            roi["interface_multiplier"] = float(roi.get("interface_multiplier", 4.0))
+            roi["shell_depth"] = int(roi.get("shell_depth", 0))
+            if not math.isfinite(roi["cutoff"]) or roi["cutoff"] <= 0:
+                raise ConfigurationError("models.mace.roi.cutoff must be positive")
+            if (
+                not math.isfinite(roi["interface_multiplier"])
+                or roi["interface_multiplier"] < 1
+            ):
+                raise ConfigurationError(
+                    "models.mace.roi.interface_multiplier must be at least one"
+                )
+            if roi["shell_depth"] < 0:
+                raise ConfigurationError("models.mace.roi.shell_depth cannot be negative")
+
+            for key in ("cycle_weight", "stage1_cycle_weight", "stage2_cycle_weight"):
+                if key not in roi:
+                    continue
+                roi[key] = float(roi[key])
+                if not math.isfinite(roi[key]) or roi[key] < 0:
+                    raise ConfigurationError(
+                        f"models.mace.roi.{key} must be finite and non-negative"
+                    )
+
+            ranges = roi.get("component_ranges", [])
+            range_groups = ranges.values() if isinstance(ranges, Mapping) else [ranges]
+            if not isinstance(ranges, (list, Mapping)):
+                raise ConfigurationError(
+                    "models.mace.roi.component_ranges must be a range list or source-pattern mapping"
+                )
+            if isinstance(ranges, Mapping) and any(not str(pattern) for pattern in ranges):
+                raise ConfigurationError(
+                    "models.mace.roi.component_ranges source patterns cannot be empty"
+                )
+            for group in range_groups:
+                if not isinstance(group, list):
+                    raise ConfigurationError(
+                        "Each models.mace.roi.component_ranges value must be a list"
+                    )
+                for bounds in group:
+                    if not isinstance(bounds, list) or len(bounds) != 2:
+                        raise ConfigurationError(
+                            "MACE-ROI component ranges must be [start, stop] pairs"
+                        )
+                    try:
+                        start, stop = int(bounds[0]), int(bounds[1])
+                    except (TypeError, ValueError) as exc:
+                        raise ConfigurationError(
+                            "MACE-ROI component range bounds must be integers"
+                        ) from exc
+                    if any(
+                        isinstance(value, bool)
+                        or (isinstance(value, float) and not value.is_integer())
+                        for value in bounds
+                    ):
+                        raise ConfigurationError(
+                            "MACE-ROI component range bounds must be integers"
+                        )
+                    if start < 0 or stop <= start:
+                        raise ConfigurationError(
+                            "MACE-ROI component ranges must satisfy 0 <= start < stop"
+                        )
+            roi["component_key"] = str(roi.get("component_key", "IF_component"))
+            if not roi["component_key"]:
+                raise ConfigurationError("models.mace.roi.component_key cannot be empty")
+            mace["roi"] = roi
         models["mace"] = mace
 
 

@@ -157,6 +157,7 @@ class TrainingTests(unittest.TestCase):
             campaign = load_campaign(write_campaign(root, mace={"enabled": True}))
             manifest = generate_mace_training(campaign)
             stage2_script = Path(manifest["stages"][1]["launcher"]).read_text(encoding="utf-8")
+            self.assertIn("--max_num_epochs=300", stage2_script)
 
             guard_start = stage2_script.index("if [[ ! -d")
             guard_end = stage2_script.index("fi\n", guard_start) + len("fi\n")

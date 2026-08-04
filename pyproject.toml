@@ -38,8 +38,9 @@ dependencies = [
 
 [project.optional-dependencies]
 vasp = ["ase>=3.23"]
+mace-roi = ["ase>=3.23", "mace-torch>=0.3.17,<0.4"]
 report = ["matplotlib>=3.7", "openpyxl>=3.1"]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["ase>=3.23", "pytest>=8", "ruff>=0.6"]
 all = [
   "ase>=3.23",
   "matplotlib>=3.7",
@@ -48,6 +49,7 @@ all = [
 
 [project.scripts]
 iface = "interfaceforge.cli:main"
+iface-mace-roi = "interfaceforge.mace_roi:main"
 
 [project.urls]
 Homepage = "https://github.com/lgutsev/InterfaceForge"

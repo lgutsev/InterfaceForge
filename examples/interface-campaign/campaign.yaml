@@ -25,6 +25,11 @@ systems:
     structure: structures/slab_a.vasp
     temperature: 300
     tags: {surface: "001"}
+  - id: slab_b_300k
+    kind: surface
+    structure: structures/slab_b.vasp
+    temperature: 300
+    tags: {surface: "001"}
   - id: interface_ab_300k
     kind: interface
     structure: structures/interface_ab.vasp
@@ -54,6 +59,19 @@ models:
     batch_size: 16
     max_num_epochs: 200
     stage2_max_num_epochs: 100
+    roi:
+      enabled: false
+      source_dir: datasets/canonical
+      output_dir: datasets/mace_roi
+      cutoff: 3.5
+      interface_multiplier: 4.0
+      shell_depth: 1
+      component_key: IF_component
+      component_ranges:
+        "*interface_ab*": [[0, 72], [72, 144]]
+      cycle_manifest: mace-roi-cycles.csv
+      stage1_cycle_weight: 0.25
+      stage2_cycle_weight: 1.0
   deepmd:
     enabled: true
     profile: deepmd_gpu

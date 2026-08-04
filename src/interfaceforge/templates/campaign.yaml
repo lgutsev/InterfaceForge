@@ -65,6 +65,16 @@ models:
     batch_size: 16
     max_num_epochs: 200
     stage2_max_num_epochs: 100
+    roi:
+      enabled: false
+      source_dir: datasets/canonical
+      output_dir: datasets/mace_roi
+      cutoff: 3.5
+      interface_multiplier: 4.0
+      shell_depth: 0
+      component_key: IF_component
+      component_ranges: {}
+      cycle_weight: 0.0
   deepmd:
     enabled: true
     profile: deepmd_gpu

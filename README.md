@@ -17,7 +17,7 @@ pseudopotentials.
 | VASP preparation | static, relaxation, DFT-MD, DOS and line-band setup; geometry conversion, supercells, slabs, duplicate checks and Selective Dynamics |
 | VASP-MLFF | train → refit → stability scaffolding, continuation/capacity recovery, mode-aware audits |
 | Dataset | streaming OUTCAR collection, leakage-resistant splits, synchronized extxyz and DeePMD NPY layouts |
-| MACE | two-stage energy/force training with restartable Slurm jobs |
+| MACE | two-stage energy/force training; optional interface-local force weighting and thermodynamic-cycle loss |
 | DeePMD | DPA-1, DPA-2, DPA-3 and experimental DPA-4 committees; TensorFlow/PyTorch backends; preflight → smoke → full → evaluation |
 | Active learning | thermodynamic exploration matrix and uncertainty-plus-diversity labeling queue |
 | Validation | parity metrics, work of adhesion with uncertainty propagation, rigid-separation curves |
@@ -35,6 +35,7 @@ pip install -e ".[all]"
 
 For configuration, audits and validation only, `pip install -e .` is enough.
 ASE-backed geometry and OUTCAR collection require `.[vasp]`.
+Experimental MACE-ROI training requires `pip install -e ".[mace-roi]"`.
 
 ## Ten-minute start
 
@@ -57,6 +58,15 @@ iface train mace
 iface train deepmd
 ```
 
+For interface-local and thermodynamic-cycle-aware MACE training, configure
+`models.mace.roi`, then prepare the immutable derived data before generating
+jobs:
+
+```bash
+iface mace-roi prepare
+iface train mace
+```
+
 The generated DeePMD jobs have an intentional order:
 
 ```bash
@@ -75,6 +85,8 @@ verified.
 
 - Reference forces are read with constraints unapplied. Frozen atoms remain
   represented in `REF_forces`; mobility is stored separately as `move_mask`.
+- MACE-ROI metadata is written to a hashed derived dataset. Canonical labels
+  remain unchanged, and thermodynamic cycles cannot cross data splits.
 - The default split assigns whole trajectories, so nearby MD frames do not leak
   across train/validation/test. A guarded contiguous-block strategy is also
   available.
@@ -127,7 +139,8 @@ commands correctly use the public `--pt` switch.
 
 See [the campaign format](docs/campaign.md),
 [the VASP guide](docs/vasp.md), and
-[the DeePMD guide](docs/deepmd.md). A complete editable configuration is in
+[the DeePMD guide](docs/deepmd.md). The experimental method is documented in
+[the MACE-ROI guide](docs/mace-roi.md). A complete editable configuration is in
 [examples/interface-campaign/campaign.yaml](examples/interface-campaign/campaign.yaml).
 
 ## Development

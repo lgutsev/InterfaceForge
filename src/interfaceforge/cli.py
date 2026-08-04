@@ -26,6 +26,7 @@ from .geometry import (
     structure_summary,
     write_summary,
 )
+from .mace_roi import evaluate_mace_roi_predictions, prepare_mace_roi_dataset
 from .report import build_report
 from .selection import select_from_csv
 from .training import generate_deepmd_training, generate_mace_training
@@ -138,6 +139,33 @@ def cmd_train(args: argparse.Namespace) -> int:
         else generate_deepmd_training(campaign, force=args.force)
     )
     _json(payload)
+    return 0
+
+
+def cmd_mace_roi_prepare(args: argparse.Namespace) -> int:
+    _json(
+        prepare_mace_roi_dataset(
+            _campaign(args),
+            source_root=args.source,
+            output_root=args.output,
+            cycle_manifest=args.cycles,
+            force=args.force,
+        )
+    )
+    return 0
+
+
+def cmd_mace_roi_evaluate(args: argparse.Namespace) -> int:
+    _json(
+        evaluate_mace_roi_predictions(
+            args.source,
+            args.output,
+            reference_energy_key=args.reference_energy_key,
+            predicted_energy_key=args.predicted_energy_key,
+            reference_forces_key=args.reference_forces_key,
+            predicted_forces_key=args.predicted_forces_key,
+        )
+    )
     return 0
 
 
@@ -386,6 +414,30 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--seed", type=int, default=20260730)
     collect.add_argument("--force", action="store_true")
     collect.set_defaults(func=cmd_collect)
+
+    mace_roi = commands.add_parser(
+        "mace-roi", help="Prepare region- and thermodynamic-cycle-aware MACE data"
+    )
+    mace_roi_commands = mace_roi.add_subparsers(dest="mace_roi_command", required=True)
+    mace_roi_prepare = mace_roi_commands.add_parser(
+        "prepare", help="Create a derived extxyz dataset with MACE-ROI metadata"
+    )
+    add_campaign_option(mace_roi_prepare)
+    mace_roi_prepare.add_argument("--source")
+    mace_roi_prepare.add_argument("--output")
+    mace_roi_prepare.add_argument("--cycles")
+    mace_roi_prepare.add_argument("--force", action="store_true")
+    mace_roi_prepare.set_defaults(func=cmd_mace_roi_prepare)
+    mace_roi_evaluate = mace_roi_commands.add_parser(
+        "evaluate", help="Report global, interface-local and cycle prediction errors"
+    )
+    mace_roi_evaluate.add_argument("source")
+    mace_roi_evaluate.add_argument("output")
+    mace_roi_evaluate.add_argument("--reference-energy-key", default="REF_energy")
+    mace_roi_evaluate.add_argument("--predicted-energy-key", default="MACE_energy")
+    mace_roi_evaluate.add_argument("--reference-forces-key", default="REF_forces")
+    mace_roi_evaluate.add_argument("--predicted-forces-key", default="MACE_forces")
+    mace_roi_evaluate.set_defaults(func=cmd_mace_roi_evaluate)
 
     train = commands.add_parser("train", help="Generate model training campaigns")
     train.add_argument("engine", choices=("mace", "deepmd"))

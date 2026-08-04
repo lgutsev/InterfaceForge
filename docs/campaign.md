@@ -11,7 +11,8 @@ file, which makes a campaign movable between a workstation and a cluster.
 - `systems`: stable IDs, physical kinds, structure paths and optional metadata.
 - `stages.vasp_mlff`: train, refit and stability settings.
 - `dataset`: stride, split ratios, leakage strategy and type map.
-- `models`: MACE and DeePMD generation settings.
+- `models`: MACE and DeePMD generation settings. `models.mace.roi` enables the
+  derived-data and loss adapter described in the [MACE-ROI guide](mace-roi.md).
 - `exploration`: temperatures, strains and replicas.
 - `validation`: intended downstream property checks.
 

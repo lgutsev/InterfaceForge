@@ -13,7 +13,7 @@ import numpy as np
 from .config import Campaign, load_profile
 from .errors import SafetyError
 from .scheduler import render_job, write_job
-from .state import StateStore
+from .state import StateStore, sha256_file
 
 
 def _resolve(root: Path, value: str | Path) -> Path:
@@ -33,6 +33,51 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _mace_roi_dataset(
+    campaign: Campaign, settings: Mapping[str, Any]
+) -> tuple[Path, dict[str, Any]]:
+    roi = dict(settings.get("roi", {}))
+    dataset_root = _resolve(campaign.root, roi.get("output_dir", "datasets/mace_roi"))
+    manifest_path = dataset_root / "manifest.json"
+    if not manifest_path.is_file():
+        raise SafetyError(
+            f"MACE-ROI dataset is not prepared: {manifest_path}. "
+            "Run 'iface mace-roi prepare' first."
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise SafetyError(f"Could not read MACE-ROI manifest {manifest_path}: {exc}") from exc
+    if manifest.get("method") != "mace-roi":
+        raise SafetyError(f"Not an InterfaceForge MACE-ROI manifest: {manifest_path}")
+    recorded_output = Path(str(manifest.get("output_root", ""))).expanduser().resolve()
+    if recorded_output != dataset_root:
+        raise SafetyError(
+            f"MACE-ROI manifest records output {recorded_output}, not {dataset_root}"
+        )
+    source_root = Path(str(manifest.get("source_root", ""))).expanduser().resolve()
+    source_hashes = manifest.get("source_hashes", {})
+    expected_hashes = manifest.get("output_hashes", {})
+    for split in ("train", "valid", "test"):
+        source_path = source_root / f"{split}.extxyz"
+        source_hash = source_hashes.get(split)
+        if not source_path.is_file() or not source_hash or sha256_file(source_path) != source_hash:
+            raise SafetyError(
+                f"Canonical source changed after MACE-ROI preparation: {source_path}. "
+                "Re-run 'iface mace-roi prepare --force'."
+            )
+        path = dataset_root / f"{split}.extxyz"
+        if not path.is_file():
+            raise SafetyError(f"Missing prepared MACE-ROI split: {path}")
+        expected = expected_hashes.get(split)
+        if not expected or sha256_file(path) != expected:
+            raise SafetyError(
+                f"Prepared MACE-ROI split does not match its manifest: {path}. "
+                "Re-run 'iface mace-roi prepare --force'."
+            )
+    return dataset_root, manifest
+
+
 def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[str, Any]:
     """Generate two-stage MACE refinement launchers from the shared extxyz data."""
 
@@ -43,18 +88,27 @@ def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[s
     _prepare_root(root, force=force)
     profile = load_profile(campaign.profile_path)
     profile_name = str(settings.get("profile", "mace_gpu"))
-    train_file = _resolve(
-        campaign.root, settings.get("train_file", "datasets/canonical/train.extxyz")
-    )
-    valid_file = _resolve(
-        campaign.root, settings.get("valid_file", "datasets/canonical/valid.extxyz")
-    )
-    test_file = _resolve(
-        campaign.root, settings.get("test_file", "datasets/canonical/test.extxyz")
-    )
+    roi = dict(settings.get("roi", {}))
+    roi_enabled = bool(roi.get("enabled", False))
+    roi_manifest: dict[str, Any] | None = None
+    if roi_enabled:
+        dataset_root, roi_manifest = _mace_roi_dataset(campaign, settings)
+        train_file = dataset_root / "train.extxyz"
+        valid_file = dataset_root / "valid.extxyz"
+        test_file = dataset_root / "test.extxyz"
+    else:
+        train_file = _resolve(
+            campaign.root, settings.get("train_file", "datasets/canonical/train.extxyz")
+        )
+        valid_file = _resolve(
+            campaign.root, settings.get("valid_file", "datasets/canonical/valid.extxyz")
+        )
+        test_file = _resolve(
+            campaign.root, settings.get("test_file", "datasets/canonical/test.extxyz")
+        )
     e0s = settings.get("e0s", "average")
     common = [
-        "mace_run_train",
+        "iface-mace-roi" if roi_enabled else "mace_run_train",
         "--name=interfaceforge_mace",
         f"--train_file={shlex.quote(str(train_file))}",
         f"--valid_file={shlex.quote(str(valid_file))}",
@@ -70,6 +124,29 @@ def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[s
         f"--seed={int(settings.get('seed', 2026))}",
         "--restart_latest",
     ]
+    if roi_enabled:
+        common.extend(
+            [
+                "--loss=weighted",
+                "--if-roi-weight-key=IF_roi_weight",
+                "--if-cycle-id-key=IF_cycle_id",
+                "--if-cycle-coefficient-key=IF_cycle_coefficient",
+                "--if-cycle-scale-key=IF_cycle_scale_ev",
+                "--if-cycle-size-key=IF_cycle_size",
+            ]
+        )
+    stage1_cycle_weight = float(
+        roi.get("stage1_cycle_weight", roi.get("cycle_weight", 0.0))
+    )
+    stage2_cycle_weight = float(
+        roi.get("stage2_cycle_weight", roi.get("cycle_weight", 0.0))
+    )
+    if roi_enabled and max(stage1_cycle_weight, stage2_cycle_weight) > 0:
+        cycle_groups = int((roi_manifest or {}).get("cycles", {}).get("groups", 0))
+        if cycle_groups < 1:
+            raise SafetyError(
+                "MACE-ROI cycle weight is positive, but the prepared dataset has no cycles"
+            )
     stage1 = [
         *common,
         f"--max_num_epochs={int(settings.get('max_num_epochs', 200))}",
@@ -77,13 +154,21 @@ def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[s
         f"--forces_weight={float(settings.get('stage1_forces_weight', 100.0))}",
         f"--patience={int(settings.get('patience', 30))}",
     ]
+    if roi_enabled:
+        stage1.append(f"--if-cycle-weight={stage1_cycle_weight}")
+    stage1_epochs = int(settings.get("max_num_epochs", 200))
+    stage2_epochs = int(settings.get("stage2_max_num_epochs", 100))
     stage2 = [
         *common,
-        f"--max_num_epochs={int(settings.get('stage2_max_num_epochs', 100))}",
+        # MACE's restart epoch is absolute. Stage two therefore ends after
+        # stage1 + stage2 epochs instead of accidentally ending immediately.
+        f"--max_num_epochs={stage1_epochs + stage2_epochs}",
         f"--energy_weight={float(settings.get('stage2_energy_weight', 10.0))}",
         f"--forces_weight={float(settings.get('stage2_forces_weight', 50.0))}",
         f"--patience={int(settings.get('stage2_patience', 20))}",
     ]
+    if roi_enabled:
+        stage2.append(f"--if-cycle-weight={stage2_cycle_weight}")
     stages: list[dict[str, Any]] = []
     model_dir = root / "artifacts"
     for name, command in (("stage1", stage1), ("stage2", stage2)):
@@ -131,6 +216,22 @@ def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[s
         "valid_file": str(valid_file),
         "test_file": str(test_file),
         "force_labels": "raw DFT labels; constraints are not applied",
+        "method": "mace-roi" if roi_enabled else "mace",
+        "roi": (
+            {
+                "enabled": True,
+                "dataset_manifest": str(
+                    _resolve(campaign.root, roi.get("output_dir", "datasets/mace_roi"))
+                    / "manifest.json"
+                ),
+                "interface_multiplier": roi.get("interface_multiplier", 4.0),
+                "stage1_cycle_weight": stage1_cycle_weight,
+                "stage2_cycle_weight": stage2_cycle_weight,
+                "cycle_groups": int((roi_manifest or {}).get("cycles", {}).get("groups", 0)),
+            }
+            if roi_enabled
+            else {"enabled": False}
+        ),
         "stages": stages,
         "execution_order": ["stage1", "stage2"],
     }
