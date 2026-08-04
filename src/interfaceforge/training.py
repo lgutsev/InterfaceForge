@@ -147,21 +147,26 @@ def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[s
             raise SafetyError(
                 "MACE-ROI cycle weight is positive, but the prepared dataset has no cycles"
             )
+    stage1_epochs = int(settings.get("max_num_epochs", 200))
+    stage2_epochs = int(settings.get("stage2_max_num_epochs", 100))
+    if stage1_epochs < 1 or stage2_epochs < 1:
+        raise SafetyError("MACE stage epoch counts must be positive")
     stage1 = [
         *common,
-        f"--max_num_epochs={int(settings.get('max_num_epochs', 200))}",
+        f"--max_num_epochs={stage1_epochs}",
         f"--energy_weight={float(settings.get('stage1_energy_weight', 1.0))}",
         f"--forces_weight={float(settings.get('stage1_forces_weight', 100.0))}",
         f"--patience={int(settings.get('patience', 30))}",
     ]
     if roi_enabled:
         stage1.append(f"--if-cycle-weight={stage1_cycle_weight}")
-    stage1_epochs = int(settings.get("max_num_epochs", 200))
-    stage2_epochs = int(settings.get("stage2_max_num_epochs", 100))
     stage2 = [
         *common,
-        # MACE's restart epoch is absolute. Stage two therefore ends after
-        # stage1 + stage2 epochs instead of accidentally ending immediately.
+        # MACE interprets max_num_epochs as an absolute stopping epoch when
+        # --restart_latest is used. Stage 2 therefore has to stop after the
+        # stage-1 budget plus its own additional refinement budget; using the
+        # stage-2 value alone can make the restarted training loop run zero
+        # epochs (for example, restart at epoch 200 with a limit of 100).
         f"--max_num_epochs={stage1_epochs + stage2_epochs}",
         f"--energy_weight={float(settings.get('stage2_energy_weight', 10.0))}",
         f"--forces_weight={float(settings.get('stage2_forces_weight', 50.0))}",
@@ -260,7 +265,10 @@ def _validate_deepmd_set(set_dir: Path, natoms: int) -> None:
             raise SafetyError(f"Could not read {path}: {exc}") from exc
     virial_path = set_dir / "virial.npy"
     if virial_path.is_file():
-        arrays["virial.npy"] = np.load(virial_path)
+        try:
+            arrays["virial.npy"] = np.load(virial_path)
+        except (OSError, ValueError) as exc:
+            raise SafetyError(f"Could not read {virial_path}: {exc}") from exc
 
     frame_counts = {name: (array.shape[0] if array.ndim else 0) for name, array in arrays.items()}
     if len(set(frame_counts.values())) > 1:
@@ -269,7 +277,13 @@ def _validate_deepmd_set(set_dir: Path, natoms: int) -> None:
     if nframes == 0:
         raise SafetyError(f"{set_dir} has zero frames")
 
-    expected_columns = {"coord.npy": natoms * 3, "force.npy": natoms * 3, "box.npy": 9, "virial.npy": 9}
+    expected_columns = {
+        "coord.npy": natoms * 3,
+        "force.npy": natoms * 3,
+        "box.npy": 9,
+        "energy.npy": 1,
+        "virial.npy": 9,
+    }
     for name, expected in expected_columns.items():
         if name not in arrays:
             continue
@@ -280,7 +294,11 @@ def _validate_deepmd_set(set_dir: Path, natoms: int) -> None:
             )
 
     for name, array in arrays.items():
-        if not np.isfinite(array).all():
+        try:
+            finite = bool(np.isfinite(array).all())
+        except TypeError as exc:
+            raise SafetyError(f"Non-numeric values in {set_dir / name}") from exc
+        if not finite:
             raise SafetyError(f"Non-finite values in {set_dir / name}")
 
     determinants = np.linalg.det(arrays["box.npy"].reshape(nframes, 3, 3))
@@ -304,14 +322,32 @@ def validate_deepmd_dataset(root: Path) -> tuple[list[str], dict[str, list[str]]
         inventory[split_name] = [str(system.resolve()) for system in systems]
         for system in systems:
             current = (system / "type_map.raw").read_text(encoding="utf-8").split()
+            if not current:
+                raise SafetyError(f"Empty type_map.raw in {system}")
+            if len(set(current)) != len(current):
+                raise SafetyError(f"Duplicate entries in type_map.raw in {system}")
             if type_map is None:
                 type_map = current
             elif current != type_map:
                 raise SafetyError(f"Inconsistent type_map.raw in {system}")
-            natoms = len((system / "type.raw").read_text(encoding="utf-8").split())
+            type_tokens = (system / "type.raw").read_text(encoding="utf-8").split()
+            natoms = len(type_tokens)
             if natoms == 0:
                 raise SafetyError(f"Empty type.raw in {system}")
-            for set_dir in system.glob("set.*"):
+            try:
+                atom_types = [int(value) for value in type_tokens]
+            except ValueError as exc:
+                raise SafetyError(f"Non-integer atom type in {system / 'type.raw'}") from exc
+            invalid_types = sorted({value for value in atom_types if value < 0 or value >= len(current)})
+            if invalid_types:
+                raise SafetyError(
+                    f"Atom type indices {invalid_types} in {system / 'type.raw'} are outside "
+                    f"type_map.raw range 0..{len(current) - 1}"
+                )
+            set_dirs = sorted(path for path in system.glob("set.*") if path.is_dir())
+            if not set_dirs:
+                raise SafetyError(f"No set.* data directories in {system}")
+            for set_dir in set_dirs:
                 _validate_deepmd_set(set_dir, natoms)
     return type_map or [], inventory
 

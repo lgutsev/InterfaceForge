@@ -185,6 +185,24 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(present_result.returncode, 0, present_result.stderr)
             self.assertIn("guard passed", present_result.stdout)
 
+    def test_mace_stage2_epoch_limit_adds_refinement_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = load_campaign(
+                write_campaign(
+                    root,
+                    mace={
+                        "enabled": True,
+                        "max_num_epochs": 200,
+                        "stage2_max_num_epochs": 100,
+                    },
+                )
+            )
+            manifest = generate_mace_training(campaign)
+
+            self.assertIn("--max_num_epochs=200", manifest["stages"][0]["command"])
+            self.assertIn("--max_num_epochs=300", manifest["stages"][1]["command"])
+
     def test_validate_deepmd_dataset_accepts_well_formed_data(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -234,6 +252,38 @@ class TrainingTests(unittest.TestCase):
             energy_path = root / "datasets/canonical/deepmd/train/system/set.000/energy.npy"
             np.save(energy_path, np.zeros((2, 1)))  # coord/box/force all have 1 frame
             with self.assertRaisesRegex(SafetyError, "Inconsistent frame counts"):
+                validate_deepmd_dataset(root / "datasets/canonical/deepmd")
+
+    def test_validate_deepmd_dataset_rejects_missing_set_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for split in ("train", "valid", "test"):
+                make_deepmd_system(root, split)
+            system = root / "datasets/canonical/deepmd/train/system"
+            for path in (system / "set.000").iterdir():
+                path.unlink()
+            (system / "set.000").rmdir()
+            with self.assertRaisesRegex(SafetyError, r"No set\.\* data directories"):
+                validate_deepmd_dataset(root / "datasets/canonical/deepmd")
+
+    def test_validate_deepmd_dataset_rejects_wrong_energy_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for split in ("train", "valid", "test"):
+                make_deepmd_system(root, split)
+            energy_path = root / "datasets/canonical/deepmd/train/system/set.000/energy.npy"
+            np.save(energy_path, np.zeros((1, 2)))
+            with self.assertRaisesRegex(SafetyError, "energy.npy.*expected 1"):
+                validate_deepmd_dataset(root / "datasets/canonical/deepmd")
+
+    def test_validate_deepmd_dataset_rejects_out_of_range_type_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for split in ("train", "valid", "test"):
+                make_deepmd_system(root, split)
+            type_path = root / "datasets/canonical/deepmd/train/system/type.raw"
+            type_path.write_text("0\n2\n", encoding="utf-8")
+            with self.assertRaisesRegex(SafetyError, "outside type_map.raw range"):
                 validate_deepmd_dataset(root / "datasets/canonical/deepmd")
 
     def test_pack_parser_uses_unambiguous_output(self) -> None:
