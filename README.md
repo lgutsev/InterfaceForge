@@ -5,6 +5,11 @@ potentials. It turns VASP and VASP-MLFF trajectories into one traceable dataset,
 generates restartable MACE and DeePMD committees, selects new DFT labels, and
 compares interface properties rather than stopping at a global force RMSE.
 
+An optional, supervised AI2-Kit 1.0.9 adapter can export and preflight a
+conservative DeepMD → LAMMPS → VASP closed loop. It is dry-run by default,
+never represents MACE as AI2-Kit-compatible, and keeps imported labels outside
+the canonical dataset until review. See [the AI2-Kit guide](docs/ai2kit.md).
+
 The project distills the reusable ideas in the original campaign templates into
 a portable Python CLI. It does **not** contain structures, trajectories,
 checkpoints, containers, cluster-specific private paths, or licensed VASP

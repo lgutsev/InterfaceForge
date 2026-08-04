@@ -40,6 +40,7 @@ dependencies = [
 vasp = ["ase>=3.23"]
 mace-roi = ["ase>=3.23", "mace-torch>=0.3.17,<0.4"]
 report = ["matplotlib>=3.7", "openpyxl>=3.1"]
+ai2kit = ["ai2-kit==1.0.9"]
 dev = ["ase>=3.23", "pytest>=8", "ruff>=0.6"]
 all = [
   "ase>=3.23",

@@ -45,6 +45,7 @@ class Campaign:
     stages: dict[str, Any]
     dataset: dict[str, Any]
     models: dict[str, Any]
+    active_learning: dict[str, Any]
     exploration: dict[str, Any]
     validation: dict[str, Any]
     raw: dict[str, Any]
@@ -241,6 +242,155 @@ def _validate_models(models: dict[str, Any]) -> None:
         models["mace"] = mace
 
 
+def _validate_active_learning(active_learning: dict[str, Any], models: dict[str, Any]) -> None:
+    allowed = {
+        "enabled",
+        "engine",
+        "approval_required",
+        "max_iterations",
+        "output_root",
+        "ai2kit",
+    }
+    unknown = sorted(set(active_learning) - allowed)
+    if unknown:
+        raise ConfigurationError(f"Unknown active_learning keys: {', '.join(unknown)}")
+
+    enabled = active_learning.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigurationError("active_learning.enabled must be a boolean")
+    active_learning["enabled"] = enabled
+    active_learning["engine"] = str(active_learning.get("engine", "ai2kit")).lower()
+    active_learning["approval_required"] = active_learning.get("approval_required", True)
+    try:
+        active_learning["max_iterations"] = int(active_learning.get("max_iterations", 1))
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("active_learning.max_iterations must be an integer") from exc
+    active_learning["output_root"] = str(
+        active_learning.get("output_root", "runs/active_learning/ai2kit")
+    )
+    adapter = _mapping(active_learning.get("ai2kit"), "active_learning.ai2kit")
+    active_learning["ai2kit"] = adapter
+
+    adapter_allowed = {
+        "version",
+        "executor_name",
+        "trainer",
+        "explorer",
+        "labeler",
+        "selector",
+        "architecture",
+        "backend",
+        "model_count",
+        "training_artifacts",
+        "validation_artifacts",
+        "exploration_artifacts",
+        "trust_force_low",
+        "trust_force_high",
+        "selection_limit",
+        "experimental_compatibility",
+    }
+    adapter_unknown = sorted(set(adapter) - adapter_allowed)
+    if adapter_unknown:
+        raise ConfigurationError(
+            f"Unknown active_learning.ai2kit keys: {', '.join(adapter_unknown)}"
+        )
+
+    if not active_learning["enabled"]:
+        return
+    if active_learning["engine"] != "ai2kit":
+        raise ConfigurationError("active_learning.engine must be ai2kit")
+    if active_learning["approval_required"] is not True:
+        raise SafetyError("AI2-kit active learning requires approval_required: true")
+    if active_learning["max_iterations"] < 1:
+        raise ConfigurationError("active_learning.max_iterations must be positive")
+    fixed = {
+        "version": "1.0.9",
+        "trainer": "deepmd",
+        "explorer": "lammps",
+        "labeler": "vasp",
+        "selector": "model_deviation",
+    }
+    for key, expected in fixed.items():
+        actual = str(adapter.get(key, expected)).lower()
+        if actual != expected:
+            raise ConfigurationError(
+                f"active_learning.ai2kit.{key} must be {expected!r}; got {actual!r}"
+            )
+        adapter[key] = actual
+    adapter["executor_name"] = str(adapter.get("executor_name", "loni")).strip()
+    if not adapter["executor_name"]:
+        raise ConfigurationError("active_learning.ai2kit.executor_name is required")
+
+    for key in ("trust_force_low", "trust_force_high"):
+        if key not in adapter:
+            raise ConfigurationError(f"active_learning.ai2kit.{key} is required")
+        try:
+            adapter[key] = float(adapter[key])
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(f"active_learning.ai2kit.{key} must be numeric") from exc
+    if not 0 <= adapter["trust_force_low"] < adapter["trust_force_high"]:
+        raise ConfigurationError(
+            "AI2-kit trust thresholds require 0 <= trust_force_low < trust_force_high"
+        )
+
+    for key, default in (("model_count", 4), ("selection_limit", 20)):
+        try:
+            adapter[key] = int(adapter.get(key, default))
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(f"active_learning.ai2kit.{key} must be an integer") from exc
+        if adapter[key] < 1:
+            raise ConfigurationError(f"active_learning.ai2kit.{key} must be positive")
+
+    for key in ("training_artifacts", "validation_artifacts", "exploration_artifacts"):
+        values = adapter.get(key)
+        if not isinstance(values, list) or not values or any(not str(value).strip() for value in values):
+            raise ConfigurationError(f"active_learning.ai2kit.{key} must be a non-empty list")
+        adapter[key] = [str(value) for value in values]
+
+    architecture = str(adapter.get("architecture", "se_e2_a")).lower()
+    backend = str(adapter.get("backend", "tensorflow")).lower()
+    experimental = adapter.get("experimental_compatibility", False)
+    if not isinstance(experimental, bool):
+        raise ConfigurationError(
+            "active_learning.ai2kit.experimental_compatibility must be a boolean"
+        )
+    if (architecture, backend) != ("se_e2_a", "tensorflow") and not experimental:
+        raise ConfigurationError(
+            "AI2-kit 1.0.9 MVP supports se_e2_a/tensorflow; other combinations "
+            "require experimental_compatibility: true"
+        )
+    adapter.update(
+        {
+            "architecture": architecture,
+            "backend": backend,
+            "experimental_compatibility": experimental,
+        }
+    )
+
+    deepmd = _mapping(models.get("deepmd"), "models.deepmd")
+    if not deepmd.get("enabled", False):
+        raise ConfigurationError("AI2-kit requires models.deepmd.enabled: true")
+    architectures = [str(value).lower() for value in deepmd.get("architectures", [])]
+    if architectures != [architecture]:
+        raise ConfigurationError(
+            "AI2-kit requires exactly one models.deepmd architecture matching "
+            "active_learning.ai2kit.architecture"
+        )
+    if str(deepmd.get("backend", "tensorflow")).lower() != backend:
+        raise ConfigurationError(
+            "active_learning.ai2kit.backend must match models.deepmd.backend"
+        )
+    if adapter["model_count"] != deepmd["committee"]:
+        raise ConfigurationError(
+            "active_learning.ai2kit.model_count must match models.deepmd.committee"
+        )
+    seeds = list(deepmd.get("seeds", []))
+    if adapter["model_count"] > len(seeds):
+        raise ConfigurationError("models.deepmd.seeds must cover every AI2-kit model")
+    if len(set(seeds[: adapter["model_count"]])) != adapter["model_count"]:
+        raise ConfigurationError("AI2-kit committee seeds must be unique")
+
+
 def load_campaign(path: str | Path) -> Campaign:
     """Load and validate a campaign YAML file."""
 
@@ -313,10 +463,12 @@ def load_campaign(path: str | Path) -> Campaign:
     stages = _mapping(data.get("stages"), "stages")
     dataset = _mapping(data.get("dataset"), "dataset")
     models = _mapping(data.get("models"), "models")
+    active_learning = _mapping(data.get("active_learning"), "active_learning")
     exploration = _mapping(data.get("exploration"), "exploration")
     validation = _mapping(data.get("validation"), "validation")
     _validate_dataset(dataset)
     _validate_models(models)
+    _validate_active_learning(active_learning, models)
 
     return Campaign(
         path=config_path,
@@ -329,6 +481,7 @@ def load_campaign(path: str | Path) -> Campaign:
         stages=stages,
         dataset=dataset,
         models=models,
+        active_learning=active_learning,
         exploration=exploration,
         validation=validation,
         raw=raw,

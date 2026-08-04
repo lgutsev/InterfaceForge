@@ -69,6 +69,39 @@
       "additionalProperties": true
     },
     "models": {"type": "object"},
+    "active_learning": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "engine": {"const": "ai2kit"},
+        "approval_required": {"const": true},
+        "max_iterations": {"type": "integer", "minimum": 1},
+        "output_root": {"type": "string", "minLength": 1},
+        "ai2kit": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": {"const": "1.0.9"},
+            "executor_name": {"type": "string", "minLength": 1},
+            "trainer": {"const": "deepmd"},
+            "explorer": {"const": "lammps"},
+            "labeler": {"const": "vasp"},
+            "selector": {"const": "model_deviation"},
+            "architecture": {"enum": ["se_e2_a", "dpa1", "dpa2", "dpa3", "dpa4"]},
+            "backend": {"enum": ["tensorflow", "pytorch", "pt_expt"]},
+            "model_count": {"type": "integer", "minimum": 1},
+            "training_artifacts": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "validation_artifacts": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "exploration_artifacts": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "trust_force_low": {"type": "number", "minimum": 0},
+            "trust_force_high": {"type": "number", "exclusiveMinimum": 0},
+            "selection_limit": {"type": "integer", "minimum": 1},
+            "experimental_compatibility": {"type": "boolean"}
+          }
+        }
+      }
+    },
     "exploration": {"type": "object"},
     "validation": {"type": "object"}
   }

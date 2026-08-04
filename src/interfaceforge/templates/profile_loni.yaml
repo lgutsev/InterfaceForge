@@ -1,5 +1,16 @@
 name: loni
 scheduler: slurm
+ai2kit:
+  ssh: {host: "YOUR_USER@YOUR_LONI_LOGIN"}
+  work_dir: /project/YOUR_PROJECT/ai2kit-work
+  python_cmd: /project/YOUR_PROJECT/envs/ai2kit/bin/python
+  commands: {ai2kit: ai2-kit, deepmd: dp, lammps: lmp, vasp: vasp_std}
+  jobs: {train: deepmd_gpu, explore: deepmd_gpu, label: vasp_workq}
+  potcar_source:
+    H: /project/YOUR_PROJECT/potcars/H/POTCAR
+    O: /project/YOUR_PROJECT/potcars/O/POTCAR
+  explore_concurrency: 1
+  label_concurrency: 1
 jobs:
   vasp_workq:
     partition: workq
