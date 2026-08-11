@@ -286,6 +286,7 @@ def cmd_vasp_recover(args: argparse.Namespace) -> int:
             ml_mb=args.ml_mb,
             ml_mconf=args.ml_mconf,
             force_expand=args.force_expand,
+            increase_eps_low=args.increase_eps_low,
         )
     )
     return 0
@@ -355,7 +356,31 @@ def cmd_vasp_pack(args: argparse.Namespace) -> int:
 
 
 def cmd_vasp_submit(args: argparse.Namespace) -> int:
-    _json({"folder": str(Path(args.folder).resolve()), "job_id": submit_run(args.folder, args.launcher)})
+    if (args.ml_mb is not None or args.ml_mconf is not None) and not args.recover_capacity:
+        raise SafetyError("--ml-mb/--ml-mconf require --recover-capacity")
+    if args.ml_mconf is not None and args.ml_mb is None:
+        raise SafetyError("--ml-mconf is supported only with the explicit --ml-mb expansion path")
+    if args.increase_eps_low and args.ml_mb is not None:
+        raise SafetyError("--increase-eps-low cannot be combined with --ml-mb expansion")
+    if args.increase_eps_low and not args.recover_capacity:
+        raise SafetyError("--increase-eps-low requires --recover-capacity")
+    prepared = None
+    if args.recover_capacity:
+        operation = "expand" if args.ml_mb is not None else "discard"
+        prepared = prepare_recovery(
+            args.folder,
+            operation,
+            ml_mb=args.ml_mb,
+            ml_mconf=args.ml_mconf,
+            increase_eps_low=args.increase_eps_low,
+        )
+    _json(
+        {
+            "folder": str(Path(args.folder).resolve()),
+            "capacity_recovery": prepared,
+            "job_id": submit_run(args.folder, args.launcher),
+        }
+    )
     return 0
 
 
@@ -616,14 +641,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     vasp = commands.add_parser("vasp", help="Safe VASP utilities")
     vasp_commands = vasp.add_subparsers(dest="vasp_command", required=True)
-    recover = vasp_commands.add_parser("recover", help="Continue/refit/stability/expand MLFF")
-    recover.add_argument("operation", choices=("continue", "expand", "refit", "stability"))
+    recover = vasp_commands.add_parser("recover", help="Continue/refit/stability/capacity recovery")
+    recover.add_argument(
+        "operation", choices=("continue", "discard", "expand", "refit", "stability")
+    )
     recover.add_argument("folder")
     recover.add_argument("--temperature", type=float)
     recover.add_argument("--nsw", type=int)
     recover.add_argument("--ml-mb", type=int)
     recover.add_argument("--ml-mconf", type=int)
     recover.add_argument("--force-expand", action="store_true")
+    recover.add_argument(
+        "--increase-eps-low",
+        action="store_true",
+        help="For discard recovery, multiply ML_EPS_LOW by 10 while enforcing <1E-7",
+    )
     recover.set_defaults(func=cmd_vasp_recover)
     restart = vasp_commands.add_parser("restart", help="Prepare an ordinary VASP restart")
     restart.add_argument("folder")
@@ -660,9 +692,34 @@ def build_parser() -> argparse.ArgumentParser:
     pack.add_argument("--include-large", action="store_true")
     pack.add_argument("--force", action="store_true")
     pack.set_defaults(func=cmd_vasp_pack)
-    vsubmit = vasp_commands.add_parser("submit", help="Submit one prepared VASP run")
+    vsubmit = vasp_commands.add_parser(
+        "submit", help="Submit one VASP run, optionally recovering MLFF capacity first"
+    )
     vsubmit.add_argument("folder")
-    vsubmit.add_argument("--launcher", default="run.slurm")
+    vsubmit.add_argument(
+        "--launcher",
+        help="Batch script (default: prefer runvasp.sh, then run.slurm)",
+    )
+    vsubmit.add_argument(
+        "--recover-capacity",
+        action="store_true",
+        help="Archive a capacity stop and resubmit; defaults to bounded-memory basis discarding",
+    )
+    vsubmit.add_argument(
+        "--ml-mb",
+        type=int,
+        help="Opt into expansion by setting a larger ML_MB; omit for safer basis discarding",
+    )
+    vsubmit.add_argument(
+        "--ml-mconf",
+        type=int,
+        help="Optional new ML_MCONF allocation for capacity recovery",
+    )
+    vsubmit.add_argument(
+        "--increase-eps-low",
+        action="store_true",
+        help="Also multiply ML_EPS_LOW by 10; guarded to remain strictly below 1E-7",
+    )
     vsubmit.set_defaults(func=cmd_vasp_submit)
     beef_plot = vasp_commands.add_parser(
         "beef-plot", help="Plot campaign Bayesian force errors and ML_CTIFOR"

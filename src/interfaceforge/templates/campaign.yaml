@@ -37,6 +37,7 @@ systems:
 stages:
   vasp_mlff:
     enabled: true
+    accuracy_profile: accurate
     train:
       nsw: 3000
       potim: 1.0

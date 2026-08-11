@@ -4,18 +4,34 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from interfaceforge.audit import audit_run, find_runs, run_audit
 from interfaceforge.vasp import (
     apply_incar_preset,
+    mlff_accuracy_profile_tags,
     package_outputs,
     parse_incar,
     prepare_recovery,
+    resolve_launcher,
+    submit_run,
     update_incar,
 )
 
 
 class VaspTests(unittest.TestCase):
+    def test_accurate_profile_matches_vasp_two_stage_recipe(self) -> None:
+        train = mlff_accuracy_profile_tags("accurate", "train")
+        refit = mlff_accuracy_profile_tags("accurate", "refit")
+
+        self.assertEqual(train["ML_IALGO_LINREG"], "1")
+        self.assertEqual(train["ML_SION1"], "0.3")
+        self.assertEqual(train["ML_MRB2"], "12")
+        self.assertEqual(refit["ML_IALGO_LINREG"], "4")
+        self.assertEqual(refit["ML_SION1"], "0.5")
+        self.assertEqual(refit["ML_MRB2"], "12")
+        self.assertEqual(refit["ML_EPS_LOW"], "1E-11")
+
     def test_incar_update_preserves_unrelated_lines(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             incar = Path(temporary) / "INCAR"
@@ -66,6 +82,130 @@ class VaspTests(unittest.TestCase):
 
             self.assertEqual(result["operation"], "continue")
             self.assertEqual((run / "ML_AB").read_text(encoding="utf-8"), "dummy ml_ab payload\n")
+
+    def test_capacity_recovery_accepts_vasp_local_reference_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text(
+                "ML_MODE=train\nIBRION=0\nNSW=2000\nPOTIM=0.5\n"
+                "MDALGO=2\nSMASS=1.0\nTEBEG=300\nTEEND=300\nML_MB=6000\n",
+                encoding="utf-8",
+            )
+            (run / "POTCAR").write_text("licensed\n", encoding="utf-8")
+            (run / "KPOINTS").write_text("Automatic\n0\nGamma\n1 1 1\n", encoding="utf-8")
+            (run / "CONTCAR").write_text("continued geometry\n", encoding="utf-8")
+            (run / "ML_ABN").write_text("training database\n", encoding="utf-8")
+            (run / "OUTCAR").write_text(
+                "Not enough storage reserved for local reference configurations, "
+                "please increase ML_MB.\n",
+                encoding="utf-8",
+            )
+
+            result = prepare_recovery(run, "expand", ml_mb=12000)
+
+            parsed = parse_incar(run / "INCAR")
+            self.assertEqual(result["operation"], "expand")
+            self.assertEqual(parsed["ML_MODE"], "train")
+            self.assertEqual(parsed["ML_MB"], "12000")
+            self.assertEqual(parsed["ML_LBASIS_DISCARD"], ".FALSE.")
+            self.assertEqual(parsed["POTIM"], "0.5")
+            self.assertEqual(
+                (run / "ML_AB").read_text(encoding="utf-8"), "training database\n"
+            )
+            self.assertEqual(
+                (run / "POSCAR").read_text(encoding="utf-8"), "continued geometry\n"
+            )
+
+            archived_outcar = list(
+                (run / ".interfaceforge" / "archive").glob("expand_*/OUTCAR")
+            )
+            self.assertEqual(len(archived_outcar), 1)
+
+            audit = audit_run(
+                run / ".interfaceforge" / "archive" / archived_outcar[0].parent.name,
+                run,
+            )
+            self.assertTrue(audit["ml_capacity_stop"])
+            self.assertEqual(audit["health"], "stopped: ML local-reference capacity")
+
+    def test_capacity_discard_recovery_keeps_memory_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text(
+                "ML_MODE=train\nNSW=2000\nPOTIM=0.5\nTEBEG=300\nML_MB=6000\n",
+                encoding="utf-8",
+            )
+            (run / "POTCAR").write_text("licensed\n", encoding="utf-8")
+            (run / "KPOINTS").write_text("Automatic\n0\nGamma\n1 1 1\n", encoding="utf-8")
+            (run / "CONTCAR").write_text("continued geometry\n", encoding="utf-8")
+            (run / "ML_ABN").write_text("training database\n", encoding="utf-8")
+            (run / "OUTCAR").write_text(
+                "Not enough storage reserved for local reference configurations.\n",
+                encoding="utf-8",
+            )
+
+            result = prepare_recovery(run, "discard")
+
+            parsed = parse_incar(run / "INCAR")
+            self.assertEqual(result["operation"], "discard")
+            self.assertEqual(parsed["ML_MB"], "6000")
+            self.assertEqual(parsed["ML_LBASIS_DISCARD"], ".TRUE.")
+            self.assertEqual(parsed["ML_MODE"], "train")
+            self.assertNotIn("ML_EPS_LOW", parsed)
+
+    def test_capacity_recovery_can_apply_guarded_eps_low_increase(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text(
+                "ML_MODE=train\nNSW=2000\nPOTIM=0.5\nTEBEG=300\nML_MB=6000\n",
+                encoding="utf-8",
+            )
+            (run / "POTCAR").write_text("licensed\n", encoding="utf-8")
+            (run / "KPOINTS").write_text("Automatic\n0\nGamma\n1 1 1\n", encoding="utf-8")
+            (run / "CONTCAR").write_text("continued geometry\n", encoding="utf-8")
+            (run / "ML_ABN").write_text("training database\n", encoding="utf-8")
+            (run / "OUTCAR").write_text(
+                "Not enough storage reserved for local reference configurations.\n",
+                encoding="utf-8",
+            )
+
+            result = prepare_recovery(run, "discard", increase_eps_low=True)
+
+            parsed = parse_incar(run / "INCAR")
+            self.assertEqual(parsed["ML_EPS_LOW"], "1E-08")
+            self.assertEqual(result["ml_eps_low"], "1E-08")
+
+    def test_eps_low_increase_refuses_vasp_upper_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text(
+                "ML_MODE=train\nNSW=2000\nML_EPS_LOW=1E-8\n",
+                encoding="utf-8",
+            )
+            (run / "POTCAR").write_text("licensed\n", encoding="utf-8")
+            (run / "KPOINTS").write_text("Automatic\n0\nGamma\n1 1 1\n", encoding="utf-8")
+            (run / "CONTCAR").write_text("continued geometry\n", encoding="utf-8")
+            (run / "ML_ABN").write_text("training database\n", encoding="utf-8")
+            (run / "OUTCAR").write_text(
+                "Not enough storage reserved for local reference configurations.\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(Exception, "strictly below 1E-7"):
+                prepare_recovery(run, "discard", increase_eps_low=True)
+
+    def test_submit_prefers_runvasp_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "run.slurm").write_text("#!/bin/bash\n", encoding="utf-8")
+            (run / "runvasp.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+
+            self.assertEqual(resolve_launcher(run).name, "runvasp.sh")
+            with patch("interfaceforge.vasp.subprocess.run") as mocked:
+                mocked.return_value.stdout = "Submitted batch job 12345\n"
+                self.assertEqual(submit_run(run), "12345")
+                mocked.assert_called_once()
+                self.assertEqual(mocked.call_args.args[0], ["sbatch", "runvasp.sh"])
 
     def test_mode_aware_audit_recognizes_completed_training(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

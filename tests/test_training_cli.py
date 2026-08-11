@@ -7,8 +7,10 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import yaml
 from test_config_scheduler import write_campaign
 
+from interfaceforge.campaign import prepare_campaign
 from interfaceforge.cli import build_parser, main
 from interfaceforge.config import load_campaign
 from interfaceforge.errors import ConfigurationError, SafetyError
@@ -18,6 +20,7 @@ from interfaceforge.training import (
     generate_mace_training,
     validate_deepmd_dataset,
 )
+from interfaceforge.vasp import parse_incar
 
 
 def make_deepmd_system(root: Path, split: str) -> None:
@@ -299,6 +302,20 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(main(["init", str(target)]), 0)
             self.assertTrue((target / "campaign.yaml").is_file())
             self.assertTrue((target / "profiles/loni.yaml").is_file())
+            campaign = yaml.safe_load((target / "campaign.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(
+                campaign["stages"]["vasp_mlff"]["accuracy_profile"], "accurate"
+            )
+
+            prepare_campaign(load_campaign(target / "campaign.yaml"))
+            train = parse_incar(target / "runs/vasp/bulk_a_300k/train/INCAR")
+            refit = parse_incar(target / "runs/vasp/bulk_a_300k/refit/INCAR")
+            self.assertEqual(train["ML_IALGO_LINREG"], "1")
+            self.assertEqual(train["ML_SION1"], "0.3")
+            self.assertEqual(train["ML_MRB2"], "12")
+            self.assertEqual(refit["ML_IALGO_LINREG"], "4")
+            self.assertEqual(refit["ML_SION1"], "0.5")
+            self.assertEqual(refit["ML_EPS_LOW"], "1E-11")
 
 
 if __name__ == "__main__":

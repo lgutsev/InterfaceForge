@@ -164,6 +164,11 @@ def parse_outcar(run: Path) -> dict[str, Any]:
     warnings: list[str] = []
     patterns = (
         ("OOM/killed", r"out of memory|\boom\b|cannot allocate memory|killed"),
+        (
+            "ML local-reference capacity",
+            r"not enough storage reserved for local reference configurations|"
+            r"increase\s+ML_M(?:B|CONF)|ML_M(?:B|CONF).*(?:too small|exceed)",
+        ),
         ("BRMIX", r"\bBRMIX\b"),
         ("ZBRENT", r"\bZBRENT\b"),
         ("serious problems", r"very serious problems"),
@@ -175,6 +180,7 @@ def parse_outcar(run: Path) -> dict[str, Any]:
     return {
         "finished_normally": "general timing and accounting informations" in text.lower(),
         "oom_or_killed": "OOM/killed" in warnings,
+        "ml_capacity_stop": "ML local-reference capacity" in warnings,
         "warnings": "; ".join(warnings),
     }
 
@@ -205,6 +211,11 @@ def assess(row: dict[str, Any]) -> Assessment:
     mode = str(row.get("ml_mode", "")).lower()
     if row["oom_or_killed"]:
         return Assessment("failed: OOM/killed", "Fix memory or resources before interpreting the run.")
+    if row.get("ml_capacity_stop"):
+        return Assessment(
+            "stopped: ML local-reference capacity",
+            "Resume with bounded-memory local-basis discarding, or explicitly increase ML_MB.",
+        )
     if mode == "train":
         if not row["ml_log_present"]:
             return Assessment("failed or not initialized", "Inspect MLFF initialization and scheduler output.")
@@ -301,6 +312,11 @@ def audit_run(run: Path, root: Path) -> dict[str, Any]:
         "path": str(run),
         "ml_mode": incar.get("ML_MODE", ""),
         "ml_lmlff": incar.get("ML_LMLFF", ""),
+        "ml_lbasis_discard": incar.get("ML_LBASIS_DISCARD", ""),
+        "ml_eps_low": incar.get("ML_EPS_LOW", ""),
+        "ml_ialgo_linreg": incar.get("ML_IALGO_LINREG", ""),
+        "ml_sion1": incar.get("ML_SION1", ""),
+        "ml_mrb2": incar.get("ML_MRB2", ""),
         "nsw_target": int(float(incar["NSW"])) if incar.get("NSW") else None,
         "potim_fs": float(incar["POTIM"]) if incar.get("POTIM") else None,
         "tebeg_k": float(incar["TEBEG"]) if incar.get("TEBEG") else None,

@@ -97,6 +97,9 @@ verified.
   available.
 - Generated INCAR presets do not guess ENCUT, k-point density, spin, dispersion,
   convergence thresholds or chemistry-specific settings.
+- New VASP-MLFF campaign templates opt into the documented `accurate` profile
+  (`ML_IALGO_LINREG=1`, `ML_SION1=0.3`, `ML_MRB2=12` during training, followed
+  by SVD refitting); existing campaigns remain unchanged.
 - POTCAR is assembled only from an explicit licensed local tree and is excluded
   from portable archives.
 - Submission is a dry-run unless `--execute` is present. Mutating recovery
@@ -112,6 +115,8 @@ iface vasp geom freeze slab.vasp POSCAR --axis z --upper 5 --region inside
 iface vasp restart run/ --clean-electronic
 iface vasp recover continue run/ --temperature 450 --nsw 3000
 iface vasp recover expand run/ --ml-mb 12000
+iface vasp submit run/ --recover-capacity  # bounded-memory recovery via runvasp.sh
+iface vasp submit run/ --recover-capacity --increase-eps-low  # optional 10x sparsification
 iface vasp beef-plot runs/vasp --individual
 iface vasp band scf/ bands/ --kpoints KPOINTS.line
 iface vasp workfunction LOCPOT OUTCAR --plot-output workfunction.png

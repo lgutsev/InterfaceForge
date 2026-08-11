@@ -11,7 +11,7 @@ from .config import Campaign, load_profile
 from .errors import SafetyError
 from .scheduler import render_job, write_job
 from .state import StateStore
-from .vasp import stage_tags, update_incar
+from .vasp import mlff_accuracy_profile_tags, stage_tags, update_incar
 
 _LAYOUT = ("inputs", "structures", "runs/vasp", "datasets", "models", "validation", "reports", "logs")
 _STAGES = ("train", "refit", "stability")
@@ -94,6 +94,7 @@ def prepare_campaign(campaign: Campaign, *, force: bool = False) -> dict[str, An
     profile = load_profile(campaign.profile_path)
     plan = build_plan(campaign)
     vasp_settings = dict(campaign.stages.get("vasp_mlff", {}))
+    accuracy_profile = vasp_settings.get("accuracy_profile")
     base_incar = _resolve_reference_input(campaign, "INCAR")
     kpoints = _resolve_reference_input(campaign, "KPOINTS")
     potcar = _resolve_reference_input(campaign, "POTCAR")
@@ -137,6 +138,10 @@ def prepare_campaign(campaign: Campaign, *, force: bool = False) -> dict[str, An
             changes, delete = stage_tags(
                 stage, temperature=temperature, nsw=nsw, potim=potim
             )
+            if accuracy_profile:
+                changes.update(
+                    mlff_accuracy_profile_tags(str(accuracy_profile), stage)
+                )
             update_incar(incar, changes, delete=delete)
 
             profile_name = str(settings.get("profile", "vasp_workq"))

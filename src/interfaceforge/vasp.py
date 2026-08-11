@@ -38,6 +38,7 @@ _ARCHIVE_FILES = (
 )
 
 INCAR_PRESETS = ("static", "relax", "md", "dos")
+MLFF_ACCURACY_PROFILES = ("accurate",)
 
 
 def parse_incar(path: str | Path) -> dict[str, str]:
@@ -255,6 +256,29 @@ def stage_tags(stage: str, *, temperature: float, nsw: int, potim: float) -> tup
     raise ValueError(f"Unknown VASP stage: {stage}")
 
 
+def mlff_accuracy_profile_tags(profile: str, stage: str) -> dict[str, Any]:
+    """Return opt-in VASP best-practice tags for accuracy-oriented MLFF stages."""
+
+    if profile not in MLFF_ACCURACY_PROFILES:
+        raise ValueError(
+            f"Unknown MLFF accuracy profile {profile!r}; choose from {MLFF_ACCURACY_PROFILES}"
+        )
+    if stage == "train":
+        return {
+            "ML_IALGO_LINREG": "1",
+            "ML_SION1": "0.3",
+            "ML_MRB2": "12",
+        }
+    if stage == "refit":
+        return {
+            "ML_IALGO_LINREG": "4",
+            "ML_SION1": "0.5",
+            "ML_MRB2": "12",
+            "ML_EPS_LOW": "1E-11",
+        }
+    return {}
+
+
 def require_files(folder: Path, names: Iterable[str]) -> None:
     missing = [name for name in names if not (folder / name).is_file() or not (folder / name).stat().st_size]
     if missing:
@@ -320,15 +344,18 @@ def prepare_recovery(
     ml_mb: int | None = None,
     ml_mconf: int | None = None,
     force_expand: bool = False,
+    increase_eps_low: bool = False,
 ) -> dict[str, Any]:
     """Safely mutate one VASP MLFF folder for a well-defined recovery operation."""
 
     run = Path(folder).resolve()
     require_files(run, ("INCAR", "POTCAR", "KPOINTS"))
-    if operation not in {"continue", "expand", "refit", "stability"}:
+    if operation not in {"continue", "discard", "expand", "refit", "stability"}:
         raise ValueError(f"Unknown recovery operation: {operation}")
+    if increase_eps_low and operation != "discard":
+        raise SafetyError("ML_EPS_LOW adjustment is supported only with discard recovery")
 
-    if operation in {"continue", "expand"}:
+    if operation in {"continue", "discard", "expand"}:
         require_files(run, ("CONTCAR",))
         source = _continue_source(run)
     elif operation == "refit":
@@ -340,23 +367,28 @@ def prepare_recovery(
             raise SafetyError("ML_FFN does not report ML_LFAST=true")
         source = run / "ML_FFN"
 
-    if operation == "expand":
-        if ml_mb is None or ml_mb < 1:
-            raise SafetyError("--ml-mb must be a positive integer for expansion")
+    if operation in {"discard", "expand"}:
         outcar_text = (run / "OUTCAR").read_text(errors="ignore") if (run / "OUTCAR").is_file() else ""
         capacity_stop = re.search(r"increase\s+ML_M(B|CONF)|ML_M(B|CONF).*(too small|exceed)", outcar_text, re.I)
+        capacity_stop = capacity_stop or re.search(
+            r"not enough storage reserved for local reference configurations",
+            outcar_text,
+            re.I,
+        )
         if not capacity_stop and not force_expand:
             raise SafetyError(
                 "OUTCAR does not show a recognized ML_MB/ML_MCONF capacity stop; "
                 "use --force-expand only after manual confirmation"
             )
+    if operation == "expand" and (ml_mb is None or ml_mb < 1):
+        raise SafetyError("--ml-mb must be a positive integer for expansion")
 
     archive = archive_run(run, operation)
     if (run / "CONTCAR").is_file() and (run / "CONTCAR").stat().st_size:
         shutil.copy2(run / "CONTCAR", run / "POSCAR")
     _clean_outputs(run)
 
-    if operation in {"continue", "expand", "refit"}:
+    if operation in {"continue", "discard", "expand", "refit"}:
         destination = run / "ML_AB"
         if source != destination:
             shutil.copy2(source, destination)
@@ -372,14 +404,28 @@ def prepare_recovery(
     selected_nsw = int(nsw if nsw is not None else current.get("NSW", 3000))
     selected_potim = float(current.get("POTIM", 1.0))
 
-    if operation in {"continue", "expand"}:
+    if operation in {"continue", "discard", "expand"}:
         changes, delete = stage_tags(
             "train",
             temperature=selected_temperature,
             nsw=selected_nsw,
             potim=selected_potim,
         )
-        if operation == "expand":
+        if operation == "discard":
+            changes["ML_LBASIS_DISCARD"] = ".TRUE."
+            if increase_eps_low:
+                try:
+                    old_eps_low = float(current.get("ML_EPS_LOW", "1E-9"))
+                except ValueError as error:
+                    raise SafetyError("INCAR contains an invalid ML_EPS_LOW value") from error
+                new_eps_low = old_eps_low * 10.0
+                if not 0.0 < new_eps_low < 1.0e-7:
+                    raise SafetyError(
+                        "Tenfold ML_EPS_LOW increase must remain strictly below 1E-7; "
+                        f"current value is {old_eps_low:g}"
+                    )
+                changes["ML_EPS_LOW"] = f"{new_eps_low:.0E}"
+        elif operation == "expand":
             changes["ML_MB"] = int(ml_mb)
             if ml_mconf is not None:
                 changes["ML_MCONF"] = int(ml_mconf)
@@ -410,16 +456,33 @@ def prepare_recovery(
         "nsw": selected_nsw if operation != "refit" else None,
         "ml_mb": ml_mb,
         "ml_mconf": ml_mconf,
+        "ml_eps_low": parse_incar(run / "INCAR").get("ML_EPS_LOW"),
     }
 
 
-def submit_run(folder: str | Path, launcher: str = "run.slurm") -> str:
+def resolve_launcher(folder: str | Path, launcher: str | None = None) -> Path:
+    """Resolve an explicit launcher or prefer the standalone VASP launcher."""
+
+    run = Path(folder).resolve()
+    if launcher:
+        script = run / launcher
+        if not script.is_file():
+            raise FileNotFoundError(script)
+        return script
+    for name in ("runvasp.sh", "run.slurm"):
+        script = run / name
+        if script.is_file():
+            return script
+    raise FileNotFoundError(
+        f"No VASP launcher found in {run}; expected runvasp.sh or run.slurm"
+    )
+
+
+def submit_run(folder: str | Path, launcher: str | None = None) -> str:
     """Submit one prepared run and return the scheduler job id."""
 
     run = Path(folder).resolve()
-    script = run / launcher
-    if not script.is_file():
-        raise FileNotFoundError(script)
+    script = resolve_launcher(run, launcher)
     result = subprocess.run(
         ["sbatch", script.name],
         cwd=run,
