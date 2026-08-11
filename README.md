@@ -113,11 +113,12 @@ iface vasp geom convert structure.xyz POSCAR --cell-from trusted.vasp
 iface vasp geom slab bulk.vasp slab.vasp --miller 1 1 1 --layers 8
 iface vasp geom freeze slab.vasp POSCAR --axis z --upper 5 --region inside
 iface vasp restart run/ --clean-electronic
-iface vasp recover continue run/ --temperature 450 --nsw 3000
-iface vasp recover expand run/ --ml-mb 12000
+iface vasp ml-recover continue run/ --temperature 450 --nsw 3000
+iface vasp submit run/ --ml-continue --temperature 450 --nsw 3000
+iface vasp ml-recover expand run/ --ml-mb 12000
 iface vasp submit run/  # generates a missing POTCAR from the supplied dictionary
-iface vasp submit run/ --recover-capacity  # bounded-memory recovery via runvasp.sh
-iface vasp submit run/ --recover-capacity --increase-eps-low  # optional 10x sparsification
+iface vasp submit run/ --ml-capacity-recovery  # bounded-memory recovery via runvasp.sh
+iface vasp submit run/ --ml-capacity-recovery --increase-eps-low  # optional 10x sparsification
 iface vasp beef-plot runs/vasp --individual
 iface vasp band scf/ bands/ --kpoints KPOINTS.line
 iface vasp workfunction LOCPOT OUTCAR --plot-output workfunction.png

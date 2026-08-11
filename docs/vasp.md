@@ -47,9 +47,27 @@ Use `--potcar-map custom.yaml` during submission, or `--map custom.yaml` with
 the standalone command, only when intentionally overriding the supplied
 dictionary. Existing nonempty POTCAR files are preserved.
 
+### One-command MLFF continuation
+
+An interrupted on-the-fly training job can be prepared and submitted in one
+transactional command:
+
+```bash
+iface vasp submit run/ --ml-continue --temperature 450 --nsw 3000
+```
+
+Before `sbatch`, InterfaceForge archives the old state, copies `CONTCAR` to
+`POSCAR`, promotes `ML_ABN` (falling back to `ML_AB`) to `ML_AB`, restores
+`ML_MODE=train`, preserves the existing `POTIM`, applies optional
+temperature/NSW overrides, and clears stale runtime outputs. Submission occurs
+only if every preparation step succeeds. `--ml-continue` and
+`--ml-capacity-recovery` are mutually exclusive. The older
+`--recover-continue` and `--recover-capacity` spellings remain compatibility
+aliases.
+
 ## Recovery
 
-`iface vasp recover` supports:
+`iface vasp ml-recover` supports (with `recover` retained as an alias):
 
 - `continue`: continue on-the-fly training from `ML_ABN` or `ML_AB`.
 - `discard`: continue after a local-reference capacity stop while keeping
@@ -71,7 +89,7 @@ example, explicitly set to `.FALSE.`). InterfaceForge uses `.TRUE.` for the
 default recovery:
 
 ```bash
-iface vasp submit run/ --recover-capacity
+iface vasp submit run/ --ml-capacity-recovery
 ```
 
 VASP's second bounded-storage suggestion is to increase `ML_EPS_LOW` tenfold.
@@ -80,7 +98,7 @@ sets `1E-8`. It increases CUR sparsification and may reduce accuracy, especially
 in multicomponent systems, so InterfaceForge requires an explicit opt-in:
 
 ```bash
-iface vasp submit run/ --recover-capacity --increase-eps-low
+iface vasp submit run/ --ml-capacity-recovery --increase-eps-low
 ```
 
 The command reads an explicit existing `ML_EPS_LOW` when present, multiplies it
@@ -91,7 +109,7 @@ To retain every local reference instead, explicitly opt into the
 higher-memory path by supplying a larger allocation:
 
 ```bash
-iface vasp submit run/ --recover-capacity --ml-mb 12000
+iface vasp submit run/ --ml-capacity-recovery --ml-mb 12000
 ```
 
 The standalone submission command prefers `runvasp.sh` when both supported

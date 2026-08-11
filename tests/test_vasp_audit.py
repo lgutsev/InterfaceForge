@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from interfaceforge.audit import audit_run, find_runs, run_audit
+from interfaceforge.cli import build_parser, main
 from interfaceforge.vasp import (
     apply_incar_preset,
     assemble_potcar,
@@ -278,6 +279,72 @@ class VaspTests(unittest.TestCase):
             self.assertEqual(payload["status"], "generated")
             self.assertEqual(payload["variants"], ["Cs_sv", "Pb_d", "I"])
             self.assertTrue((run / "POTCAR").stat().st_size)
+
+    def test_submit_recover_continue_prepares_and_launches_in_one_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text(
+                "ML_MODE=train\nNSW=2000\nPOTIM=0.5\nTEBEG=300\nTEEND=300\n",
+                encoding="utf-8",
+            )
+            (run / "POTCAR").write_text("licensed\n", encoding="utf-8")
+            (run / "KPOINTS").write_text("Automatic\n0\nGamma\n1 1 1\n", encoding="utf-8")
+            (run / "CONTCAR").write_text("continued geometry\n", encoding="utf-8")
+            (run / "ML_ABN").write_text("continued database\n", encoding="utf-8")
+            (run / "OUTCAR").write_text("old output\n", encoding="utf-8")
+            (run / "runvasp.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+
+            with patch("interfaceforge.vasp.subprocess.run") as mocked:
+                mocked.return_value.stdout = "Submitted batch job 24680\n"
+                result = main(
+                    [
+                        "vasp",
+                        "submit",
+                        str(run),
+                        "--ml-continue",
+                        "--temperature",
+                        "450",
+                        "--nsw",
+                        "3000",
+                    ]
+                )
+
+            self.assertEqual(result, 0)
+            parsed = parse_incar(run / "INCAR")
+            self.assertEqual(parsed["ML_MODE"], "train")
+            self.assertEqual(parsed["TEBEG"], "450.0")
+            self.assertEqual(parsed["TEEND"], "450.0")
+            self.assertEqual(parsed["NSW"], "3000")
+            self.assertEqual(parsed["POTIM"], "0.5")
+            self.assertEqual((run / "POSCAR").read_text(), "continued geometry\n")
+            self.assertEqual((run / "ML_AB").read_text(), "continued database\n")
+            self.assertFalse((run / "OUTCAR").exists())
+            self.assertEqual(len(list((run / ".interfaceforge/archive").glob("continue_*"))), 1)
+            self.assertEqual(mocked.call_args.args[0], ["sbatch", "runvasp.sh"])
+
+    def test_submit_recovery_flags_are_mutually_exclusive(self) -> None:
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "vasp",
+                    "submit",
+                    "run",
+                    "--ml-continue",
+                    "--ml-capacity-recovery",
+                ]
+            )
+
+    def test_ml_recovery_compatibility_aliases_remain_available(self) -> None:
+        parser = build_parser()
+        primary = parser.parse_args(["vasp", "ml-recover", "continue", "run"])
+        legacy = parser.parse_args(["vasp", "recover", "continue", "run"])
+        self.assertEqual(primary.operation, "continue")
+        self.assertEqual(legacy.operation, "continue")
+        submit_legacy = parser.parse_args(
+            ["vasp", "submit", "run", "--recover-continue"]
+        )
+        self.assertTrue(submit_legacy.recover_continue)
 
     def test_mode_aware_audit_recognizes_completed_training(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -358,25 +358,37 @@ def cmd_vasp_pack(args: argparse.Namespace) -> int:
 
 
 def cmd_vasp_submit(args: argparse.Namespace) -> int:
+    recovery_requested = args.recover_continue or args.recover_capacity
     if (args.ml_mb is not None or args.ml_mconf is not None) and not args.recover_capacity:
-        raise SafetyError("--ml-mb/--ml-mconf require --recover-capacity")
+        raise SafetyError("--ml-mb/--ml-mconf require --ml-capacity-recovery")
     if args.ml_mconf is not None and args.ml_mb is None:
         raise SafetyError("--ml-mconf is supported only with the explicit --ml-mb expansion path")
     if args.increase_eps_low and args.ml_mb is not None:
         raise SafetyError("--increase-eps-low cannot be combined with --ml-mb expansion")
     if args.increase_eps_low and not args.recover_capacity:
-        raise SafetyError("--increase-eps-low requires --recover-capacity")
+        raise SafetyError("--increase-eps-low requires --ml-capacity-recovery")
+    if (args.temperature is not None or args.nsw is not None) and not recovery_requested:
+        raise SafetyError("--temperature/--nsw require --ml-continue or --ml-capacity-recovery")
     potcar = ensure_run_potcar(
         args.folder,
         pseudopotential_root=args.potcar_root,
         mapping_file=args.potcar_map,
     )
     prepared = None
-    if args.recover_capacity:
+    if args.recover_continue:
+        prepared = prepare_recovery(
+            args.folder,
+            "continue",
+            temperature=args.temperature,
+            nsw=args.nsw,
+        )
+    elif args.recover_capacity:
         operation = "expand" if args.ml_mb is not None else "discard"
         prepared = prepare_recovery(
             args.folder,
             operation,
+            temperature=args.temperature,
+            nsw=args.nsw,
             ml_mb=args.ml_mb,
             ml_mconf=args.ml_mconf,
             increase_eps_low=args.increase_eps_low,
@@ -385,7 +397,10 @@ def cmd_vasp_submit(args: argparse.Namespace) -> int:
         {
             "folder": str(Path(args.folder).resolve()),
             "potcar": potcar,
-            "capacity_recovery": prepared,
+            "continuation_recovery": prepared if args.recover_continue else None,
+            "capacity_recovery": prepared if args.recover_capacity else None,
+            "ml_continuation_recovery": prepared if args.recover_continue else None,
+            "ml_capacity_recovery": prepared if args.recover_capacity else None,
             "job_id": submit_run(
                 args.folder,
                 args.launcher,
@@ -654,7 +669,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     vasp = commands.add_parser("vasp", help="Safe VASP utilities")
     vasp_commands = vasp.add_subparsers(dest="vasp_command", required=True)
-    recover = vasp_commands.add_parser("recover", help="Continue/refit/stability/capacity recovery")
+    recover = vasp_commands.add_parser(
+        "ml-recover",
+        aliases=["recover"],
+        help="Continue/refit/stability/capacity recovery for VASP MLFF",
+    )
     recover.add_argument(
         "operation", choices=("continue", "discard", "expand", "refit", "stability")
     )
@@ -712,7 +731,7 @@ def build_parser() -> argparse.ArgumentParser:
     pack.add_argument("--force", action="store_true")
     pack.set_defaults(func=cmd_vasp_pack)
     vsubmit = vasp_commands.add_parser(
-        "submit", help="Submit one VASP run, optionally recovering MLFF capacity first"
+        "submit", help="Submit one VASP run, optionally preparing an MLFF recovery first"
     )
     vsubmit.add_argument("folder")
     vsubmit.add_argument(
@@ -727,10 +746,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--potcar-map",
         help="Optional mapping override; default is the built-in supplied dictionary",
     )
-    vsubmit.add_argument(
+    recovery = vsubmit.add_mutually_exclusive_group()
+    recovery.add_argument(
+        "--ml-continue",
+        "--recover-continue",
+        dest="recover_continue",
+        action="store_true",
+        help="Archive and prepare an interrupted MLFF continuation before submission",
+    )
+    recovery.add_argument(
+        "--ml-capacity-recovery",
         "--recover-capacity",
+        dest="recover_capacity",
         action="store_true",
         help="Archive a capacity stop and resubmit; defaults to bounded-memory basis discarding",
+    )
+    vsubmit.add_argument(
+        "--temperature",
+        type=float,
+        help="Continuation temperature; otherwise preserve TEBEG or use 300 K fallback",
+    )
+    vsubmit.add_argument(
+        "--nsw",
+        type=int,
+        help="Continuation NSW; otherwise preserve the existing INCAR value",
     )
     vsubmit.add_argument(
         "--ml-mb",
