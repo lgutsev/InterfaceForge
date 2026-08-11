@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
 import zipfile
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -478,10 +480,21 @@ def resolve_launcher(folder: str | Path, launcher: str | None = None) -> Path:
     )
 
 
-def submit_run(folder: str | Path, launcher: str | None = None) -> str:
+def submit_run(
+    folder: str | Path,
+    launcher: str | None = None,
+    *,
+    potcar_root: str | Path | None = None,
+    potcar_mapping: str | Path | None = None,
+) -> str:
     """Submit one prepared run and return the scheduler job id."""
 
     run = Path(folder).resolve()
+    ensure_run_potcar(
+        run,
+        pseudopotential_root=potcar_root,
+        mapping_file=potcar_mapping,
+    )
     script = resolve_launcher(run, launcher)
     result = subprocess.run(
         ["sbatch", script.name],
@@ -495,18 +508,22 @@ def submit_run(folder: str | Path, launcher: str | None = None) -> str:
 
 
 def _poscar_elements(poscar: Path) -> list[str]:
-    """Read VASP 5+ species names from the canonical symbols line."""
+    """Read VASP 5+ species, with the legacy first-line convention as fallback."""
 
     lines = poscar.read_text(encoding="utf-8", errors="ignore").splitlines()
     if len(lines) < 7:
         raise SafetyError(f"POSCAR is too short: {poscar}")
     symbols = lines[5].split()
-    if not symbols or all(re.fullmatch(r"\d+", token) for token in symbols):
+    if symbols and all(re.fullmatch(r"\d+", token) for token in symbols):
+        counts = symbols
+        symbols = lines[0].split()
+    else:
+        counts = lines[6].split()
+    if not symbols or any(not re.fullmatch(r"[A-Z][a-z]?", token) for token in symbols):
         raise SafetyError(
-            "POSCAR does not contain a VASP 5+ element-symbol line. "
-            "Convert it with `iface vasp geom convert` first."
+            "POSCAR contains neither a valid VASP 5+ species line nor a legacy "
+            "first-line element list"
         )
-    counts = lines[6].split()
     if len(counts) != len(symbols) or not all(re.fullmatch(r"\d+", token) for token in counts):
         raise SafetyError(f"POSCAR element and count lines are inconsistent: {poscar}")
     return symbols
@@ -517,7 +534,7 @@ def assemble_potcar(
     output: str | Path,
     *,
     pseudopotential_root: str | Path,
-    mapping_file: str | Path,
+    mapping_file: str | Path | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     """Assemble POTCAR from an explicit licensed local pseudopotential tree."""
@@ -525,12 +542,20 @@ def assemble_potcar(
     poscar_path = Path(poscar).resolve()
     output_path = Path(output).resolve()
     root = Path(pseudopotential_root).expanduser().resolve()
-    mapping_path = Path(mapping_file).resolve()
     if output_path.exists() and not force:
         raise SafetyError(f"Refusing to overwrite existing POTCAR: {output_path}")
-    mapping = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))
+    if mapping_file is None:
+        mapping_label = "built-in POTCAR_DEFS mapping"
+        mapping_text = resources.files("interfaceforge").joinpath(
+            "templates/potcar_pbe_54.yaml"
+        ).read_text(encoding="utf-8")
+    else:
+        mapping_path = Path(mapping_file).resolve()
+        mapping_label = str(mapping_path)
+        mapping_text = mapping_path.read_text(encoding="utf-8")
+    mapping = yaml.safe_load(mapping_text)
     if not isinstance(mapping, Mapping):
-        raise SafetyError(f"Invalid POTCAR map: {mapping_path}")
+        raise SafetyError(f"Invalid POTCAR map: {mapping_label}")
     elements = _poscar_elements(poscar_path)
     source_files: list[Path] = []
     variants: list[str] = []
@@ -555,7 +580,57 @@ def assemble_potcar(
         "elements": elements,
         "variants": variants,
         "sources": [str(path) for path in source_files],
+        "mapping": mapping_label,
     }
+
+
+def resolve_potcar_root(explicit: str | Path | None = None) -> Path:
+    """Find the licensed local PBE PAW tree without bundling POTCAR data."""
+
+    candidates: list[Path] = []
+    if explicit is not None:
+        candidates.append(Path(explicit).expanduser())
+    if value := os.environ.get("IFACE_POTCAR_ROOT"):
+        candidates.append(Path(value).expanduser())
+    if value := os.environ.get("VASP_PP_PATH"):
+        base = Path(value).expanduser()
+        candidates.extend((base / "potpaw_PBE", base))
+    candidates.append(Path.home() / "pot" / "potpaw_PBE")
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_dir():
+            return resolved
+    searched = ", ".join(str(path) for path in candidates)
+    raise SafetyError(
+        "POTCAR is missing and no licensed PBE PAW tree was found. "
+        "Pass --potcar-root, set IFACE_POTCAR_ROOT, or set VASP_PP_PATH. "
+        f"Searched: {searched}"
+    )
+
+
+def ensure_run_potcar(
+    folder: str | Path,
+    *,
+    pseudopotential_root: str | Path | None = None,
+    mapping_file: str | Path | None = None,
+) -> dict[str, Any]:
+    """Generate a missing/empty run POTCAR from POSCAR before submission."""
+
+    run = Path(folder).resolve()
+    output = run / "POTCAR"
+    if output.is_file() and output.stat().st_size:
+        return {"status": "existing", "output": str(output)}
+    require_files(run, ("POSCAR",))
+    root = resolve_potcar_root(pseudopotential_root)
+    payload = assemble_potcar(
+        run / "POSCAR",
+        output,
+        pseudopotential_root=root,
+        mapping_file=mapping_file,
+        force=output.exists(),
+    )
+    payload["status"] = "generated"
+    return payload
 
 
 def prepare_standard_restart(

@@ -115,6 +115,7 @@ iface vasp geom freeze slab.vasp POSCAR --axis z --upper 5 --region inside
 iface vasp restart run/ --clean-electronic
 iface vasp recover continue run/ --temperature 450 --nsw 3000
 iface vasp recover expand run/ --ml-mb 12000
+iface vasp submit run/  # generates a missing POTCAR from the supplied dictionary
 iface vasp submit run/ --recover-capacity  # bounded-memory recovery via runvasp.sh
 iface vasp submit run/ --recover-capacity --increase-eps-low  # optional 10x sparsification
 iface vasp beef-plot runs/vasp --individual

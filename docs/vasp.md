@@ -18,6 +18,35 @@ Geometry tools use ASE and write VASP 5 structures with Selective Dynamics
 where applicable. `convert --cell-from` is intended for XYZ files whose
 periodic cell was lost.
 
+### POTCAR generation at submission
+
+`iface vasp submit` verifies that a nonempty POTCAR exists before calling
+`sbatch`. If it is missing, InterfaceForge generates it atomically from POSCAR
+using the built-in `POTCAR_DEFS` dictionary supplied for this project. Standard
+VASP 5+ species lines are preferred; the legacy convention used by
+`POTCAR_gen_v2`, with element symbols in the first POSCAR line, is also
+supported without modifying POSCAR.
+
+The licensed pseudopotential files remain local. The root is resolved in this
+order: `--potcar-root`, `IFACE_POTCAR_ROOT`, `VASP_PP_PATH` (including its
+`potpaw_PBE` child), then `~/pot/potpaw_PBE`. Submission stops before `sbatch`
+if any mapped source is missing; partial POTCAR files are never written.
+
+```bash
+export IFACE_POTCAR_ROOT=/home/$USER/pot/potpaw_PBE
+iface vasp submit run/
+```
+
+The standalone generator uses the same dictionary and discovery rules:
+
+```bash
+iface vasp potcar POSCAR --root /path/to/potpaw_PBE
+```
+
+Use `--potcar-map custom.yaml` during submission, or `--map custom.yaml` with
+the standalone command, only when intentionally overriding the supplied
+dictionary. Existing nonempty POTCAR files are preserved.
+
 ## Recovery
 
 `iface vasp recover` supports:

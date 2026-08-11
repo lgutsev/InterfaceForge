@@ -44,10 +44,12 @@ from .vasp import (
     INCAR_PRESETS,
     apply_incar_preset,
     assemble_potcar,
+    ensure_run_potcar,
     package_outputs,
     prepare_band_run,
     prepare_recovery,
     prepare_standard_restart,
+    resolve_potcar_root,
     submit_run,
 )
 from .workfunction import analyze_workfunction
@@ -321,7 +323,7 @@ def cmd_vasp_potcar(args: argparse.Namespace) -> int:
         assemble_potcar(
             args.poscar,
             args.output,
-            pseudopotential_root=args.root,
+            pseudopotential_root=resolve_potcar_root(args.root),
             mapping_file=args.map,
             force=args.force,
         )
@@ -364,6 +366,11 @@ def cmd_vasp_submit(args: argparse.Namespace) -> int:
         raise SafetyError("--increase-eps-low cannot be combined with --ml-mb expansion")
     if args.increase_eps_low and not args.recover_capacity:
         raise SafetyError("--increase-eps-low requires --recover-capacity")
+    potcar = ensure_run_potcar(
+        args.folder,
+        pseudopotential_root=args.potcar_root,
+        mapping_file=args.potcar_map,
+    )
     prepared = None
     if args.recover_capacity:
         operation = "expand" if args.ml_mb is not None else "discard"
@@ -377,8 +384,14 @@ def cmd_vasp_submit(args: argparse.Namespace) -> int:
     _json(
         {
             "folder": str(Path(args.folder).resolve()),
+            "potcar": potcar,
             "capacity_recovery": prepared,
-            "job_id": submit_run(args.folder, args.launcher),
+            "job_id": submit_run(
+                args.folder,
+                args.launcher,
+                potcar_root=args.potcar_root,
+                potcar_mapping=args.potcar_map,
+            ),
         }
     )
     return 0
@@ -671,8 +684,14 @@ def build_parser() -> argparse.ArgumentParser:
     band.set_defaults(func=cmd_vasp_band)
     potcar = vasp_commands.add_parser("potcar", help="Assemble POTCAR from a licensed local tree")
     potcar.add_argument("poscar")
-    potcar.add_argument("--root", required=True)
-    potcar.add_argument("--map", required=True)
+    potcar.add_argument(
+        "--root",
+        help="Licensed PBE PAW tree; otherwise use IFACE_POTCAR_ROOT/VASP_PP_PATH/~/pot/potpaw_PBE",
+    )
+    potcar.add_argument(
+        "--map",
+        help="Optional mapping override (default: built-in supplied POTCAR_DEFS dictionary)",
+    )
     potcar.add_argument("-o", "--output", default="POTCAR")
     potcar.add_argument("--force", action="store_true")
     potcar.set_defaults(func=cmd_vasp_potcar)
@@ -699,6 +718,14 @@ def build_parser() -> argparse.ArgumentParser:
     vsubmit.add_argument(
         "--launcher",
         help="Batch script (default: prefer runvasp.sh, then run.slurm)",
+    )
+    vsubmit.add_argument(
+        "--potcar-root",
+        help="Licensed PBE PAW tree used only when POTCAR is missing",
+    )
+    vsubmit.add_argument(
+        "--potcar-map",
+        help="Optional mapping override; default is the built-in supplied dictionary",
     )
     vsubmit.add_argument(
         "--recover-capacity",

@@ -9,6 +9,8 @@ from unittest.mock import patch
 from interfaceforge.audit import audit_run, find_runs, run_audit
 from interfaceforge.vasp import (
     apply_incar_preset,
+    assemble_potcar,
+    ensure_run_potcar,
     mlff_accuracy_profile_tags,
     package_outputs,
     parse_incar,
@@ -199,6 +201,7 @@ class VaspTests(unittest.TestCase):
             run = Path(temporary)
             (run / "run.slurm").write_text("#!/bin/bash\n", encoding="utf-8")
             (run / "runvasp.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+            (run / "POTCAR").write_text("existing licensed data\n", encoding="utf-8")
 
             self.assertEqual(resolve_launcher(run).name, "runvasp.sh")
             with patch("interfaceforge.vasp.subprocess.run") as mocked:
@@ -206,6 +209,75 @@ class VaspTests(unittest.TestCase):
                 self.assertEqual(submit_run(run), "12345")
                 mocked.assert_called_once()
                 self.assertEqual(mocked.call_args.args[0], ["sbatch", "runvasp.sh"])
+
+    def test_builtin_potcar_dictionary_matches_supplied_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            poscar = root / "POSCAR"
+            poscar.write_text(
+                "test\n1.0\n1 0 0\n0 1 0\n0 0 1\nTc Po Am\n1 1 1\nDirect\n"
+                "0 0 0\n0 0 0\n0 0 0\n",
+                encoding="utf-8",
+            )
+            pp_root = root / "potpaw_PBE"
+            expected = [("Tc_pv", b"tc\n"), ("Po_d", b"po\n"), ("Am", b"am\n")]
+            for variant, content in expected:
+                source = pp_root / variant / "POTCAR"
+                source.parent.mkdir(parents=True)
+                source.write_bytes(content)
+
+            payload = assemble_potcar(
+                poscar,
+                root / "POTCAR",
+                pseudopotential_root=pp_root,
+            )
+
+            self.assertEqual(payload["variants"], ["Tc_pv", "Po_d", "Am"])
+            self.assertEqual((root / "POTCAR").read_bytes(), b"tc\npo\nam\n")
+
+    def test_potcar_generator_supports_legacy_first_line_elements(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            poscar = root / "POSCAR"
+            poscar.write_text(
+                "Cs Pb I\n1.0\n1 0 0\n0 1 0\n0 0 1\n1 1 1\nDirect\n"
+                "0 0 0\n0 0 0\n0 0 0\n",
+                encoding="utf-8",
+            )
+            pp_root = root / "potpaw_PBE"
+            for variant in ("Cs_sv", "Pb_d", "I"):
+                source = pp_root / variant / "POTCAR"
+                source.parent.mkdir(parents=True)
+                source.write_text(variant + "\n", encoding="utf-8")
+
+            payload = assemble_potcar(
+                poscar,
+                root / "POTCAR",
+                pseudopotential_root=pp_root,
+            )
+
+            self.assertEqual(payload["variants"], ["Cs_sv", "Pb_d", "I"])
+
+    def test_launcher_generates_missing_potcar_before_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary) / "run"
+            pp_root = Path(temporary) / "potpaw_PBE"
+            run.mkdir()
+            (run / "POSCAR").write_text(
+                "test\n1.0\n1 0 0\n0 1 0\n0 0 1\nCs Pb I\n1 1 1\nDirect\n"
+                "0 0 0\n0 0 0\n0 0 0\n",
+                encoding="utf-8",
+            )
+            for variant in ("Cs_sv", "Pb_d", "I"):
+                source = pp_root / variant / "POTCAR"
+                source.parent.mkdir(parents=True)
+                source.write_text(variant + "\n", encoding="utf-8")
+
+            payload = ensure_run_potcar(run, pseudopotential_root=pp_root)
+
+            self.assertEqual(payload["status"], "generated")
+            self.assertEqual(payload["variants"], ["Cs_sv", "Pb_d", "I"])
+            self.assertTrue((run / "POTCAR").stat().st_size)
 
     def test_mode_aware_audit_recognizes_completed_training(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
