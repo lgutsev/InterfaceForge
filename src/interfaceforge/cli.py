@@ -35,6 +35,7 @@ from .geometry import (
     structure_summary,
     write_summary,
 )
+from .intermat import generate_intermat_interfaces, intermat_status
 from .mace_roi import evaluate_mace_roi_predictions, prepare_mace_roi_dataset
 from .report import build_report
 from .selection import select_from_csv
@@ -494,6 +495,34 @@ def cmd_workfunction(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_intermat(args: argparse.Namespace) -> int:
+    if args.intermat_command == "status":
+        payload = intermat_status()
+    else:
+        payload = generate_intermat_interfaces(
+            args.film,
+            args.substrate,
+            args.output,
+            film_miller=args.film_miller,
+            substrate_miller=args.substrate_miller,
+            film_thickness=args.film_thickness,
+            substrate_thickness=args.substrate_thickness,
+            separations=args.separation or [2.5],
+            vacuum=args.vacuum,
+            displacement_interval=args.displacement_interval,
+            max_area=args.max_area,
+            length_tolerance=args.length_tolerance,
+            angle_tolerance=args.angle_tolerance,
+            apply_strain=args.apply_strain,
+            use_conventional_film=not args.primitive_film,
+            use_conventional_substrate=not args.primitive_substrate,
+            max_candidates=args.max_candidates,
+            force=args.force,
+        )
+    _json(payload)
+    return 0
+
+
 def add_campaign_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-c", "--campaign", default="campaign.yaml")
 
@@ -666,6 +695,48 @@ def build_parser() -> argparse.ArgumentParser:
     ai2kit_approve.add_argument("--adapter-output")
     ai2kit_approve.add_argument("--round", dest="round_number", type=int, required=True)
     ai2kit_approve.set_defaults(func=cmd_ai2kit)
+
+    intermat = commands.add_parser(
+        "intermat", help="Optional InterMat crystalline-interface geometry adapter"
+    )
+    intermat_commands = intermat.add_subparsers(dest="intermat_command", required=True)
+    intermat_status_parser = intermat_commands.add_parser(
+        "status", help="Report dependency availability and adapter boundaries"
+    )
+    intermat_status_parser.set_defaults(func=cmd_intermat)
+    intermat_generate = intermat_commands.add_parser(
+        "generate", help="Generate commensurate film/substrate interface candidates"
+    )
+    intermat_generate.add_argument("film", help="Bulk film POSCAR")
+    intermat_generate.add_argument("substrate", help="Bulk substrate POSCAR")
+    intermat_generate.add_argument("output", help="Dedicated adapter output directory")
+    intermat_generate.add_argument("--film-miller", nargs=3, type=int, default=(0, 0, 1))
+    intermat_generate.add_argument("--substrate-miller", nargs=3, type=int, default=(0, 0, 1))
+    intermat_generate.add_argument("--film-thickness", type=float, default=16.0)
+    intermat_generate.add_argument("--substrate-thickness", type=float, default=16.0)
+    intermat_generate.add_argument(
+        "--separation",
+        action="append",
+        type=float,
+        default=None,
+        help="Interface separation in angstrom; repeat for a scan (default: 2.5)",
+    )
+    intermat_generate.add_argument("--vacuum", type=float, default=12.0)
+    intermat_generate.add_argument(
+        "--displacement-interval",
+        type=float,
+        default=0.0,
+        help="Fractional xy registry interval; zero emits one registry",
+    )
+    intermat_generate.add_argument("--max-area", type=float, default=300.0)
+    intermat_generate.add_argument("--length-tolerance", type=float, default=0.08)
+    intermat_generate.add_argument("--angle-tolerance", type=float, default=1.0)
+    intermat_generate.add_argument("--apply-strain", action="store_true")
+    intermat_generate.add_argument("--primitive-film", action="store_true")
+    intermat_generate.add_argument("--primitive-substrate", action="store_true")
+    intermat_generate.add_argument("--max-candidates", type=int, default=500)
+    intermat_generate.add_argument("--force", action="store_true")
+    intermat_generate.set_defaults(func=cmd_intermat)
 
     vasp = commands.add_parser("vasp", help="Safe VASP utilities")
     vasp_commands = vasp.add_subparsers(dest="vasp_command", required=True)

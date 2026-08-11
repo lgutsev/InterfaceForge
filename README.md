@@ -10,6 +10,10 @@ conservative DeepMD → LAMMPS → VASP closed loop. It is dry-run by default,
 never represents MACE as AI2-Kit-compatible, and keeps imported labels outside
 the canonical dataset until review. See [the AI2-Kit guide](docs/ai2kit.md).
 
+An optional InterMat adapter generates commensurate crystalline film/substrate
+registries while leaving all calculators and campaign mutation under explicit
+InterfaceForge control. See [the InterMat guide](docs/intermat.md).
+
 The project distills the reusable ideas in the original campaign templates into
 a portable Python CLI. It does **not** contain structures, trajectories,
 checkpoints, containers, cluster-specific private paths, or licensed VASP
@@ -26,6 +30,7 @@ pseudopotentials.
 | DeePMD | DPA-1, DPA-2, DPA-3 and experimental DPA-4 committees; TensorFlow/PyTorch backends; preflight → smoke → full → evaluation |
 | Active learning | thermodynamic exploration matrix and uncertainty-plus-diversity labeling queue |
 | Validation | parity metrics, work of adhesion with uncertainty propagation, rigid-separation curves |
+| Crystalline interface generation | optional InterMat surface matching, separation/registry scans, deduplicated POSCAR export |
 | Provenance | manifests, hashes, append-only events, JSON/CSV/Markdown audits and a self-contained HTML report |
 
 ## Install
@@ -41,6 +46,7 @@ pip install -e ".[all]"
 For configuration, audits and validation only, `pip install -e .` is enough.
 ASE-backed geometry and OUTCAR collection require `.[vasp]`.
 Experimental MACE-ROI training requires `pip install -e ".[mace-roi]"`.
+InterMat geometry generation requires `pip install -e ".[intermat]"`.
 
 ## Ten-minute start
 
