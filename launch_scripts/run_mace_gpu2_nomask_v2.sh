@@ -10,12 +10,22 @@
 #SBATCH -o mace.%j.out
 #SBATCH -e mace.%j.err
 
-set -euo pipefail
+# Conda activation scripts are not always compatible with nounset.
+set -eo pipefail
+
 cd "$SLURM_SUBMIT_DIR"
 
 module purge
+
+set +u
 source /home/lgutsev/miniforge3/etc/profile.d/conda.sh
 conda activate /project/lgutsev/env/mace_env
+set -u
+
+echo
+echo "Activated Conda environment:"
+echo "  $CONDA_PREFIX"
+echo
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -28,7 +38,9 @@ export NCCL_DEBUG=WARN
 export TORCH_DISTRIBUTED_DEBUG=OFF
 
 export MACE_NUM_WORKERS="${MACE_NUM_WORKERS:-8}"
-export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=""
+
+# Prevent an inherited value from changing PyTorch checkpoint loading.
+unset TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD || true
 
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.10/site-packages/nvidia/cublas/lib:${LD_LIBRARY_PATH:-}"
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.10/site-packages/nvidia/cuda_runtime/lib:$LD_LIBRARY_PATH"
@@ -61,33 +73,38 @@ echo "Training files:"
 ls -lh "$TRAIN_FILE" "$VALID_FILE" "$TEST_FILE"
 echo
 
-# Your extxyz files from ASE/VASP normally use these keys.
+# ASE/VASP extxyz property names.
 ENERGY_KEY="energy"
 FORCES_KEY="forces"
 
 echo "Checking first frame keys..."
+
 python - <<PY
 from ase.io import read
 
 for fname in ["$TRAIN_FILE", "$VALID_FILE", "$TEST_FILE"]:
     atoms = read(fname, index=0)
+
     print()
     print(fname)
     print("  info keys:  ", sorted(atoms.info.keys()))
     print("  array keys: ", sorted(atoms.arrays.keys()))
+
     if atoms.calc is not None:
         print("  calc keys:  ", sorted(atoms.calc.results.keys()))
     else:
         print("  calc keys:   None")
 
-    e = atoms.get_potential_energy()
-    f = atoms.get_forces()
-    print("  energy:     ", e)
-    print("  forces:     ", f.shape)
+    energy = atoms.get_potential_energy()
+    forces = atoms.get_forces()
+
+    print("  energy:     ", energy)
+    print("  forces:     ", forces.shape)
 PY
 
 MODEL_NAME="TiN_SiN_mace"
 MODEL_DIR="mace_model"
+
 mkdir -p "$MODEL_DIR"
 
 BATCH_SIZE=16
@@ -109,12 +126,16 @@ if grep -q -- "--keep_checkpoints" <<< "$HELP_TXT"; then
 fi
 
 SWA_ARGS=()
+
 if grep -q -- "--swa" <<< "$HELP_TXT"; then
     SWA_ARGS+=(--swa --start_swa "$START_SWA")
 fi
 
-export MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)"
-export MASTER_PORT="$((10000 + SLURM_JOB_ID % 50000))"
+export MASTER_ADDR
+MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)"
+
+export MASTER_PORT
+MASTER_PORT="$((10000 + SLURM_JOB_ID % 50000))"
 
 echo
 echo "Distributed settings:"
@@ -124,18 +145,34 @@ echo "  SLURM_NTASKS=${SLURM_NTASKS:-unset}"
 echo "  MACE_NUM_WORKERS=$MACE_NUM_WORKERS"
 echo
 
+echo "GPU inventory:"
+nvidia-smi --query-gpu=index,name,memory.total,driver_version \
+    --format=csv,noheader
+echo
+
 GPU_LOG="gpu_usage_${SLURM_JOB_ID}.log"
+
 nvidia-smi dmon -s pucm -d 5 > "$GPU_LOG" &
 GPU_MON_PID=$!
 
 cleanup() {
     local rc=$?
-    kill "$GPU_MON_PID" 2>/dev/null || true
-    exit "$rc"
+
+    if [[ -n "${GPU_MON_PID:-}" ]]; then
+        kill "$GPU_MON_PID" 2>/dev/null || true
+        wait "$GPU_MON_PID" 2>/dev/null || true
+    fi
+
+    return "$rc"
 }
+
 trap cleanup EXIT INT TERM
 
-srun -n 2 "$MACE_TRAIN_BIN" \
+echo "Starting distributed MACE training..."
+echo
+
+srun --ntasks=2 --kill-on-bad-exit=1 \
+    "$MACE_TRAIN_BIN" \
     --name "$MODEL_NAME" \
     --model "MACE" \
     --train_file "$TRAIN_FILE" \
@@ -168,15 +205,17 @@ srun -n 2 "$MACE_TRAIN_BIN" \
 
 echo
 echo "Training finished."
-echo "MACE has evaluated test.extxyz through --test_file."
+echo "MACE evaluated test.extxyz through --test_file."
 echo
 
 if [[ -x "$MACE_EVAL_BIN" ]]; then
     SEARCH_DIRS=()
+
     [[ -d "$MODEL_DIR" ]] && SEARCH_DIRS+=("$MODEL_DIR")
     [[ -d "checkpoints" ]] && SEARCH_DIRS+=("checkpoints")
 
     MODEL_PATH=""
+
     if ((${#SEARCH_DIRS[@]} > 0)); then
         MODEL_PATH="$(
             find "${SEARCH_DIRS[@]}" \
@@ -205,9 +244,10 @@ if [[ -x "$MACE_EVAL_BIN" ]]; then
         echo
         echo "Wrote test_predictions.extxyz"
     else
-        echo "Could not locate final .model file for explicit mace_eval_configs step."
-        echo "This is not necessarily fatal; check $MODEL_DIR and checkpoints/ manually."
+        echo "Could not locate the final .model file for mace_eval_configs."
+        echo "Check $MODEL_DIR and checkpoints/ manually."
     fi
 else
-    echo "mace_eval_configs not found; skipping explicit prediction-file generation."
+    echo "mace_eval_configs not found; skipping explicit prediction generation."
 fi
+
