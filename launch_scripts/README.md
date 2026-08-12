@@ -12,6 +12,9 @@ environment paths, wall time, job name, executable, and resource counts before r
 - `run_mace_gpu2_nomask_v2.sh`: original two-GPU TiN/SiN MACE training launcher.
 - `mace_train_committee.sh`: isolated additional-seed launcher that preserves the
   original model and writes each new committee member to a seed-specific directory.
+  It uses conservative batches (`8` training, `4` validation), expandable CUDA
+  segments, and records five-second GPU telemetry in each seed directory as
+  `gpu_usage_<jobid>.log`.
 
 Submit the three additional committee members from the directory containing
 `train.extxyz`, `valid.extxyz`, and `test.extxyz`:

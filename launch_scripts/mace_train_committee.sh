@@ -82,6 +82,10 @@ export PYTHONUNBUFFERED=1
 export NCCL_DEBUG=WARN
 export TORCH_DISTRIBUTED_DEBUG=OFF
 
+# Keep PyTorch's CUDA allocator from fragmenting the 80 GB A100 memory pool.
+# This directly addresses OOMs with a large reserved-but-unallocated region.
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+
 export MACE_NUM_WORKERS="${MACE_NUM_WORKERS:-8}"
 
 # Prevent an inherited value from changing PyTorch checkpoint loading.
@@ -152,8 +156,12 @@ for fname in ["$TRAIN_FILE", "$VALID_FILE", "$TEST_FILE"]:
     print("  forces:     ", forces.shape)
 PY
 
-BATCH_SIZE=16
-VALID_BATCH_SIZE=32
+# Conservative committee settings for heterogeneous bulk/surface/interface
+# structures. Validation computes forces through autograd and can peak above
+# training memory, so keep both per-rank batches comfortably below the prior
+# OOM configuration (training=16, validation=32).
+BATCH_SIZE=8
+VALID_BATCH_SIZE=4
 MAX_EPOCHS=20
 PATIENCE=10
 START_STAGE_TWO=16
@@ -207,21 +215,28 @@ echo
 
 GPU_LOG="$RUN_DIR/gpu_usage_${SLURM_JOB_ID}.log"
 
-nvidia-smi dmon -s pucm -d 5 > "$GPU_LOG" &
+(
+    echo "# MACE committee GPU monitor"
+    echo "# job_id=$SLURM_JOB_ID seed=$SEED host=$(hostname)"
+    echo "# started=$(date --iso-8601=seconds) interval_seconds=5"
+    exec nvidia-smi dmon -s pucm -d 5
+) > "$GPU_LOG" 2>&1 &
 GPU_MON_PID=$!
 
 cleanup() {
     local rc=$?
+
+    trap - EXIT INT TERM
 
     if [[ -n "${GPU_MON_PID:-}" ]]; then
         kill "$GPU_MON_PID" 2>/dev/null || true
         wait "$GPU_MON_PID" 2>/dev/null || true
     fi
 
-    return "$rc"
+    exit "$rc"
 }
 
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 echo "Starting committee training for seed $SEED..."
 echo
@@ -322,4 +337,3 @@ if [[ -x "$MACE_EVAL_BIN" ]]; then
 else
     echo "mace_eval_configs not found; skipping explicit prediction generation."
 fi
-
