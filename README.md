@@ -16,8 +16,9 @@ InterfaceForge control. See [the InterMat guide](docs/intermat.md).
 
 The project distills the reusable ideas in the original campaign templates into
 a portable Python CLI. It does **not** contain structures, trajectories,
-checkpoints, containers, cluster-specific private paths, or licensed VASP
-pseudopotentials.
+checkpoints, containers, or licensed VASP pseudopotentials. Personal,
+cluster-specific launcher backups are isolated under `launch_scripts/`; they are
+not used as package-generated templates.
 
 ## What it covers
 
