@@ -27,6 +27,12 @@ MAX_TEXT_BYTES = 80 * 1024 * 1024
 LEARNING_RATE_HEAVY_PCT = 40.0
 LEARNING_RATE_MODERATE_PCT = 15.0
 LEARNING_RATE_NEAR_REFIT_PCT = 3.0
+READINESS_PROFILES = ("general", "perovskite")
+PEROVSKITE_RECENT_WINDOW = 250
+PEROVSKITE_MIN_PLATEAU_RECORDS = 200
+PEROVSKITE_MAX_RECENT_LEARNING_PCT = 20.0
+PEROVSKITE_MAX_BEEF_P95_EV_A = 0.03
+PEROVSKITE_MAX_BEEF_HALF_DELTA_EV_A = 0.002
 SFF_STRONG_EXTRAPOLATION = 0.8
 SFF_SUBSTANTIAL_EXTRAPOLATION = 0.2
 SFF_MODERATE_EXTRAPOLATION = 0.05
@@ -34,6 +40,7 @@ SFF_MODERATE_EXTRAPOLATION = 0.05
 AT_A_GLANCE_COLUMNS = (
     ("run", "Run"),
     ("relative_path", "Relative path"),
+    ("readiness_profile", "Readiness profile"),
     ("ml_mode", "Mode"),
     ("progress_pct", "Progress (%)"),
     ("md_steps", "MD steps"),
@@ -41,10 +48,15 @@ AT_A_GLANCE_COLUMNS = (
     ("finished_normally", "Finished normally"),
     ("health", "Health"),
     ("learning_event_rate_pct", "Learning events (%)"),
+    ("recent_learning_event_rate_pct", "Recent learning events (%)"),
     ("critical_events", "Critical events"),
+    ("recent_critical_events", "Recent critical events"),
     ("bayesian_force_error_ev_a_last", "BEEF last (eV/A)"),
     ("bayesian_force_error_ev_a_max", "BEEF max (eV/A)"),
     ("ml_ctifor_ev_a_last", "ML_CTIFOR last (eV/A)"),
+    ("recent_beef_p95_ev_a", "Recent BEEF p95 (eV/A)"),
+    ("recent_beef_half_delta_ev_a", "Recent BEEF half-delta (eV/A)"),
+    ("perovskite_sampling_plateau", "Perovskite plateau"),
     ("true_force_error_ev_a_last", "True force error last (eV/A)"),
     ("sff_max_atom_max", "SFF max"),
     ("lconf_max", "LCONF max"),
@@ -83,8 +95,22 @@ def _stats(values: list[float], prefix: str) -> dict[str, float | None]:
     }
 
 
+def _percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * fraction
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
 def parse_ml_log(path: Path) -> dict[str, Any]:
     status = learning = critical = 0
+    status_events: list[tuple[bool, bool]] = []
     err: list[float] = []
     beef: list[float] = []
     threshold: list[float] = []
@@ -100,8 +126,11 @@ def parse_ml_log(path: Path) -> dict[str, Any]:
         upper = stripped.upper()
         if "STATUS" in upper:
             status += 1
-            learning += bool(re.search(r"\bLEARN(?:ING)?\b", upper))
-            critical += bool(re.search(r"\bCRIT(?:ICAL)?\b", upper))
+            is_learning = bool(re.search(r"\bLEARN(?:ING)?\b", upper))
+            is_critical = bool(re.search(r"\bCRIT(?:ICAL)?\b", upper))
+            learning += is_learning
+            critical += is_critical
+            status_events.append((is_learning, is_critical))
         if record == "ERR" and (value := _number(tokens, 3)) is not None:
             err.append(value)
         elif record in {"BEEF", "BEFF"}:
@@ -115,12 +144,44 @@ def parse_ml_log(path: Path) -> dict[str, Any]:
             integers = [int(token) for token in tokens[1:] if re.fullmatch(r"[-+]?\d+", token)]
             if integers:
                 lconf.append(integers[-1])
+    recent_status = status_events[-PEROVSKITE_RECENT_WINDOW:]
+    recent_beef = beef[-PEROVSKITE_RECENT_WINDOW:]
+    midpoint = len(recent_beef) // 2
+    recent_beef_half_delta = (
+        mean(recent_beef[midpoint:]) - mean(recent_beef[:midpoint])
+        if midpoint and len(recent_beef[midpoint:])
+        else None
+    )
+    recent_learning = sum(event[0] for event in recent_status)
+    recent_critical = sum(event[1] for event in recent_status)
+    recent_learning_rate = (
+        100.0 * recent_learning / len(recent_status) if recent_status else None
+    )
+    recent_beef_p95 = _percentile(recent_beef, 0.95)
+    perovskite_plateau = (
+        len(recent_beef) >= PEROVSKITE_MIN_PLATEAU_RECORDS
+        and recent_beef_p95 is not None
+        and recent_beef_p95 <= PEROVSKITE_MAX_BEEF_P95_EV_A
+        and recent_beef_half_delta is not None
+        and abs(recent_beef_half_delta) <= PEROVSKITE_MAX_BEEF_HALF_DELTA_EV_A
+        and recent_critical == 0
+        and recent_learning_rate is not None
+        and recent_learning_rate <= PEROVSKITE_MAX_RECENT_LEARNING_PCT
+    )
     result: dict[str, Any] = {
         "ml_log_present": bool(text),
         "status_records": status,
         "learning_events": learning,
         "critical_events": critical,
         "learning_event_rate_pct": 100.0 * learning / status if status else None,
+        "recent_status_records": len(recent_status),
+        "recent_learning_events": recent_learning,
+        "recent_learning_event_rate_pct": recent_learning_rate,
+        "recent_critical_events": recent_critical,
+        "recent_beef_records": len(recent_beef),
+        "recent_beef_p95_ev_a": recent_beef_p95,
+        "recent_beef_half_delta_ev_a": recent_beef_half_delta,
+        "perovskite_sampling_plateau": perovskite_plateau,
         "lconf_last": lconf[-1] if lconf else None,
         "lconf_max": max(lconf) if lconf else None,
     }
@@ -207,10 +268,67 @@ class Assessment:
     next_action: str
 
 
-def assess(row: dict[str, Any]) -> Assessment:
+def _assess_perovskite_training(row: dict[str, Any]) -> Assessment:
+    """Assess a fluxional perovskite sampling stage without demanding zero learning events."""
+
+    plateau = bool(row.get("perovskite_sampling_plateau"))
+    capacity_stop = bool(row.get("ml_capacity_stop"))
+    if plateau:
+        if capacity_stop:
+            health = "perovskite sampling checkpoint reached"
+        elif row.get("finished_normally"):
+            health = "perovskite sampling budget complete"
+        else:
+            health = "perovskite sampling plateau reached"
+        return Assessment(
+            health,
+            "Preserve ML_ABN; stop at a safe checkpoint, then SELECT/REFIT and "
+            "validate with prediction MD and held-out DFT.",
+        )
+    if capacity_stop:
+        return Assessment(
+            "perovskite sampling incomplete: capacity stop",
+            "Recent sampling has not met the perovskite plateau checks; continue "
+            "targeted sampling or expand/reselect deliberately.",
+        )
+    if not row.get("ml_log_present"):
+        return Assessment("failed or not initialized", "Inspect MLFF initialization and scheduler output.")
+    if not row.get("md_steps"):
+        return Assessment("no MD steps parsed", "Fix initialization or SCF convergence.")
+    if row.get("finished_normally"):
+        return Assessment(
+            "perovskite sampling budget complete; validation required",
+            "Do not extend solely to reduce learning events; SELECT/REFIT, run "
+            "prediction MD, and validate against held-out DFT.",
+        )
+    if int(row.get("recent_beef_records") or 0) < PEROVSKITE_MIN_PLATEAU_RECORDS:
+        return Assessment(
+            "perovskite sampling window incomplete",
+            f"Collect at least {PEROVSKITE_MIN_PLATEAU_RECORDS} usable BEEF records "
+            "before applying the plateau checkpoint.",
+        )
+    if int(row.get("recent_critical_events") or 0) > 0:
+        return Assessment(
+            "perovskite sampling still critical",
+            "Continue focused training until the recent window contains no critical events.",
+        )
+    if float(row.get("recent_learning_event_rate_pct") or 0.0) > PEROVSKITE_MAX_RECENT_LEARNING_PCT:
+        return Assessment(
+            "perovskite sampling still broadening",
+            "Continue focused sampling; the recent learning-event rate remains above the perovskite profile limit.",
+        )
+    return Assessment(
+        "perovskite BEEF not stationary",
+        "Continue only until the recent BEEF tail and half-window drift stabilize, then SELECT/REFIT and validate.",
+    )
+
+
+def assess(row: dict[str, Any], readiness_profile: str = "general") -> Assessment:
     mode = str(row.get("ml_mode", "")).lower()
     if row["oom_or_killed"]:
         return Assessment("failed: OOM/killed", "Fix memory or resources before interpreting the run.")
+    if mode == "train" and readiness_profile == "perovskite":
+        return _assess_perovskite_training(row)
     if row.get("ml_capacity_stop"):
         return Assessment(
             "stopped: ML local-reference capacity",
@@ -304,12 +422,17 @@ def find_runs(
     return sorted(runs)
 
 
-def audit_run(run: Path, root: Path) -> dict[str, Any]:
+def audit_run(run: Path, root: Path, *, readiness_profile: str = "general") -> dict[str, Any]:
+    if readiness_profile not in READINESS_PROFILES:
+        raise ValueError(
+            f"Unknown readiness profile {readiness_profile!r}; choose one of {', '.join(READINESS_PROFILES)}"
+        )
     incar = parse_incar(run / "INCAR")
     row: dict[str, Any] = {
         "run": run.name,
         "relative_path": "." if run == root else str(run.relative_to(root)),
         "path": str(run),
+        "readiness_profile": readiness_profile,
         "ml_mode": incar.get("ML_MODE", ""),
         "ml_lmlff": incar.get("ML_LMLFF", ""),
         "ml_lbasis_discard": incar.get("ML_LBASIS_DISCARD", ""),
@@ -344,7 +467,7 @@ def audit_run(run: Path, root: Path) -> dict[str, Any]:
         row["last_update_age_min"] = None
     target = row.get("nsw_target")
     row["progress_pct"] = 100.0 * row["md_steps"] / target if target else None
-    verdict = assess(row)
+    verdict = assess(row, readiness_profile)
     row["health"] = verdict.health
     row["next_action"] = verdict.next_action
     return row
@@ -418,14 +541,27 @@ def run_audit(
     output_dir: str | Path | None = None,
     recursive: bool = True,
     include_archives: bool = False,
+    readiness_profile: str = "general",
 ) -> dict[str, Any]:
     """Audit all detected runs and write JSON, CSV, and Markdown summaries."""
 
+    if readiness_profile not in READINESS_PROFILES:
+        raise ValueError(
+            f"Unknown readiness profile {readiness_profile!r}; choose one of "
+            f"{', '.join(READINESS_PROFILES)}"
+        )
     campaign_root = Path(root).resolve()
     destination = Path(output_dir).resolve() if output_dir else campaign_root / "reports" / "audit"
     destination.mkdir(parents=True, exist_ok=True)
     rows = [
-        {key: _clean(value) for key, value in audit_run(run, campaign_root).items()}
+        {
+            key: _clean(value)
+            for key, value in audit_run(
+                run,
+                campaign_root,
+                readiness_profile=readiness_profile,
+            ).items()
+        }
         for run in find_runs(
             campaign_root,
             recursive,
@@ -436,6 +572,7 @@ def run_audit(
     payload = {
         "schema_version": 1,
         "root": str(campaign_root),
+        "readiness_profile": readiness_profile,
         "run_count": len(rows),
         "health_counts": dict(counts),
         "runs": rows,
@@ -459,7 +596,11 @@ def run_audit(
         writer.writeheader()
         writer.writerows(summary_rows)
     workbook_written = _write_workbook(workbook_path, summary_rows, rows)
-    markdown = ["# InterfaceForge VASP audit\n", f"Audited **{len(rows)}** run folder(s).\n"]
+    markdown = [
+        "# InterfaceForge VASP audit\n",
+        f"Readiness profile: **{readiness_profile}**.\n",
+        f"Audited **{len(rows)}** run folder(s).\n",
+    ]
     if counts:
         markdown.extend(
             [

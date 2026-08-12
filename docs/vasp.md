@@ -143,6 +143,62 @@ The full audit records the active `ML_LBASIS_DISCARD`, `ML_EPS_LOW`,
 `ML_IALGO_LINREG`, `ML_SION1`, and `ML_MRB2` values so that recovery and
 accuracy-profile choices remain visible.
 
+### Perovskite readiness profile
+
+Use the named **`perovskite`** profile for fluxional halide-perovskite MLFF
+sampling campaigns:
+
+```bash
+iface audit runs/vasp --readiness-profile perovskite
+iface status runs/vasp --readiness-profile perovskite
+```
+
+This profile exists because adaptive `ML_CTIFOR` is a sampling threshold, not
+a convergence target. With `ML_ICRITERIA=1`, the threshold follows the recent
+Bayesian-error distribution, so a stable trajectory can retain a finite
+learning-event rate indefinitely. The profile therefore evaluates the latest
+250 `STATUS`/BEEF records rather than requiring the whole-run learning rate,
+BEEF, or true force error to approach zero.
+
+A perovskite sampling plateau requires all of the following:
+
+- at least 200 usable recent BEEF records;
+- recent BEEF 95th percentile no greater than 0.03 eV/A;
+- absolute difference between the mean BEEF of the two recent half-windows no
+  greater than 0.002 eV/A;
+- no critical events in the recent window;
+- recent learning-event rate no greater than 20%.
+
+When these checks pass, an unfinished active run is reported as
+`perovskite sampling plateau reached`. A clean `ML_MB`/`ML_MCONF` capacity
+stop is reported as `perovskite sampling checkpoint reached`. Reaching the
+planned `NSW` budget is also treated as the end of that sampling stage, but it
+still requires validation. Capacity stops that occur before the recent-window
+checks pass remain incomplete and retain recovery guidance.
+
+The option changes audit classification only; it never cancels a running job.
+After a checkpoint:
+
+1. Preserve and review `ML_ABN`.
+2. Run `ML_MODE=SELECT` with a larger local-reference allocation if reselection
+   is needed.
+3. Run the SVD-based `ML_MODE=REFIT`.
+4. Run prediction MD with `ML_ESTBLOCK=20-100` to monitor spilling.
+5. Label decorrelated prediction snapshots with the identical DFT settings and
+   compare forces, energies, and relevant perovskite/interface observables.
+
+This follows VASP's recommended separation of bounded on-the-fly sampling,
+optional reselection, SVD refitting, and independent testing. The numerical
+plateau thresholds are conservative InterfaceForge defaults motivated by the
+approximately 0.02 eV/A Bayesian-error scale commonly attainable around
+300-500 K; they are triage criteria rather than a universal scientific
+acceptance standard. See the
+[VASP MLFF best-practices guide](https://vasp.at/wiki/Best_practices_for_machine-learned_force_fields)
+and a recent
+[halide-perovskite surface workflow](https://arxiv.org/html/2502.19772v2)
+that accepted the final model using force-error and physical validation after
+staged bulk/surface training.
+
 ## Bayesian-error plots
 
 `iface vasp beef-plot ROOT` restores the campaign-level diagnostic formerly

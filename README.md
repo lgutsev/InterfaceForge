@@ -125,6 +125,7 @@ iface vasp ml-recover expand run/ --ml-mb 12000
 iface vasp submit run/  # generates a missing POTCAR from the supplied dictionary
 iface vasp submit run/ --ml-capacity-recovery  # bounded-memory recovery via runvasp.sh
 iface vasp submit run/ --ml-capacity-recovery --increase-eps-low  # optional 10x sparsification
+iface audit runs/vasp --readiness-profile perovskite
 iface vasp beef-plot runs/vasp --individual
 iface vasp band scf/ bands/ --kpoints KPOINTS.line
 iface vasp workfunction LOCPOT OUTCAR --plot-output workfunction.png
@@ -133,6 +134,34 @@ iface vasp pack campaign_outputs.zip --root runs/vasp
 
 `recover expand` requires a recognized capacity failure in OUTCAR unless
 `--force-expand` is explicitly supplied.
+
+### Perovskite MLFF readiness profile
+
+Fluxional halide perovskites can retain a finite learning-event rate because
+VASP's adaptive `ML_CTIFOR` follows the recent Bayesian-error distribution.
+Requiring the learning rate or BEEF to approach zero can therefore prolong
+on-the-fly sampling without improving the true force error. Make the intended
+alternative explicit with the named **`perovskite`** option:
+
+```bash
+iface audit . --readiness-profile perovskite
+iface status . --readiness-profile perovskite
+```
+
+The profile examines the most recent 250 records. It reports a perovskite
+sampling plateau after at least 200 usable BEEF records when the recent BEEF
+95th percentile is at most 0.03 eV/A, the means of the two half-windows differ
+by at most 0.002 eV/A, the recent window has no critical events, and its
+learning-event rate is at most 20%. A clean local-reference capacity stop is
+then reported as a sampling checkpoint instead of an automatic instruction to
+continue to the original `NSW` target.
+
+This option changes audit guidance only; it does not cancel a running Slurm
+job or certify the final potential. At a reported checkpoint, preserve
+`ML_ABN`, perform `ML_MODE=SELECT` when reselection is needed, perform the SVD
+`ML_MODE=REFIT`, and validate prediction MD against held-out DFT forces and
+application-specific structural observables. The default `general` profile is
+unchanged.
 
 ### VASP-MLFF Bayesian-error campaign plots
 

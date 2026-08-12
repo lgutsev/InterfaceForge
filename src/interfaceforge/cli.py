@@ -19,7 +19,7 @@ from .ai2kit import (
     run_adapter,
     stage_import,
 )
-from .audit import run_audit
+from .audit import READINESS_PROFILES, run_audit
 from .beef import plot_beef_campaign
 from .campaign import build_plan, prepare_campaign, submit_campaign
 from .config import load_campaign
@@ -122,8 +122,14 @@ def cmd_audit(args: argparse.Namespace) -> int:
         output_dir=args.output,
         recursive=not args.shallow,
         include_archives=args.include_archives,
+        readiness_profile=args.readiness_profile,
     )
-    _json({key: payload[key] for key in ("run_count", "health_counts", "outputs")})
+    _json(
+        {
+            key: payload[key]
+            for key in ("readiness_profile", "run_count", "health_counts", "outputs")
+        }
+    )
     return 0
 
 
@@ -133,6 +139,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         output_dir=args.output,
         recursive=True,
         include_archives=args.include_archives,
+        readiness_profile=args.readiness_profile,
     )
     for row in payload["runs"]:
         progress = "" if row["progress_pct"] is None else f"{row['progress_pct']:.1f}%"
@@ -560,6 +567,12 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("root", nargs="?", default=".")
     status.add_argument("--output")
     status.add_argument(
+        "--readiness-profile",
+        choices=READINESS_PROFILES,
+        default="general",
+        help="Use 'perovskite' for fluxional perovskite sampling plateaus and capacity checkpoints",
+    )
+    status.add_argument(
         "--include-archives",
         action="store_true",
         help="Include run folders whose relative path contains 'archive'",
@@ -570,6 +583,12 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("root", nargs="?", default=".")
     audit.add_argument("-o", "--output")
     audit.add_argument("--shallow", action="store_true")
+    audit.add_argument(
+        "--readiness-profile",
+        choices=READINESS_PROFILES,
+        default="general",
+        help="Use 'perovskite' for fluxional perovskite sampling plateaus and capacity checkpoints",
+    )
     audit.add_argument(
         "--include-archives",
         action="store_true",

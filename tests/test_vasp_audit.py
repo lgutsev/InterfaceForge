@@ -368,6 +368,76 @@ class VaspTests(unittest.TestCase):
             self.assertEqual(row["progress_pct"], 100.0)
             self.assertEqual(row["health"], "ready to refit and test")
 
+    def test_perovskite_profile_accepts_stationary_capacity_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text(
+                "ML_MODE=train\nNSW=2000\nPOTIM=0.5\nTEBEG=300\nTEEND=300\n",
+                encoding="utf-8",
+            )
+            (run / "OSZICAR").write_text(
+                "".join(f" {step} T= 300.0 E= -1\n" for step in range(1, 251)),
+                encoding="utf-8",
+            )
+            lines = []
+            for step in range(1, 251):
+                state = "learning" if step % 7 == 0 else "accurate"
+                beef = 0.0195 + 0.0001 * (step % 10)
+                lines.append(f"STATUS {step} {state}\n")
+                lines.append(f"BEEF {step} 0.0 {beef:.6f} 0.0 0.020000\n")
+            (run / "ML_LOGFILE").write_text("".join(lines), encoding="utf-8")
+            (run / "OUTCAR").write_text(
+                "Not enough storage reserved for local reference configurations.\n",
+                encoding="utf-8",
+            )
+
+            general = audit_run(run, run)
+            perovskite = audit_run(run, run, readiness_profile="perovskite")
+
+            self.assertEqual(general["health"], "stopped: ML local-reference capacity")
+            self.assertTrue(perovskite["perovskite_sampling_plateau"])
+            self.assertLess(perovskite["recent_learning_event_rate_pct"], 20.0)
+            self.assertEqual(perovskite["recent_critical_events"], 0)
+            self.assertEqual(
+                perovskite["health"], "perovskite sampling checkpoint reached"
+            )
+            self.assertIn("SELECT/REFIT", perovskite["next_action"])
+
+    def test_perovskite_profile_rejects_recent_critical_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text(
+                "ML_MODE=train\nNSW=2000\nPOTIM=0.5\n",
+                encoding="utf-8",
+            )
+            (run / "OSZICAR").write_text(
+                "".join(f" {step} T= 300.0 E= -1\n" for step in range(1, 251)),
+                encoding="utf-8",
+            )
+            lines = []
+            for step in range(1, 251):
+                state = "critical" if step == 245 else "accurate"
+                lines.append(f"STATUS {step} {state}\n")
+                lines.append(f"BEEF {step} 0.0 0.020000 0.0 0.020000\n")
+            (run / "ML_LOGFILE").write_text("".join(lines), encoding="utf-8")
+
+            row = audit_run(run, run, readiness_profile="perovskite")
+
+            self.assertFalse(row["perovskite_sampling_plateau"])
+            self.assertEqual(row["health"], "perovskite sampling still critical")
+
+    def test_cli_exposes_named_perovskite_readiness_profile(self) -> None:
+        parser = build_parser()
+        audit = parser.parse_args(
+            ["audit", "runs", "--readiness-profile", "perovskite"]
+        )
+        status = parser.parse_args(
+            ["status", "runs", "--readiness-profile", "perovskite"]
+        )
+
+        self.assertEqual(audit.readiness_profile, "perovskite")
+        self.assertEqual(status.readiness_profile, "perovskite")
+
     def test_run_discovery_excludes_archives_unless_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "campaign"
