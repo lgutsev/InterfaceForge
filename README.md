@@ -134,6 +134,50 @@ iface vasp pack campaign_outputs.zip --root runs/vasp
 `recover expand` requires a recognized capacity failure in OUTCAR unless
 `--force-expand` is explicitly supplied.
 
+### VASP-MLFF Bayesian-error campaign plots
+
+Run the plotting command from the campaign root: the directory containing the
+individual VASP run folders. InterfaceForge searches recursively for runs with
+both `INCAR` and `ML_LOGFILE`:
+
+```bash
+cd /path/to/campaign
+iface vasp beef-plot .
+```
+
+By default this writes `ML_BayesianErrorPlot_campaign.png` (one panel per
+run) and `ML_BayesianErrorPlot_campaign.csv` to the campaign root. Add
+`--individual` to also create separate per-run PNG files:
+
+```bash
+iface vasp beef-plot . --individual
+```
+
+MLFF recovery archives the preceding `ML_LOGFILE` under
+`.interfaceforge/archive/`. If a newly prepared continuation has not yet
+written new BEEF records, include those archived trajectory segments:
+
+```bash
+iface vasp beef-plot . --include-archives --individual
+```
+
+Use `-o`, `--data-output`, and `--dpi` to customize the outputs:
+
+```bash
+iface vasp beef-plot . \
+    --include-archives \
+    -o ML_Bayesian_campaign.png \
+    --data-output ML_Bayesian_campaign.csv \
+    --dpi 200
+```
+
+The plot reads BEEF/BEFF, ML_CTIFOR, and STATUS records from each
+`ML_LOGFILE`, and uses `POTIM` from the corresponding `INCAR` to convert
+steps to femtoseconds. Plotting requires Matplotlib, installed with
+`pip install -e ".[report]"` or `pip install -e ".[all]"`. If the command
+reports that no usable BEEF records were found, verify that the selected root
+contains completed MLFF runs or retry with `--include-archives`.
+
 ## Modern DeePMD configuration
 
 ```yaml
