@@ -51,6 +51,7 @@ AT_A_GLANCE_COLUMNS = (
     ("recent_learning_event_rate_pct", "Recent learning events (%)"),
     ("critical_events", "Critical events"),
     ("recent_critical_events", "Recent critical events"),
+    ("training_force_rmse_ev_a_last", "Training force RMSE (eV/A)"),
     ("bayesian_force_error_ev_a_last", "BEEF last (eV/A)"),
     ("bayesian_force_error_ev_a_max", "BEEF max (eV/A)"),
     ("ml_ctifor_ev_a_last", "ML_CTIFOR last (eV/A)"),
@@ -111,7 +112,9 @@ def _percentile(values: list[float], fraction: float) -> float | None:
 def parse_ml_log(path: Path) -> dict[str, Any]:
     status = learning = critical = 0
     status_events: list[tuple[bool, bool]] = []
-    err: list[float] = []
+    err_energy: list[float] = []
+    err_force: list[float] = []
+    err_stress: list[float] = []
     beef: list[float] = []
     threshold: list[float] = []
     spilling: list[float] = []
@@ -131,8 +134,13 @@ def parse_ml_log(path: Path) -> dict[str, Any]:
             learning += is_learning
             critical += is_critical
             status_events.append((is_learning, is_critical))
-        if record == "ERR" and (value := _number(tokens, 3)) is not None:
-            err.append(value)
+        if record == "ERR":
+            if (value := _number(tokens, 2)) is not None:
+                err_energy.append(value)
+            if (value := _number(tokens, 3)) is not None:
+                err_force.append(value)
+            if (value := _number(tokens, 4)) is not None:
+                err_stress.append(value)
         elif record in {"BEEF", "BEFF"}:
             if (value := _number(tokens, 3)) is not None:
                 beef.append(value)
@@ -182,10 +190,16 @@ def parse_ml_log(path: Path) -> dict[str, Any]:
         "recent_beef_p95_ev_a": recent_beef_p95,
         "recent_beef_half_delta_ev_a": recent_beef_half_delta,
         "perovskite_sampling_plateau": perovskite_plateau,
+        "training_rmse_records": len(err_force),
         "lconf_last": lconf[-1] if lconf else None,
         "lconf_max": max(lconf) if lconf else None,
     }
-    result.update(_stats(err, "true_force_error_ev_a"))
+    result.update(_stats(err_energy, "training_energy_rmse_ev_atom"))
+    result.update(_stats(err_force, "training_force_rmse_ev_a"))
+    result.update(_stats(err_stress, "training_stress_rmse_kbar"))
+    # Compatibility alias retained for audit consumers written before the ERR
+    # quantity was labeled explicitly as a training-set RMSE.
+    result.update(_stats(err_force, "true_force_error_ev_a"))
     result.update(_stats(beef, "bayesian_force_error_ev_a"))
     result.update(_stats(threshold, "ml_ctifor_ev_a"))
     result.update(_stats(spilling, "sff_max_atom"))
@@ -610,11 +624,19 @@ def run_audit(
             ]
         )
     if rows:
-        markdown.extend(["## Runs\n", "| Run | Mode | Progress | Health | Next action |", "|---|---:|---:|---|---|"])
+        markdown.extend(
+            [
+                "## Runs\n",
+                "| Run | Mode | Progress | Force RMSE (train) | Health | Next action |",
+                "|---|---:|---:|---:|---|---|",
+            ]
+        )
         for row in rows:
             progress = "" if row["progress_pct"] is None else f"{row['progress_pct']:.1f}%"
+            force_rmse = row.get("training_force_rmse_ev_a_last")
+            force_rmse_text = "" if force_rmse is None else f"{force_rmse:.6g} eV/A"
             markdown.append(
-                f"| `{row['relative_path']}` | {row['ml_mode']} | {progress} | "
+                f"| `{row['relative_path']}` | {row['ml_mode']} | {progress} | {force_rmse_text} | "
                 f"{row['health']} | {row['next_action']} |"
             )
     md_path.write_text("\n".join(markdown) + "\n", encoding="utf-8")

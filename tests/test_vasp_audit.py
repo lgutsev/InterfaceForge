@@ -357,7 +357,8 @@ class VaspTests(unittest.TestCase):
                 " 1 T= 300.0 E= -1\n 2 T= 301.0 E= -1\n", encoding="utf-8"
             )
             (run / "ML_LOGFILE").write_text(
-                "STATUS accepted\nSTATUS accepted\nERR a b 0.02\n", encoding="utf-8"
+                "STATUS accepted\nSTATUS accepted\nERR 2 0.001 0.02 0.3\n",
+                encoding="utf-8",
             )
             (run / "OUTCAR").write_text(
                 "General timing and accounting informations for this job\n",
@@ -367,6 +368,11 @@ class VaspTests(unittest.TestCase):
             self.assertEqual(row["ml_mode"], "train")
             self.assertEqual(row["progress_pct"], 100.0)
             self.assertEqual(row["health"], "ready to refit and test")
+            self.assertEqual(row["training_rmse_records"], 1)
+            self.assertEqual(row["training_energy_rmse_ev_atom_last"], 0.001)
+            self.assertEqual(row["training_force_rmse_ev_a_last"], 0.02)
+            self.assertEqual(row["training_stress_rmse_kbar_last"], 0.3)
+            self.assertEqual(row["true_force_error_ev_a_last"], 0.02)
 
     def test_perovskite_profile_accepts_stationary_capacity_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -470,7 +476,9 @@ class VaspTests(unittest.TestCase):
             run.mkdir(parents=True)
             (run / "INCAR").write_text("ML_MODE=train\nNSW=2\n", encoding="utf-8")
             (run / "OSZICAR").write_text(" 1 T= 300 E= -1\n", encoding="utf-8")
-            (run / "ML_LOGFILE").write_text("STATUS accepted\n", encoding="utf-8")
+            (run / "ML_LOGFILE").write_text(
+                "STATUS accepted\nERR 1 0.001 0.02 0.3\n", encoding="utf-8"
+            )
 
             payload = run_audit(root)
 
@@ -479,7 +487,11 @@ class VaspTests(unittest.TestCase):
             self.assertTrue(summary.is_file())
             self.assertTrue(full.is_file())
             self.assertLess(len(summary.read_text().split(",")), len(full.read_text().split(",")))
+            self.assertIn("Training force RMSE (eV/A)", summary.read_text(encoding="utf-8"))
             self.assertIn("Next action", summary.read_text(encoding="utf-8"))
+            markdown = Path(payload["outputs"]["markdown"]).read_text(encoding="utf-8")
+            self.assertIn("Force RMSE (train)", markdown)
+            self.assertIn("0.02 eV/A", markdown)
 
 
 if __name__ == "__main__":

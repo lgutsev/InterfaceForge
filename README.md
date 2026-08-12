@@ -156,6 +156,12 @@ learning-event rate is at most 20%. A clean local-reference capacity stop is
 then reported as a sampling checkpoint instead of an automatic instruction to
 continue to the original `NSW` target.
 
+The audit also reports the latest VASP `ERR` force RMSE prominently in
+`audit_summary.csv`, `audit.xlsx`, and `audit.md`; energy, force, and stress
+training RMSE values are retained in the full JSON/CSV/XLSX audit. These are
+fit errors over the accumulated training structures, not held-out test RMSE,
+so they inform refitting but do not by themselves certify the potential.
+
 This option changes audit guidance only; it does not cancel a running Slurm
 job or certify the final potential. At a reported checkpoint, preserve
 `ML_ABN`, perform `ML_MODE=SELECT` when reselection is needed, perform the SVD

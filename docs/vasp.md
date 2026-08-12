@@ -143,6 +143,15 @@ The full audit records the active `ML_LBASIS_DISCARD`, `ML_EPS_LOW`,
 `ML_IALGO_LINREG`, `ML_SION1`, and `ML_MRB2` values so that recovery and
 accuracy-profile choices remain visible.
 
+The audit parses every VASP `ERR` line as training-set RMSE and reports the
+latest energy RMSE (eV/atom), force RMSE (eV/A), and stress RMSE (kbar) in the
+full outputs. The latest force RMSE is also included in `audit_summary.csv`,
+the `At a glance` workbook sheet, and the Markdown run table. VASP recomputes
+these `ERR` quantities against all accumulated training structures whenever
+the force field is generated; they are therefore fitting diagnostics, not
+independent test errors. Use paired DFT/ML calculations on decorrelated,
+held-out prediction snapshots for the final force RMSE and property checks.
+
 ### Perovskite readiness profile
 
 Use the named **`perovskite`** profile for fluxional halide-perovskite MLFF
@@ -158,7 +167,7 @@ a convergence target. With `ML_ICRITERIA=1`, the threshold follows the recent
 Bayesian-error distribution, so a stable trajectory can retain a finite
 learning-event rate indefinitely. The profile therefore evaluates the latest
 250 `STATUS`/BEEF records rather than requiring the whole-run learning rate,
-BEEF, or true force error to approach zero.
+BEEF, or training RMSE to approach zero.
 
 A perovskite sampling plateau requires all of the following:
 
