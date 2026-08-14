@@ -101,6 +101,20 @@ iface train mace
 iface train deepmd
 ```
 
+Collect a completed four-member MACE committee into a compact, immutable bundle
+before deployment or active learning:
+
+```bash
+iface committee collect mace_committee stored_models/tin_sin_mace_v1.zip \
+  --expected-members 4
+iface committee verify stored_models/tin_sin_mace_v1
+```
+
+The collector creates both an extracted bundle and ZIP archive, copies only
+final models, rejects missing or duplicate members, and writes checksums plus
+source provenance. See
+[the MACE committee guide](docs/mace-committee.md).
+
 For interface-local and thermodynamic-cycle-aware MACE training, configure
 `models.mace.roi`, then prepare the immutable derived data before generating
 jobs:
@@ -270,7 +284,8 @@ commands correctly use the public `--pt` switch.
 See [the campaign format](docs/campaign.md),
 [the VASP guide](docs/vasp.md), and
 [the DeePMD guide](docs/deepmd.md). The experimental method is documented in
-[the MACE-ROI guide](docs/mace-roi.md). A complete editable configuration is in
+[the MACE-ROI guide](docs/mace-roi.md), and deployable committee storage in
+[the MACE committee guide](docs/mace-committee.md). A complete editable configuration is in
 [examples/interface-campaign/campaign.yaml](examples/interface-campaign/campaign.yaml).
 
 ## Development

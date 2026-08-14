@@ -23,6 +23,11 @@ Start from [the editable campaign](../examples/ai2kit/campaign.yaml) and
 `committee_models`, the canonical training/validation extxyz files, exploration
 structures, VASP inputs and POTCAR locations.
 
+If the models still live inside full `seed_*` training runs, first use the
+[committee collector](mace-committee.md) to create a compact, checksummed and
+immutable bundle. Point `committee_models` at the four files in that bundle's
+`models/` directory rather than at mutable training outputs.
+
 The first iteration uses the supplied committee without retraining it. For each
 configured structure, in-plane strain, temperature and replica, the generated
 workflow:

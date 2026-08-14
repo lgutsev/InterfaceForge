@@ -22,6 +22,7 @@ from .ai2kit import (
 from .audit import READINESS_PROFILES, run_audit
 from .beef import plot_beef_campaign
 from .campaign import build_plan, prepare_campaign, submit_campaign
+from .committee import collect_committee, verify_committee_bundle
 from .config import load_campaign
 from .data import collect_dataset
 from .errors import InterfaceForgeError, SafetyError
@@ -157,6 +158,26 @@ def cmd_collect(args: argparse.Namespace) -> int:
             seed=args.seed,
         )
     )
+    return 0
+
+
+def cmd_committee(args: argparse.Namespace) -> int:
+    if args.committee_command == "verify":
+        payload = verify_committee_bundle(args.bundle)
+    else:
+        payload = collect_committee(
+            args.source,
+            args.output,
+            engine=args.engine,
+            expected_members=args.expected_members,
+            model_pattern=args.model_pattern,
+            training_data=args.training_data,
+            training_data_output=args.training_data_output,
+            training_data_compression=args.training_data_compression,
+            label=args.label,
+            notes=args.notes,
+        )
+    _json(payload)
     return 0
 
 
@@ -603,6 +624,49 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--seed", type=int, default=20260730)
     collect.add_argument("--force", action="store_true")
     collect.set_defaults(func=cmd_collect)
+
+    committee = commands.add_parser(
+        "committee", help="Collect and verify immutable MLIP committee bundles"
+    )
+    committee_commands = committee.add_subparsers(dest="committee_command", required=True)
+    committee_collect = committee_commands.add_parser(
+        "collect", help="Copy completed seed models into a checksummed deployment bundle"
+    )
+    committee_collect.add_argument("source", help="Directory containing seed_* training runs")
+    committee_collect.add_argument(
+        "output", help="New bundle directory or .zip name; both directory and ZIP are created"
+    )
+    committee_collect.add_argument("--engine", choices=("mace",), default="mace")
+    committee_collect.add_argument("--expected-members", type=int, default=4)
+    committee_collect.add_argument(
+        "--model-pattern",
+        default="seed_*/mace_model/*_stagetwo.model",
+        help="Source-relative glob identifying one final model per seed run",
+    )
+    committee_collect.add_argument(
+        "--training-data",
+        action="append",
+        default=[],
+        help="Training-data file to hash as provenance; repeat as needed",
+    )
+    committee_collect.add_argument(
+        "--training-data-output",
+        help="Optional separate ZIP for the training-data files; never added to the model ZIP",
+    )
+    committee_collect.add_argument(
+        "--training-data-compression",
+        choices=("deflated", "stored"),
+        default="deflated",
+        help="Compression for the separate training-data ZIP (default: deflated)",
+    )
+    committee_collect.add_argument("--label")
+    committee_collect.add_argument("--notes")
+    committee_collect.set_defaults(func=cmd_committee)
+    committee_verify = committee_commands.add_parser(
+        "verify", help="Validate every checksum in a collected directory or ZIP archive"
+    )
+    committee_verify.add_argument("bundle")
+    committee_verify.set_defaults(func=cmd_committee)
 
     mace_roi = commands.add_parser(
         "mace-roi", help="Prepare region- and thermodynamic-cycle-aware MACE data"
