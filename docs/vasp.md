@@ -1,5 +1,9 @@
 # VASP utilities
 
+> **Verification note:** the VASP-MLFF preparation, audit, plotting, and
+> restart/recovery path has been used on real runs. That experience should not
+> be generalized to every static, relaxation, DOS, band, or geometry helper.
+
 InterfaceForge separates three concerns: generating new stages, auditing
 existing runs, and mutating a failed/finished run for recovery.
 

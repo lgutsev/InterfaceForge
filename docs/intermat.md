@@ -1,5 +1,8 @@
 # InterMat adapter
 
+> **Verification note:** code-only. No real InterMat generation campaign has
+> yet been run and its structures reviewed by a human through this adapter.
+
 InterfaceForge uses InterMat only as an optional crystalline-interface geometry
 generator. InterMat performs surface construction, Zur lattice matching, and
 film/substrate separation and lateral-registry scans. InterfaceForge retains

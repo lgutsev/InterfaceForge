@@ -1,5 +1,8 @@
 # Allegro backend
 
+> **Verification note:** code-only. No InterfaceForge-generated Allegro model has
+> yet been trained, compiled, or run through LAMMPS under human inspection.
+
 InterfaceForge treats Allegro as an optional MLIP backend for workloads where a strictly local equivariant model is attractive, especially large LAMMPS interface simulations. The adapter does not assume that the cluster-provided LAMMPS is usable. Instead it generates training, model-compilation, LAMMPS-build, runtime-preflight, and MD launcher assets under `models/allegro/`.
 
 ## Install
