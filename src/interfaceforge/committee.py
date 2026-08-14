@@ -17,7 +17,6 @@ from typing import Any
 from .errors import ConfigurationError, SafetyError
 from .state import sha256_file, utc_now
 
-
 _SEED_NAME = re.compile(r"^seed[_-](?P<seed>-?\d+)$")
 _RUN_ARTIFACTS = ("results", "mace_model", "checkpoints", "logs")
 
