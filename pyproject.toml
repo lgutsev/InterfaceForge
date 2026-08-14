@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "interfaceforge"
 version = "0.1.0"
-description = "Reproducible VASP, VASP-MLFF, MACE, and DeePMD campaigns for heterogeneous interfaces"
+description = "Reproducible VASP, VASP-MLFF, MACE, DeePMD, and Allegro campaigns for heterogeneous interfaces"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -18,7 +18,9 @@ keywords = [
   "machine-learning-potentials",
   "MACE",
   "DeePMD",
+  "Allegro",
   "interfaces",
+  "LAMMPS",
   "Slurm",
 ]
 classifiers = [
@@ -39,6 +41,7 @@ dependencies = [
 [project.optional-dependencies]
 vasp = ["ase>=3.23"]
 mace-roi = ["ase>=3.23", "mace-torch>=0.3.17,<0.4"]
+allegro = ["ase>=3.23", "nequip>=0.18.0", "nequip-allegro"]
 report = ["matplotlib>=3.7", "openpyxl>=3.1"]
 ai2kit = ["ai2-kit==1.0.9"]
 intermat = ["intermat>=2024.3.24", "spglib>=2.0"]
@@ -52,6 +55,7 @@ all = [
 [project.scripts]
 iface = "interfaceforge.cli:main"
 iface-mace-roi = "interfaceforge.mace_roi:main"
+iface-allegro = "interfaceforge.allegro:main"
 
 [project.urls]
 Homepage = "https://github.com/lgutsev/InterfaceForge"

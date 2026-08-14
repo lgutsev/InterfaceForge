@@ -10,3 +10,7 @@ jobs:
     command: "mace_run_train"
   deepmd_gpu:
     command: "dp"
+  allegro_gpu:
+    command: "nequip-train"
+  allegro_lammps:
+    command: "lmp"

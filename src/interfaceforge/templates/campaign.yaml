@@ -86,6 +86,23 @@ models:
     seeds: [11, 23, 37, 53]
     numb_steps: 500000
     batch_atoms: 1024
+  allegro:
+    enabled: false
+    profile: allegro_gpu
+    lammps_profile: allegro_lammps
+    train_file: datasets/canonical/train.extxyz
+    valid_file: datasets/canonical/valid.extxyz
+    test_file: datasets/canonical/test.extxyz
+    type_names: []
+    r_max: 5.0
+    batch_size: 4
+    max_epochs: 200
+    learning_rate: 0.001
+    l_max: 1
+    num_layers: 2
+    num_scalar_features: 64
+    num_tensor_features: 32
+    compile_device: cuda
 
 exploration:
   temperatures: [300, 450, 600]
