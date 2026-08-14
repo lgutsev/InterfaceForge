@@ -678,7 +678,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     active_backends = active_learning.add_subparsers(dest="active_backend", required=True)
     ai2kit = active_backends.add_parser(
-        "ai2kit", help="AI2-Kit 1.0.9 DeepMD/LAMMPS/VASP closed-loop adapter"
+        "ai2kit",
+        help="AI2-Kit active learning: TESLA MACE/OpenMM/VASP or legacy DeepMD/LAMMPS/VASP",
     )
     ai2kit_commands = ai2kit.add_subparsers(dest="ai2kit_command", required=True)
     ai2kit_export = ai2kit_commands.add_parser("export", help="Generate deterministic CLL configuration")

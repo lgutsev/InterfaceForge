@@ -1,79 +1,130 @@
-# Optional AI2-Kit adapter
+# AI2-Kit active learning
 
-> **Verification note:** code-only. The adapter has automated/mock coverage but
-> has not completed a human-supervised AI2-Kit → DeePMD → LAMMPS → VASP round on
-> real infrastructure. Treat every generated artifact as provisional.
+> **Verification note:** both adapters are code-only. Generated files and
+> failure guards have automated coverage, but no human-supervised external
+> AI2-Kit/oh-my-batch campaign has completed through labeling and retraining.
 
-InterfaceForge can generate and supervise an AI2-Kit 1.0.9 config-driven CLL workflow:
+InterfaceForge provides two process-isolated AI2-Kit 1.0.9 workflows:
 
-```text
-DeepMD committee → LAMMPS exploration → model deviation → VASP labels
-```
+| `workflow` | Path | Status |
+|---|---|---|
+| `tesla_mace` | Existing MACE committee → OpenMM NVT → committee force deviation → VASP labels; oh-my-batch handles Slurm expansion, concurrency, retry and recovery | Recommended for new MACE campaigns |
+| `cll_deepmd` | DeepMD → LAMMPS → VASP through AI2-Kit's deprecated config-driven CLL interface | Retained for backward compatibility |
 
-AI2-Kit remains optional and process-isolated. InterfaceForge continues to own the campaign,
-canonical datasets, raw-force policy, type ordering, hashes, lineage, standalone MACE and
-DeePMD workflows, VASP inputs, and scientific validation. MACE is not supported by this
-adapter. The [official AI2-Kit CLL manual](https://github.com/chenggroup/ai2-kit/blob/main/doc/manual/cll-workflow.md)
-now describes config-driven CLL as deprecated but maintained for backward compatibility;
-the adapter is therefore pinned and deliberately narrow.
+The TESLA implementation follows AI2-Kit's public
+[MACE/OpenMM/VASP example](https://github.com/chenggroup/ai2-kit/tree/main/example/supplement/skill-demo),
+with InterfaceForge configuration validation, hashing, label-key normalization
+and LONI profiles added around it.
 
-## Installation and configuration
+## TESLA with four ready MACE models
 
-Install only when executing the controller:
+Start from [the editable campaign](../examples/ai2kit/campaign.yaml) and
+[LONI profile](../examples/ai2kit/profile_loni.yaml). Set the four paths in
+`committee_models`, the canonical training/validation extxyz files, exploration
+structures, VASP inputs and POTCAR locations.
+
+The first iteration uses the supplied committee without retraining it. For each
+configured structure, in-plane strain, temperature and replica, the generated
+workflow:
+
+1. uses oh-my-batch to create and submit an OpenMM job;
+2. propagates MD with the first committee member;
+3. evaluates every saved frame with all committee members;
+4. writes a DeePMD-compatible `model_devi.out` containing the maximum, minimum
+   and mean per-atom force standard deviation;
+5. uses AI2-Kit to write `good.xyz`, `decent.xyz`, `poor.xyz` and `stats.tsv`;
+6. samples `decent.xyz`, generates VASP single-point jobs with oh-my-batch and
+   collects completed OUTCAR labels into `new-dataset/dataset.xyz`.
+
+When `max_iterations` exceeds one, later rounds train a new MACE committee from
+the base training data plus all earlier `new-dataset` files. More than one
+iteration still requires `--allow-multiple-iterations` at execution time.
+
+Committee deviation is an uncertainty proxy, not a DFT error. Do not copy the
+example thresholds blindly. Calibrate `trust_force_low` and
+`trust_force_high` against held-out DFT force errors for the target system.
+Frames below the low threshold are considered covered; frames between the
+thresholds are labeling candidates; frames above the high threshold are
+normally rejected as unsafe or badly extrapolative. `use_poor_frames` can admit
+a small reviewed sample.
+
+## Installation
+
+Install InterfaceForge, AI2-Kit and oh-my-batch in the controller environment:
 
 ```bash
 python -m pip install -e '.[ai2kit]'
 ```
 
-Set `active_learning.enabled: true` and fill the explicit thresholds and artifact paths shown
-in `examples/ai2kit/campaign.yaml`. Machine-specific SSH, Slurm, executable, job-template,
-remote work-directory, and licensed POTCAR paths belong in the scheduler profile; see
-`examples/ai2kit/profile_loni.yaml`. Passwords, tokens, and private keys are rejected.
+The GPU environment referenced by `profile.ai2kit.commands.python` must also
+provide `mace-torch`, `openmm`, and OpenMM-ML (`import openmmml`). The command
+paths are explicit so the controller does not depend on interactive Conda shell
+initialization. Edit the Slurm profile to match the LONI allocation and modules.
 
-The reviewed MVP is `se_e2_a` with the TensorFlow backend. Other single-architecture modes
-require `experimental_compatibility: true`; this is an opt-in boundary, not evidence that
-DPA-1/2/3/4 works through AI2-Kit 1.0.9.
+## Operation
 
-## External-controller architecture
-
-On LONI, run the AI2-Kit controller from a workstation/WSL session or a permitted login or
-service environment. Do **not** submit the controller as a compute job: LONI compute jobs may
-not call `sbatch` for child jobs, and `run --execute` refuses whenever `SLURM_JOB_ID` is set.
-AI2-Kit itself connects to the configured login host and submits the DeepMD, LAMMPS, and VASP
-jobs represented by the existing InterfaceForge profile templates.
-
-## Supervised operation
+Run the controller from a LONI login or other permitted service host, not from
+inside a Slurm allocation:
 
 ```bash
 iface active-learning ai2kit export -c campaign.yaml
-iface active-learning ai2kit preflight -c campaign.yaml --remote
+iface active-learning ai2kit preflight -c campaign.yaml
 iface active-learning ai2kit run -c campaign.yaml
 iface active-learning ai2kit run -c campaign.yaml --execute
 iface active-learning ai2kit status -c campaign.yaml
-iface active-learning ai2kit import -c campaign.yaml --round 0 --result-root /path/to/results
+```
+
+`run` is a dry-run unless `--execute` is supplied. The generated controller is
+`runs/active_learning/ai2kit/generated/run.sh`. It calls `omb job slurm submit
+--wait --recovery ...`; interrupted or failed submission state remains under
+the corresponding iteration directory. Resume only after inspection:
+
+```bash
+iface active-learning ai2kit run -c campaign.yaml --execute --resume
+```
+
+The main first-round outputs are:
+
+```text
+runs/active_learning/ai2kit/work/iter-000/
+  openmm/job-*/traj.xyz
+  openmm/job-*/model_devi.out
+  screening/good.xyz
+  screening/decent.xyz
+  screening/poor.xyz
+  screening/stats.tsv
+  vasp/job-*/OUTCAR
+  new-dataset/dataset.xyz
+```
+
+The OpenMM driver is fixed-cell Langevin NVT. InterfaceForge creates explicitly
+strained starting structures for cell/strain coverage; it does not claim NPT
+sampling. It stops a trajectory when the driving model produces non-finite
+values or a force above `max_force_ev_ang`, but committee screening itself is
+post-processing rather than an online stopping criterion.
+
+## Import and approval
+
+Label collection does not mutate the canonical dataset. Stage and review one
+round explicitly:
+
+```bash
+iface active-learning ai2kit import -c campaign.yaml \
+  --round 0 \
+  --result-root runs/active_learning/ai2kit/work/iter-000/new-dataset
 iface active-learning ai2kit approve -c campaign.yaml --round 0
 ```
 
-The first `run` is a dry-run. More than one configured iteration additionally requires
-`--allow-multiple-iterations`. Execution requires a successful current remote preflight whose
-campaign, profile, and generated-file hashes still match. Existing checkpoints require
-`--resume`. Checkpoints are opaque; InterfaceForge never deserializes them with pickle.
+Import validates species, cells, coordinates, energies, raw force shapes,
+finiteness, source hashes, VASP completion markers and duplicate structure
+identities. Approval records review state; promotion into the canonical dataset
+remains an explicit maintainer action.
 
-Export writes only known files beneath `runs/active_learning/ai2kit/generated`. `--force`
-replaces those files but does not delete checkpoints, logs, imports, POTCARs, or results.
-POTCAR content is never copied into the adapter output.
+## Legacy config-driven CLL
 
-Import is staging, not promotion. It writes `accepted.extxyz`, `rejected.csv`, `lineage.csv`,
-`import_manifest.json`, and `approval.json` beneath `imports/round_NNN`. It checks species,
-cell, coordinates, energies, raw force shapes and finiteness, source hashes, VASP completion
-evidence, and duplicate structure identities. The canonical dataset is not modified.
-
-## Recovery and limitations
-
-- If export inputs change, export again with `--force` and repeat remote preflight.
-- If the controller is interrupted, preserve `checkpoints/cll` and run with `--resume`.
-- Failed execution preserves checkpoints and points to bounded stderr logs.
-- YAML parsing, shell syntax checks, and mocked CI are not engine integration tests.
-- Autonomous production use is not approved. A real one-round smoke workflow must first
-  demonstrate correct remote execution, restart, label convergence, lineage, and independent
-  scientific validation.
+Existing configurations without `workflow`, or with `workflow: cll_deepmd`,
+retain the pinned DeepMD/LAMMPS/VASP adapter. It expects the earlier profile
+keys (`ssh`, `work_dir`, `python_cmd`, DeepMD/LAMMPS commands) and uses AI2-Kit's
+deprecated but backward-compatible `workflow cll-mlp-training` command. This
+path is maintained to avoid breaking existing campaigns, not recommended for a
+new MACE committee.

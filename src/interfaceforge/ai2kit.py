@@ -293,6 +293,10 @@ def build_ai2kit_command(campaign: Campaign, paths: AdapterPaths, profile_ai2kit
 
 def export_adapter(campaign: Campaign, *, output: str | Path | None = None, force: bool = False) -> dict[str, Any]:
     settings = _settings(campaign)
+    if settings.get("workflow") == "tesla_mace":
+        from .ai2kit_tesla import export_tesla_adapter
+
+        return export_tesla_adapter(campaign, output=output, force=force)
     paths = adapter_paths(campaign, output)
     if paths.root.exists() and any(paths.root.iterdir()) and not force:
         raise SafetyError(
@@ -464,6 +468,15 @@ def _remote_probe(host: str, arguments: list[str], timeout: int = 30) -> subproc
 
 def preflight_adapter(campaign: Campaign, *, output_root: str | Path | None = None, remote: bool = False,
                       report_output: str | Path | None = None) -> dict[str, Any]:
+    if _settings(campaign).get("workflow") == "tesla_mace":
+        from .ai2kit_tesla import preflight_tesla_adapter
+
+        return preflight_tesla_adapter(
+            campaign,
+            output_root=output_root,
+            remote=remote,
+            report_output=report_output,
+        )
     paths = adapter_paths(campaign, output_root)
     manifest = _load_json(paths.manifest)
     profile = load_profile(campaign.profile_path)
@@ -563,6 +576,16 @@ def preflight_adapter(campaign: Campaign, *, output_root: str | Path | None = No
 
 def run_adapter(campaign: Campaign, *, output_root: str | Path | None = None, execute: bool = False,
                 resume: bool = False, allow_multiple_iterations: bool = False) -> dict[str, Any]:
+    if _settings(campaign).get("workflow") == "tesla_mace":
+        from .ai2kit_tesla import run_tesla_adapter
+
+        return run_tesla_adapter(
+            campaign,
+            output_root=output_root,
+            execute=execute,
+            resume=resume,
+            allow_multiple_iterations=allow_multiple_iterations,
+        )
     paths = adapter_paths(campaign, output_root)
     manifest = _load_json(paths.manifest)
     profile_ai2kit = _profile_settings(load_profile(campaign.profile_path), list(campaign.dataset["type_map"]))
@@ -618,6 +641,10 @@ def run_adapter(campaign: Campaign, *, output_root: str | Path | None = None, ex
 
 
 def adapter_status(campaign: Campaign, *, output_root: str | Path | None = None) -> dict[str, Any]:
+    if _settings(campaign).get("workflow") == "tesla_mace":
+        from .ai2kit_tesla import status_tesla_adapter
+
+        return status_tesla_adapter(campaign, output_root=output_root)
     paths = adapter_paths(campaign, output_root)
     if not paths.manifest.is_file():
         return {"state": "not_exported", "output_root": str(paths.root)}

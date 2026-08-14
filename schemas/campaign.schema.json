@@ -82,10 +82,12 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "workflow": {"enum": ["cll_deepmd", "tesla_mace"]},
             "version": {"const": "1.0.9"},
+            "omb_version": {"type": "string", "minLength": 1},
             "executor_name": {"type": "string", "minLength": 1},
-            "trainer": {"const": "deepmd"},
-            "explorer": {"const": "lammps"},
+            "trainer": {"enum": ["deepmd", "mace"]},
+            "explorer": {"enum": ["lammps", "openmm"]},
             "labeler": {"const": "vasp"},
             "selector": {"const": "model_deviation"},
             "architecture": {"enum": ["se_e2_a", "dpa1", "dpa2", "dpa3", "dpa4"]},
@@ -97,7 +99,29 @@
             "trust_force_low": {"type": "number", "minimum": 0},
             "trust_force_high": {"type": "number", "exclusiveMinimum": 0},
             "selection_limit": {"type": "integer", "minimum": 1},
-            "experimental_compatibility": {"type": "boolean"}
+            "experimental_compatibility": {"type": "boolean"},
+            "committee_models": {
+              "type": "array",
+              "minItems": 2,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "committee_seeds": {
+              "type": "array",
+              "minItems": 2,
+              "uniqueItems": true,
+              "items": {"type": "integer"}
+            },
+            "md_steps": {"type": "integer", "minimum": 1},
+            "sample_frequency": {"type": "integer", "minimum": 1},
+            "timestep_fs": {"type": "number", "exclusiveMinimum": 0},
+            "friction_ps": {"type": "number", "exclusiveMinimum": 0},
+            "equilibration_frames": {"type": "integer", "minimum": 0},
+            "max_force_ev_ang": {"type": "number", "exclusiveMinimum": 0},
+            "default_dtype": {"enum": ["float32", "float64"]},
+            "use_poor_frames": {"type": "integer", "minimum": 0},
+            "update_md_structures": {"type": "integer", "minimum": 0},
+            "md_workers": {"type": "integer", "minimum": 1},
+            "label_workers": {"type": "integer", "minimum": 1}
           }
         }
       }

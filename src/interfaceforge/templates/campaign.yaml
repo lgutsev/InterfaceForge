@@ -116,21 +116,31 @@ active_learning:
   max_iterations: 1
   output_root: runs/active_learning/ai2kit
   ai2kit:
+    workflow: tesla_mace
     version: "1.0.9"
+    omb_version: "0.7.2"
     executor_name: loni
-    trainer: deepmd
-    explorer: lammps
+    trainer: mace
+    explorer: openmm
     labeler: vasp
     selector: model_deviation
-    architecture: se_e2_a
-    backend: tensorflow
     model_count: 4
-    training_artifacts: [datasets/canonical/deepmd/train]
-    validation_artifacts: [datasets/canonical/deepmd/valid]
+    committee_models:
+      - models/committee/model-0.model
+      - models/committee/model-1.model
+      - models/committee/model-2.model
+      - models/committee/model-3.model
+    committee_seeds: [11, 23, 37, 53]
+    training_artifacts: [datasets/canonical/train.extxyz]
+    validation_artifacts: [datasets/canonical/valid.extxyz]
     exploration_artifacts: [structures/interface_ab.vasp]
-    trust_force_low: 0.15
-    trust_force_high: 0.30
+    trust_force_low: 0.10
+    trust_force_high: 0.25
     selection_limit: 20
+    md_steps: 10000
+    sample_frequency: 20
+    timestep_fs: 0.5
+    default_dtype: float64
 
 validation:
   parity: true

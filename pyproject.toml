@@ -43,7 +43,7 @@ vasp = ["ase>=3.23"]
 mace-roi = ["ase>=3.23", "mace-torch>=0.3.17,<0.4"]
 allegro = ["ase>=3.23", "nequip>=0.18.0", "nequip-allegro"]
 report = ["matplotlib>=3.7", "openpyxl>=3.1"]
-ai2kit = ["ai2-kit==1.0.9"]
+ai2kit = ["ai2-kit==1.0.9", "oh-my-batch==0.7.2", "ase>=3.23"]
 intermat = ["intermat>=2024.3.24", "spglib>=2.0"]
 dev = ["ase>=3.23", "pytest>=8", "ruff>=0.6"]
 all = [

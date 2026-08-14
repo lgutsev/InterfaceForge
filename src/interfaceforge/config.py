@@ -272,7 +272,9 @@ def _validate_active_learning(active_learning: dict[str, Any], models: dict[str,
     active_learning["ai2kit"] = adapter
 
     adapter_allowed = {
+        "workflow",
         "version",
+        "omb_version",
         "executor_name",
         "trainer",
         "explorer",
@@ -288,6 +290,19 @@ def _validate_active_learning(active_learning: dict[str, Any], models: dict[str,
         "trust_force_high",
         "selection_limit",
         "experimental_compatibility",
+        "committee_models",
+        "committee_seeds",
+        "md_steps",
+        "sample_frequency",
+        "timestep_fs",
+        "friction_ps",
+        "equilibration_frames",
+        "max_force_ev_ang",
+        "default_dtype",
+        "use_poor_frames",
+        "update_md_structures",
+        "md_workers",
+        "label_workers",
     }
     adapter_unknown = sorted(set(adapter) - adapter_allowed)
     if adapter_unknown:
@@ -303,10 +318,16 @@ def _validate_active_learning(active_learning: dict[str, Any], models: dict[str,
         raise SafetyError("AI2-kit active learning requires approval_required: true")
     if active_learning["max_iterations"] < 1:
         raise ConfigurationError("active_learning.max_iterations must be positive")
+    workflow = str(adapter.get("workflow", "cll_deepmd")).lower()
+    if workflow not in {"cll_deepmd", "tesla_mace"}:
+        raise ConfigurationError(
+            "active_learning.ai2kit.workflow must be 'cll_deepmd' or 'tesla_mace'"
+        )
+    adapter["workflow"] = workflow
     fixed = {
         "version": "1.0.9",
-        "trainer": "deepmd",
-        "explorer": "lammps",
+        "trainer": "mace" if workflow == "tesla_mace" else "deepmd",
+        "explorer": "openmm" if workflow == "tesla_mace" else "lammps",
         "labeler": "vasp",
         "selector": "model_deviation",
     }
@@ -346,6 +367,91 @@ def _validate_active_learning(active_learning: dict[str, Any], models: dict[str,
         if not isinstance(values, list) or not values or any(not str(value).strip() for value in values):
             raise ConfigurationError(f"active_learning.ai2kit.{key} must be a non-empty list")
         adapter[key] = [str(value) for value in values]
+
+    if workflow == "tesla_mace":
+        adapter["omb_version"] = str(adapter.get("omb_version", "0.7.2"))
+        committee_models = adapter.get("committee_models")
+        if (
+            not isinstance(committee_models, list)
+            or not committee_models
+            or any(not str(value).strip() for value in committee_models)
+        ):
+            raise ConfigurationError(
+                "active_learning.ai2kit.committee_models must list the ready MACE model files"
+            )
+        adapter["committee_models"] = [str(value) for value in committee_models]
+        committee_seeds = adapter.get("committee_seeds", [11, 23, 37, 53])
+        if not isinstance(committee_seeds, list):
+            raise ConfigurationError("active_learning.ai2kit.committee_seeds must be a list")
+        try:
+            committee_seeds = [int(value) for value in committee_seeds]
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                "active_learning.ai2kit.committee_seeds must contain integers"
+            ) from exc
+        if len(committee_seeds) < adapter["model_count"]:
+            raise ConfigurationError(
+                "active_learning.ai2kit.committee_seeds must cover every MACE model"
+            )
+        if len(set(committee_seeds[: adapter["model_count"]])) != adapter["model_count"]:
+            raise ConfigurationError("AI2-kit MACE committee seeds must be unique")
+        if len(adapter["committee_models"]) != adapter["model_count"]:
+            raise ConfigurationError(
+                "active_learning.ai2kit.committee_models must match model_count"
+            )
+        adapter["committee_seeds"] = committee_seeds[: adapter["model_count"]]
+        integer_defaults = {
+            "md_steps": 10000,
+            "sample_frequency": 20,
+            "equilibration_frames": 10,
+            "use_poor_frames": 0,
+            "update_md_structures": 0,
+            "md_workers": 1,
+            "label_workers": 1,
+        }
+        for key, default in integer_defaults.items():
+            try:
+                value = int(adapter.get(key, default))
+            except (TypeError, ValueError) as exc:
+                raise ConfigurationError(f"active_learning.ai2kit.{key} must be an integer") from exc
+            if value < 0 or (
+                key in {"md_steps", "sample_frequency", "md_workers", "label_workers"}
+                and value < 1
+            ):
+                raise ConfigurationError(f"active_learning.ai2kit.{key} has an invalid value")
+            adapter[key] = value
+        saved_frames = adapter["md_steps"] // adapter["sample_frequency"]
+        if saved_frames < 1:
+            raise ConfigurationError(
+                "active_learning.ai2kit.sample_frequency cannot exceed md_steps"
+            )
+        if adapter["equilibration_frames"] >= saved_frames:
+            raise ConfigurationError(
+                "active_learning.ai2kit.equilibration_frames must leave at least one saved frame"
+            )
+        for key, default in {
+            "timestep_fs": 0.5,
+            "friction_ps": 1.0,
+            "max_force_ev_ang": 50.0,
+        }.items():
+            try:
+                value = float(adapter.get(key, default))
+            except (TypeError, ValueError) as exc:
+                raise ConfigurationError(f"active_learning.ai2kit.{key} must be numeric") from exc
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"active_learning.ai2kit.{key} must be positive")
+            adapter[key] = value
+        dtype = str(adapter.get("default_dtype", "float64")).lower()
+        if dtype not in {"float32", "float64"}:
+            raise ConfigurationError(
+                "active_learning.ai2kit.default_dtype must be float32 or float64"
+            )
+        adapter["default_dtype"] = dtype
+
+        mace = _mapping(models.get("mace"), "models.mace")
+        if not mace.get("enabled", False):
+            raise ConfigurationError("AI2-kit TESLA MACE requires models.mace.enabled: true")
+        return
 
     architecture = str(adapter.get("architecture", "se_e2_a")).lower()
     backend = str(adapter.get("backend", "tensorflow")).lower()

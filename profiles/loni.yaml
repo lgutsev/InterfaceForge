@@ -1,6 +1,17 @@
 name: loni
 scheduler: slurm
 
+ai2kit:
+  commands:
+    ai2kit: /project/YOUR_PROJECT/envs/mace/bin/ai2-kit
+    omb: /project/YOUR_PROJECT/envs/mace/bin/omb
+    python: /project/YOUR_PROJECT/envs/mace/bin/python
+    mace: /project/YOUR_PROJECT/envs/mace/bin/mace_run_train
+  jobs: {train: mace_gpu, explore: openmm_gpu, label: vasp_workq}
+  potcar_source:
+    H: /project/YOUR_PROJECT/potcars/H/POTCAR
+    O: /project/YOUR_PROJECT/potcars/O/POTCAR
+
 jobs:
   vasp_workq:
     partition: workq
@@ -38,6 +49,23 @@ jobs:
     cpus_per_task: 8
     gpus: 1
     time: "72:00:00"
+    modules: []
+    preamble:
+      - 'source "${MACE_ACTIVATE_SCRIPT:?Set MACE_ACTIVATE_SCRIPT}"'
+    environment:
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      PYTHONUNBUFFERED: "1"
+
+  openmm_gpu:
+    partition: gpu2
+    account: YOUR_LONI_ACCOUNT
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 8
+    gpus: 1
+    time: "12:00:00"
     modules: []
     preamble:
       - 'source "${MACE_ACTIVATE_SCRIPT:?Set MACE_ACTIVATE_SCRIPT}"'

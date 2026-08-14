@@ -1,17 +1,53 @@
-name: loni-ai2kit
+name: loni-ai2kit-tesla
 scheduler: slurm
+
 ai2kit:
-  ssh: {host: "YOUR_USER@YOUR_LONI_LOGIN"}
-  work_dir: /project/YOUR_PROJECT/ai2kit-work
-  python_cmd: /project/YOUR_PROJECT/envs/ai2kit/bin/python
-  commands: {ai2kit: ai2-kit, deepmd: dp, lammps: lmp, vasp: vasp_std}
-  jobs: {train: deepmd_gpu, explore: lammps_gpu, label: vasp_cpu}
+  commands:
+    ai2kit: /project/YOUR_PROJECT/envs/mace/bin/ai2-kit
+    omb: /project/YOUR_PROJECT/envs/mace/bin/omb
+    python: /project/YOUR_PROJECT/envs/mace/bin/python
+    mace: /project/YOUR_PROJECT/envs/mace/bin/mace_run_train
+  jobs: {train: mace_gpu, explore: openmm_gpu, label: vasp_cpu}
   potcar_source:
-    H: /project/YOUR_PROJECT/potcars/H/POTCAR
-    O: /project/YOUR_PROJECT/potcars/O/POTCAR
-  explore_concurrency: 1
-  label_concurrency: 1
+    Ti: /project/YOUR_PROJECT/potcars/Ti_pv/POTCAR
+    Si: /project/YOUR_PROJECT/potcars/Si/POTCAR
+    N: /project/YOUR_PROJECT/potcars/N/POTCAR
+
 jobs:
-  deepmd_gpu: {partition: gpu2, account: YOUR_ACCOUNT, nodes: 1, ntasks: 1, cpus_per_task: 8, gpus: 1, time: "04:00:00", modules: []}
-  lammps_gpu: {partition: gpu2, account: YOUR_ACCOUNT, nodes: 1, ntasks: 1, cpus_per_task: 8, gpus: 1, time: "04:00:00", modules: []}
-  vasp_cpu: {partition: workq, account: YOUR_ACCOUNT, nodes: 1, ntasks: 64, cpus_per_task: 1, time: "04:00:00", modules: [vasp6/6.5.1-cpu]}
+  mace_gpu:
+    partition: gpu2
+    account: YOUR_ACCOUNT
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 8
+    gpus: 1
+    time: "48:00:00"
+    modules: []
+    environment: &gpu_environment
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      PYTHONUNBUFFERED: "1"
+
+  openmm_gpu:
+    partition: gpu2
+    account: YOUR_ACCOUNT
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 8
+    gpus: 1
+    time: "12:00:00"
+    modules: []
+    environment: *gpu_environment
+
+  vasp_cpu:
+    partition: workq
+    account: YOUR_ACCOUNT
+    nodes: 1
+    ntasks: 64
+    cpus_per_task: 1
+    time: "24:00:00"
+    modules: [vasp6/6.5.1-cpu]
+    environment: {OMP_NUM_THREADS: "1"}
+    command: srun -n {ntasks} vasp_gam

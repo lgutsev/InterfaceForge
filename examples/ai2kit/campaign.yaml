@@ -1,27 +1,36 @@
 schema_version: 1
-project: {name: ai2kit-supervised-smoke}
+project: {name: tin-sin-mace-active-learning}
 profile: profile_loni.yaml
+
 reference:
   engine: vasp
   inputs: {INCAR: inputs/INCAR, KPOINTS: inputs/KPOINTS}
+
 systems:
-  - {id: interface, kind: interface, structure: structures/interface.vasp}
+  - {id: tin-sin-interface, kind: interface, structure: structures/interface.vasp}
+
 dataset:
   strategy: grouped
   ratios: [0.8, 0.1, 0.1]
   preserve_raw_forces: true
-  type_map: [H, O]
+  type_map: [Ti, Si, N]
+
 models:
-  deepmd:
+  mace:
     enabled: true
-    profile: deepmd_gpu
-    backend: tensorflow
-    descriptor: se_e2_a
-    architectures: [se_e2_a]
-    committee: 4
-    seeds: [11, 23, 37, 53]
-    numb_steps: 10000
-exploration: {temperatures: [300], strains: [0.0], replicas: 1}
+    profile: mace_gpu
+    batch_size: 16
+    max_num_epochs: 300
+    patience: 40
+    r_max: 6.0
+    energy_key: REF_energy
+    forces_key: REF_forces
+
+exploration:
+  temperatures: [300, 450, 600]
+  strains: [-0.02, 0.0, 0.02]
+  replicas: 2
+
 active_learning:
   enabled: true
   engine: ai2kit
@@ -29,18 +38,34 @@ active_learning:
   max_iterations: 1
   output_root: runs/active_learning/ai2kit
   ai2kit:
+    workflow: tesla_mace
     version: "1.0.9"
+    omb_version: "0.7.2"
     executor_name: loni
-    trainer: deepmd
-    explorer: lammps
+    trainer: mace
+    explorer: openmm
     labeler: vasp
     selector: model_deviation
-    architecture: se_e2_a
-    backend: tensorflow
     model_count: 4
-    training_artifacts: [datasets/canonical/deepmd/train]
-    validation_artifacts: [datasets/canonical/deepmd/valid]
+    committee_models:
+      - models/committee/original.model
+      - models/committee/seed-211.model
+      - models/committee/seed-307.model
+      - models/committee/seed-419.model
+    committee_seeds: [101, 211, 307, 419]
+    training_artifacts: [datasets/canonical/train.extxyz]
+    validation_artifacts: [datasets/canonical/valid.extxyz]
     exploration_artifacts: [structures/interface.vasp]
-    trust_force_low: 0.15
-    trust_force_high: 0.30
+    trust_force_low: 0.10
+    trust_force_high: 0.25
     selection_limit: 20
+    md_steps: 10000
+    sample_frequency: 20
+    timestep_fs: 0.5
+    friction_ps: 1.0
+    equilibration_frames: 10
+    max_force_ev_ang: 50.0
+    default_dtype: float64
+    use_poor_frames: 0
+    md_workers: 2
+    label_workers: 4

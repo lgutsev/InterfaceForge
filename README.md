@@ -7,11 +7,14 @@ training jobs, select new DFT labels, and compare interface properties rather
 than stopping at a global force RMSE. Most of that end-to-end workflow is still
 an implementation target, not an experimentally demonstrated capability.
 
-An optional, supervised AI2-Kit 1.0.9 adapter implements export and preflight
-for a conservative DeepMD → LAMMPS → VASP closed loop. It is dry-run by default,
-never represents MACE as AI2-Kit-compatible, and keeps imported labels outside
-the canonical dataset until review. This adapter has not been human-tested in a
-real AI2-Kit campaign. See [the AI2-Kit guide](docs/ai2kit.md).
+The optional AI2-Kit integration now supports the example-driven TESLA path for
+an existing MACE committee: MACE/OpenMM exploration → committee force
+deviation → VASP labeling. oh-my-batch generates the exploration/labeling job
+matrix and provides Slurm retry/recovery. The older config-driven
+DeepMD/LAMMPS/VASP adapter remains available as `workflow: cll_deepmd`. Both
+paths are dry-run by default and keep imported labels outside the canonical
+dataset until review. Neither has completed a human-tested real campaign. See
+[the AI2-Kit guide](docs/ai2kit.md).
 
 An optional InterMat adapter is implemented to generate commensurate crystalline
 film/substrate registries while leaving all calculators and campaign mutation
@@ -54,7 +57,7 @@ known gaps, and the minimum checks needed to promote a feature's status.
 | MACE | two-stage energy/force job generation; optional interface-local force weighting and thermodynamic-cycle loss | **Code-only beyond dataset generation.** Generated training, restart, committee, evaluation, and MACE-ROI paths have not been verified end to end. |
 | DeePMD | DPA-1, DPA-2, DPA-3 and experimental DPA-4 job generation; TensorFlow/PyTorch backends; preflight → smoke → full → evaluation | **Code-only beyond dataset generation.** No generated training/deployment chain is currently claimed as human-tested. |
 | Allegro | training/job-generation and LAMMPS-oriented adapter code | **Code-only.** No human-tested training or LAMMPS deployment. |
-| Active learning | thermodynamic exploration matrix and uncertainty-plus-diversity labeling queue; optional AI2-Kit adapter | **Code-only.** No completed DeepMD → LAMMPS → VASP loop. |
+| Active learning | thermodynamic exploration matrix and uncertainty-plus-diversity labeling queue; AI2-Kit TESLA MACE/OpenMM/VASP with oh-my-batch; legacy config-driven DeepMD/LAMMPS/VASP | **Code-only.** No completed external-engine loop. |
 | Validation | parity metrics, work of adhesion with uncertainty propagation, rigid-separation curves | **Code-only.** Numerical routines may be unit-tested, but no scientific validation campaign has established model accuracy. |
 | Crystalline interface generation | optional InterMat surface matching, separation/registry scans, deduplicated POSCAR export | **Code-only.** Generated structures have not been human-reviewed in a real InterMat campaign. |
 | Provenance | manifests, hashes, append-only events, JSON/CSV/Markdown audits and a self-contained HTML report | **Mostly code-only.** VASP-MLFF audit outputs are the exception; the broader campaign provenance chain has not been exercised end to end. |
@@ -73,6 +76,9 @@ For configuration, audits and validation only, `pip install -e .` is enough.
 ASE-backed geometry and OUTCAR collection require `.[vasp]`.
 Experimental MACE-ROI training requires `pip install -e ".[mace-roi]"`.
 InterMat geometry generation requires `pip install -e ".[intermat]"`.
+AI2-Kit/oh-my-batch controller support requires `pip install -e ".[ai2kit]"`;
+the GPU environment used for exploration must additionally provide MACE,
+OpenMM, and OpenMM-ML.
 
 ## Ten-minute start
 
