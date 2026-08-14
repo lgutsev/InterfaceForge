@@ -5,12 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pathlib
 import re
 import shutil
 import tempfile
 import zipfile
 from collections.abc import Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError, SafetyError
@@ -137,7 +138,7 @@ def _write_zip(bundle: Path, archive: Path, top_level: str) -> None:
     ) as handle:
         for path in files:
             relative = path.relative_to(bundle)
-            handle.write(path, (PurePosixPath(top_level) / relative.as_posix()).as_posix())
+            handle.write(path, (pathlib.PurePosixPath(top_level) / relative.as_posix()).as_posix())
 
 
 def _write_training_data_zip(
@@ -161,7 +162,7 @@ def _write_training_data_zip(
     checksum_lines: list[str] = []
     for record in records:
         source = Path(str(record["path"]))
-        stored = (PurePosixPath("data") / source.name).as_posix()
+        stored = (pathlib.PurePosixPath("data") / source.name).as_posix()
         if stored in names:
             raise SafetyError(
                 f"Training-data archive has duplicate basenames: {source.name}; rename the files first"
@@ -186,7 +187,7 @@ def _write_training_data_zip(
         "file_count": len(files),
         "files": files,
     }
-    prefix = PurePosixPath(top_level)
+    prefix = pathlib.PurePosixPath(top_level)
     readme = f"""# {label}
 
 Separate training-data archive associated with committee bundle
@@ -488,7 +489,7 @@ def _verify_committee_zip(archive: Path) -> dict[str, Any]:
     try:
         with zipfile.ZipFile(archive, "r") as handle:
             file_names = [name for name in handle.namelist() if not name.endswith("/")]
-            paths = [PurePosixPath(name) for name in file_names]
+            paths = [pathlib.PurePosixPath(name) for name in file_names]
             if any(path.is_absolute() or ".." in path.parts for path in paths):
                 raise SafetyError(f"Unsafe path in committee ZIP archive: {archive}")
             manifest_names = [
@@ -520,10 +521,10 @@ def _verify_committee_zip(archive: Path) -> dict[str, Any]:
             known_names = set(file_names)
             observed_hashes: set[str] = set()
             for member in members:
-                stored = PurePosixPath(str(member.get("stored_model", "")))
+                stored = pathlib.PurePosixPath(str(member.get("stored_model", "")))
                 if stored.is_absolute() or ".." in stored.parts:
                     raise SafetyError(f"Unsafe stored committee model path in ZIP: {stored}")
-                member_name = (PurePosixPath(top_level) / stored).as_posix()
+                member_name = (pathlib.PurePosixPath(top_level) / stored).as_posix()
                 if member_name not in known_names:
                     raise SafetyError(f"Missing committee model in ZIP: {stored}")
                 checksum, size = _sha256_zip_member(handle, member_name)
@@ -568,10 +569,10 @@ def _verify_training_data_zip(
 
     observed_hashes: set[str] = set()
     for record in files:
-        stored = PurePosixPath(str(record.get("stored_file", "")))
+        stored = pathlib.PurePosixPath(str(record.get("stored_file", "")))
         if stored.is_absolute() or ".." in stored.parts:
             raise SafetyError(f"Unsafe stored training-data path in ZIP: {stored}")
-        member_name = (PurePosixPath(top_level) / stored).as_posix()
+        member_name = (pathlib.PurePosixPath(top_level) / stored).as_posix()
         if member_name not in known_names:
             raise SafetyError(f"Missing training-data file in ZIP: {stored}")
         checksum, size = _sha256_zip_member(handle, member_name)

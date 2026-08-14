@@ -17,7 +17,7 @@ def write_committee(root: Path, seeds: tuple[int, ...] = (0, 211, 307, 419)) -> 
         for name in ("results", "mace_model", "checkpoints", "logs"):
             (run / name).mkdir(parents=True, exist_ok=True)
         (run / "mace_model" / "TiN_SiN_mace_stagetwo.model").write_bytes(
-            f"trained-model-seed-{seed}".encode("utf-8")
+            f"trained-model-seed-{seed}".encode()
         )
     return source
 
