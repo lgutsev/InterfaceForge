@@ -1,5 +1,9 @@
 # DeePMD campaigns
 
+> **Verification note:** only generation of DeePMD NPY data from real VASP
+> trajectories has been human-tested. The generated training, evaluation,
+> freeze/export, and LAMMPS paths are code-only and remain unverified.
+
 InterfaceForge validates the canonical `train`, `valid` and `test` NPY systems
 before generating any model directory. Every split must be non-empty and every
 system must use the same `type_map.raw`.

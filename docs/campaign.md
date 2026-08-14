@@ -1,5 +1,9 @@
 # Campaign format
 
+> **Verification note:** the VASP-MLFF campaign path and the MACE/DeePMD data
+> exporters have been exercised on real data. The complete multi-engine
+> campaign lifecycle, portability, and restartability have not been verified.
+
 `campaign.yaml` is the source of truth. Paths are resolved relative to that
 file, which makes a campaign movable between a workstation and a cluster.
 

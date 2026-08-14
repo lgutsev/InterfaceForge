@@ -1,18 +1,22 @@
 # InterfaceForge
 
-InterfaceForge is a campaign operating system for heterogeneous-interface
-potentials. It turns VASP and VASP-MLFF trajectories into one traceable dataset,
-generates restartable MACE and DeePMD committees, selects new DFT labels, and
-compares interface properties rather than stopping at a global force RMSE.
+InterfaceForge is an early-stage research codebase for building reproducible
+heterogeneous-interface potential workflows. Its intended scope is to turn VASP
+and VASP-MLFF trajectories into traceable datasets, generate MACE and DeePMD
+training jobs, select new DFT labels, and compare interface properties rather
+than stopping at a global force RMSE. Most of that end-to-end workflow is still
+an implementation target, not an experimentally demonstrated capability.
 
-An optional, supervised AI2-Kit 1.0.9 adapter can export and preflight a
-conservative DeepMD → LAMMPS → VASP closed loop. It is dry-run by default,
+An optional, supervised AI2-Kit 1.0.9 adapter implements export and preflight
+for a conservative DeepMD → LAMMPS → VASP closed loop. It is dry-run by default,
 never represents MACE as AI2-Kit-compatible, and keeps imported labels outside
-the canonical dataset until review. See [the AI2-Kit guide](docs/ai2kit.md).
+the canonical dataset until review. This adapter has not been human-tested in a
+real AI2-Kit campaign. See [the AI2-Kit guide](docs/ai2kit.md).
 
-An optional InterMat adapter generates commensurate crystalline film/substrate
-registries while leaving all calculators and campaign mutation under explicit
-InterfaceForge control. See [the InterMat guide](docs/intermat.md).
+An optional InterMat adapter is implemented to generate commensurate crystalline
+film/substrate registries while leaving all calculators and campaign mutation
+under explicit InterfaceForge control. It has not been human-tested with a real
+InterMat workflow. See [the InterMat guide](docs/intermat.md).
 
 The project distills the reusable ideas in the original campaign templates into
 a portable Python CLI. It does **not** contain structures, trajectories,
@@ -20,19 +24,40 @@ checkpoints, containers, or licensed VASP pseudopotentials. Personal,
 cluster-specific launcher backups are isolated under `launch_scripts/`; they are
 not used as package-generated templates.
 
-## What it covers
+## Verification status
 
-| Layer | InterfaceForge functionality |
-|---|---|
-| VASP preparation | static, relaxation, DFT-MD, DOS and line-band setup; geometry conversion, supercells, slabs, duplicate checks and Selective Dynamics |
-| VASP-MLFF | train → refit → stability scaffolding, continuation/capacity recovery, mode-aware audits |
-| Dataset | streaming OUTCAR collection, leakage-resistant splits, synchronized extxyz and DeePMD NPY layouts |
-| MACE | two-stage energy/force training; optional interface-local force weighting and thermodynamic-cycle loss |
-| DeePMD | DPA-1, DPA-2, DPA-3 and experimental DPA-4 committees; TensorFlow/PyTorch backends; preflight → smoke → full → evaluation |
-| Active learning | thermodynamic exploration matrix and uncertainty-plus-diversity labeling queue |
-| Validation | parity metrics, work of adhesion with uncertainty propagation, rigid-separation curves |
-| Crystalline interface generation | optional InterMat surface matching, separation/registry scans, deduplicated POSCAR export |
-| Provenance | manifests, hashes, append-only events, JSON/CSV/Markdown audits and a self-contained HTML report |
+The distinction below is important: **automated tests are not evidence that an
+external scientific engine or a complete HPC workflow has run successfully.**
+As of August 2026, the only parts exercised by a human on real scientific data
+are:
+
+- the VASP-MLFF preparation, audit, restart/recovery, and related plotting path;
+- the VASP trajectory data generators for MACE extxyz and DeePMD NPY datasets.
+
+Everything else is currently code-only: it may have unit tests, mocked command
+tests, schema checks, or shell-generation checks, but it has not been verified
+by a human in an end-to-end run with the named external engines. In particular,
+the repository does **not** yet establish that generated MACE, DeePMD, Allegro,
+LAMMPS, AI2-Kit, InterMat, or MACE-ROI workflows train, deploy, restart, or
+produce scientifically valid results.
+
+See [Verification and maturity](docs/verification.md) for the evidence standard,
+known gaps, and the minimum checks needed to promote a feature's status.
+
+## Implemented scope
+
+| Layer | Implemented functionality | Verification note |
+|---|---|---|
+| VASP preparation | static, relaxation, DFT-MD, DOS and line-band setup; geometry conversion, supercells, slabs, duplicate checks and Selective Dynamics | **Partially human-tested.** The VASP-MLFF workflow is used on real runs; do not infer that every generic VASP preset or geometry subcommand has been exercised. |
+| VASP-MLFF | train → refit → stability scaffolding, continuation/capacity recovery, mode-aware audits | **Human-tested on real campaigns.** This is the most mature part of the repository, but each new VASP version, cluster profile, and recovery condition still requires inspection. |
+| Dataset | streaming OUTCAR collection, leakage-resistant splits, synchronized extxyz and DeePMD NPY layouts | **Human-tested for data generation.** Real VASP data have been exported for MACE and DeePMD. This does not validate downstream training or model quality. |
+| MACE | two-stage energy/force job generation; optional interface-local force weighting and thermodynamic-cycle loss | **Code-only beyond dataset generation.** Generated training, restart, committee, evaluation, and MACE-ROI paths have not been verified end to end. |
+| DeePMD | DPA-1, DPA-2, DPA-3 and experimental DPA-4 job generation; TensorFlow/PyTorch backends; preflight → smoke → full → evaluation | **Code-only beyond dataset generation.** No generated training/deployment chain is currently claimed as human-tested. |
+| Allegro | training/job-generation and LAMMPS-oriented adapter code | **Code-only.** No human-tested training or LAMMPS deployment. |
+| Active learning | thermodynamic exploration matrix and uncertainty-plus-diversity labeling queue; optional AI2-Kit adapter | **Code-only.** No completed DeepMD → LAMMPS → VASP loop. |
+| Validation | parity metrics, work of adhesion with uncertainty propagation, rigid-separation curves | **Code-only.** Numerical routines may be unit-tested, but no scientific validation campaign has established model accuracy. |
+| Crystalline interface generation | optional InterMat surface matching, separation/registry scans, deduplicated POSCAR export | **Code-only.** Generated structures have not been human-reviewed in a real InterMat campaign. |
+| Provenance | manifests, hashes, append-only events, JSON/CSV/Markdown audits and a self-contained HTML report | **Mostly code-only.** VASP-MLFF audit outputs are the exception; the broader campaign provenance chain has not been exercised end to end. |
 
 ## Install
 
@@ -249,5 +274,8 @@ python -m unittest discover -s tests -v
 python -m compileall -q src
 ```
 
-InterfaceForge is an early research tool. Inspect generated inputs and smoke
-test each engine/version combination before spending a large allocation.
+Passing the unit tests means that the Python-level contracts still behave as
+encoded; it does not promote a feature to human-tested status. InterfaceForge
+is an early research tool. Inspect generated inputs and complete a small,
+independently checked smoke run for every engine/version/cluster combination
+before spending a large allocation.

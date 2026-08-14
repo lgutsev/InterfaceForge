@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "interfaceforge"
 version = "0.1.0"
-description = "Reproducible VASP, VASP-MLFF, MACE, DeePMD, and Allegro campaigns for heterogeneous interfaces"
+description = "Early-stage scaffolding for VASP, VASP-MLFF, MACE, DeePMD, and Allegro interface campaigns"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}

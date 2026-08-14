@@ -1,5 +1,9 @@
 # Optional AI2-Kit adapter
 
+> **Verification note:** code-only. The adapter has automated/mock coverage but
+> has not completed a human-supervised AI2-Kit → DeePMD → LAMMPS → VASP round on
+> real infrastructure. Treat every generated artifact as provisional.
+
 InterfaceForge can generate and supervise an AI2-Kit 1.0.9 config-driven CLL workflow:
 
 ```text

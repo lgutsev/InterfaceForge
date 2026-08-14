@@ -1,5 +1,9 @@
 # MACE-ROI: interface-local and cycle-consistent training
 
+> **Verification note:** experimental and code-only. The implementation has not
+> yet completed real MACE training or the ablation and property validation
+> required to support scientific claims.
+
 MACE-ROI is InterfaceForge's experimental MACE training mode for heterogeneous
 interfaces. It addresses two mismatches between ordinary atomistic fitting and
 the properties an interface model is ultimately asked to predict:
