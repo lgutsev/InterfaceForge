@@ -221,6 +221,13 @@ and SHA-256 checksums, and reports the checksum of the completed ZIP. `POTCAR`
 is excluded. Use `--include-large` when `OUTCAR`, `vasprun.xml`, `XDATCAR`, and
 `LOCPOT` are also worth the storage cost.
 
+The scanner does not descend into a directory whose name contains `backup`
+(case-insensitive) or begins with `X`. This prevents backup runs and earlier
+`X_OutPack...` results from being recursively stored again. `CHG`, `CHGCAR`,
+and `WAVECAR` are always excluded. The JSON result reports the archive size,
+total uncompressed size, excluded directories, and the ten largest retained
+files so unexpectedly large archives can be diagnosed directly.
+
 With no arguments, the command scans the current folder and writes a
 timestamped `MLFF_Models_<folder>_<UTC timestamp>.zip` there, matching the
 working-directory behavior of the earlier `PackageOutputsMD` script without
