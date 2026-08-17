@@ -786,6 +786,39 @@ def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def _excluded_model_directory_name(name: str) -> bool:
+    return "backup" in name.casefold() or name.startswith("X")
+
+
+def _discover_ml_ab_files(source_root: Path) -> tuple[list[Path], list[str]]:
+    """Find ML_AB files while pruning backup and generated-package trees."""
+
+    if _excluded_model_directory_name(source_root.name):
+        return [], ["."]
+
+    models: list[Path] = []
+    excluded_directories: list[str] = []
+    for current, directory_names, file_names in os.walk(source_root, topdown=True):
+        current_path = Path(current)
+        retained_directories: list[str] = []
+        for name in directory_names:
+            candidate = current_path / name
+            if name == ".interfaceforge" or candidate.is_symlink():
+                continue
+            if _excluded_model_directory_name(name):
+                excluded_directories.append(candidate.relative_to(source_root).as_posix())
+                continue
+            retained_directories.append(name)
+        directory_names[:] = retained_directories
+
+        if "ML_AB" not in file_names:
+            continue
+        model = current_path / "ML_AB"
+        if model.is_file() and not model.is_symlink() and model.stat().st_size:
+            models.append(model)
+    return sorted(models), sorted(excluded_directories)
+
+
 def archive_mlff_models(
     root: str | Path,
     output: str | Path | None = None,
@@ -812,16 +845,12 @@ def archive_mlff_models(
     if output_path.exists() and not force:
         raise SafetyError(f"Refusing to overwrite existing archive: {output_path}")
 
-    model_paths = sorted(
-        path
-        for path in source_root.rglob("ML_AB")
-        if path.is_file()
-        and not path.is_symlink()
-        and path.stat().st_size
-        and ".interfaceforge/archive" not in path.as_posix()
-    )
+    model_paths, excluded_directories = _discover_ml_ab_files(source_root)
     if not model_paths:
-        raise SafetyError(f"No nonempty ML_AB files found below {source_root}")
+        raise SafetyError(
+            f"No nonempty ML_AB files found below {source_root} after excluding "
+            "directories containing 'backup' or starting with 'X'"
+        )
 
     selected_names = set(_MODEL_ARCHIVE_FILES)
     if include_large:
@@ -861,6 +890,11 @@ def archive_mlff_models(
         "selection": "directories containing a nonempty ML_AB; scientific acceptance is user-supplied",
         "include_large": include_large,
         "potcar_excluded": True,
+        "large_restart_files_excluded": ["CHG", "CHGCAR", "WAVECAR"],
+        "directory_exclusions": {
+            "rules": ["name contains 'backup' (case-insensitive)", "name starts with 'X'"],
+            "excluded": excluded_directories,
+        },
         "runs": runs,
     }
 
@@ -892,13 +926,26 @@ def archive_mlff_models(
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
 
+    largest_files = sorted(
+        (
+            {"path": archive_name.as_posix(), "size_bytes": path.stat().st_size}
+            for path, archive_name in files_to_archive
+        ),
+        key=lambda item: int(item["size_bytes"]),
+        reverse=True,
+    )[:10]
     return {
         "root": str(source_root),
         "output": str(output_path),
         "archive_sha256": _sha256_file(output_path),
+        "archive_size_bytes": output_path.stat().st_size,
+        "total_uncompressed_bytes": sum(path.stat().st_size for path, _ in files_to_archive),
         "runs": len(runs),
         "files": len(files_to_archive),
+        "excluded_directories": excluded_directories,
+        "largest_files": largest_files,
         "include_large": include_large,
         "manifest": _MODEL_ARCHIVE_MANIFEST,
         "potcar_excluded": True,
+        "chg_chgcar_wavecar_excluded": True,
     }

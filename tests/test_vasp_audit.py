@@ -84,6 +84,8 @@ class VaspTests(unittest.TestCase):
             (accepted / "INCAR").write_text("ML_MODE=train\n", encoding="utf-8")
             (accepted / "OSZICAR").write_text(" 1 T= 300 E= -1\n", encoding="utf-8")
             (accepted / "POTCAR").write_text("licensed\n", encoding="utf-8")
+            for name in ("CHG", "CHGCAR", "WAVECAR"):
+                (accepted / name).write_text("large restart data\n", encoding="utf-8")
             (ignored / "INCAR").write_text("NSW=0\n", encoding="utf-8")
             output = root / "stored_models.zip"
 
@@ -96,6 +98,9 @@ class VaspTests(unittest.TestCase):
                 self.assertIn("accepted/ML_AB", names)
                 self.assertIn("accepted/INCAR", names)
                 self.assertNotIn("accepted/POTCAR", names)
+                self.assertNotIn("accepted/CHG", names)
+                self.assertNotIn("accepted/CHGCAR", names)
+                self.assertNotIn("accepted/WAVECAR", names)
                 self.assertNotIn("ignored/INCAR", names)
                 manifest = json.loads(
                     archive.read("interfaceforge-model-archive.json")
@@ -109,6 +114,36 @@ class VaspTests(unittest.TestCase):
                 hashlib.sha256(b"accepted model\n").hexdigest(),
             )
             self.assertTrue(manifest["potcar_excluded"])
+            self.assertTrue(result["chg_chgcar_wavecar_excluded"])
+            self.assertGreater(result["archive_size_bytes"], 0)
+            self.assertGreater(result["total_uncompressed_bytes"], 0)
+            self.assertIn(
+                "accepted/ML_AB",
+                [item["path"] for item in result["largest_files"]],
+            )
+
+    def test_model_archive_prunes_backup_and_x_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("accepted", "run_backup", "X_OldPackage", "nested/Backup-copy"):
+                run = root / name
+                run.mkdir(parents=True)
+                (run / "ML_AB").write_text(f"model from {name}\n", encoding="utf-8")
+                (run / "INCAR").write_text("ML_MODE=train\n", encoding="utf-8")
+
+            output = root / "stored_models.zip"
+            result = archive_mlff_models(root, output)
+
+            self.assertEqual(result["runs"], 1)
+            self.assertEqual(
+                result["excluded_directories"],
+                ["X_OldPackage", "nested/Backup-copy", "run_backup"],
+            )
+            with zipfile.ZipFile(output) as archive:
+                names = set(archive.namelist())
+            self.assertIn("accepted/ML_AB", names)
+            self.assertFalse(any("backup" in name.casefold() for name in names))
+            self.assertFalse(any(part.startswith("X") for name in names for part in Path(name).parts))
 
     def test_model_archive_requires_nonempty_ml_ab(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

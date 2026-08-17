@@ -190,6 +190,11 @@ always excluded. Add `--include-large` to retain `OUTCAR`, `vasprun.xml`,
 validation claim: point `--root` at runs you have already accepted.
 When the output argument is omitted, the archive is written to the current
 directory as `MLFF_Models_<folder>_<UTC timestamp>.zip`.
+Directory trees are pruned when any folder name contains `backup`
+(case-insensitive) or starts with `X`, preventing old backups and
+`X_OutPack...` outputs from being archived again. `CHG`, `CHGCAR`, and
+`WAVECAR` are never retained. The command reports compressed and uncompressed
+sizes plus the ten largest stored files.
 
 `recover expand` requires a recognized capacity failure in OUTCAR unless
 `--force-expand` is explicitly supplied.
