@@ -15,6 +15,8 @@ export CONDA_ALWAYS_YES=true
 export CONDA_OFFLINE=false
 export PIP_NO_INPUT=1
 export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH PYTHONHOME
 
 TARGET=/project/lgutsev/env/iface_ai2kit_controller
 AI2KIT_VERSION=1.0.9
@@ -28,10 +30,12 @@ check_environment() {
     "$TARGET/bin/python" - <<PY
 from importlib.metadata import version
 
-assert version("ai2-kit") == "$AI2KIT_VERSION"
-assert version("oh-my-batch") == "$OMB_VERSION"
-print("ai2-kit:", version("ai2-kit"))
-print("oh-my-batch:", version("oh-my-batch"))
+actual_ai2kit = version("ai2-kit")
+actual_omb = version("oh-my-batch")
+print("ai2-kit:", actual_ai2kit)
+print("oh-my-batch:", actual_omb)
+if actual_ai2kit != "$AI2KIT_VERSION" or actual_omb != "$OMB_VERSION":
+    raise SystemExit(1)
 PY
 
     "$TARGET/bin/ai2-kit" --help >/dev/null
