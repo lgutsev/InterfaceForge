@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import unittest
 import zipfile
@@ -8,8 +10,10 @@ from unittest.mock import patch
 
 from interfaceforge.audit import audit_run, find_runs, run_audit
 from interfaceforge.cli import build_parser, main
+from interfaceforge.errors import SafetyError
 from interfaceforge.vasp import (
     apply_incar_preset,
+    archive_mlff_models,
     assemble_potcar,
     ensure_run_potcar,
     mlff_accuracy_profile_tags,
@@ -68,6 +72,61 @@ class VaspTests(unittest.TestCase):
             with zipfile.ZipFile(output) as archive:
                 self.assertIn("INCAR", archive.namelist())
                 self.assertNotIn("POTCAR", archive.namelist())
+
+    def test_model_archive_preserves_ml_ab_and_checksum_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            accepted = root / "accepted"
+            ignored = root / "ignored"
+            accepted.mkdir()
+            ignored.mkdir()
+            (accepted / "ML_AB").write_text("accepted model\n", encoding="utf-8")
+            (accepted / "INCAR").write_text("ML_MODE=train\n", encoding="utf-8")
+            (accepted / "OSZICAR").write_text(" 1 T= 300 E= -1\n", encoding="utf-8")
+            (accepted / "POTCAR").write_text("licensed\n", encoding="utf-8")
+            (ignored / "INCAR").write_text("NSW=0\n", encoding="utf-8")
+            output = root / "stored_models.zip"
+
+            result = archive_mlff_models(root, output)
+
+            self.assertEqual(result["runs"], 1)
+            self.assertEqual(result["files"], 3)
+            with zipfile.ZipFile(output) as archive:
+                names = set(archive.namelist())
+                self.assertIn("accepted/ML_AB", names)
+                self.assertIn("accepted/INCAR", names)
+                self.assertNotIn("accepted/POTCAR", names)
+                self.assertNotIn("ignored/INCAR", names)
+                manifest = json.loads(
+                    archive.read("interfaceforge-model-archive.json")
+                )
+            artifacts = {
+                artifact["path"]: artifact
+                for artifact in manifest["runs"][0]["artifacts"]
+            }
+            self.assertEqual(
+                artifacts["accepted/ML_AB"]["sha256"],
+                hashlib.sha256(b"accepted model\n").hexdigest(),
+            )
+            self.assertTrue(manifest["potcar_excluded"])
+
+    def test_model_archive_requires_nonempty_ml_ab(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "ML_AB").touch()
+            with self.assertRaisesRegex(SafetyError, "No nonempty ML_AB"):
+                archive_mlff_models(root, root / "models.zip")
+
+    def test_model_archive_can_name_output_in_current_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "ML_AB").write_text("accepted model\n", encoding="utf-8")
+            with patch("interfaceforge.vasp.Path.cwd", return_value=root):
+                result = archive_mlff_models(root)
+            output = Path(result["output"])
+            self.assertEqual(output.parent, root)
+            self.assertRegex(output.name, r"^MLFF_Models_.+_\d{8}T\d{6}Z\.zip$")
+            self.assertTrue(output.is_file())
 
     def test_continue_recovery_does_not_self_copy_only_ml_ab(self) -> None:
         # When ML_ABN is absent/empty, _continue_source() falls back to
