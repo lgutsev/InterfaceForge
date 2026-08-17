@@ -176,7 +176,16 @@ iface vasp beef-plot runs/vasp --individual
 iface vasp band scf/ bands/ --kpoints KPOINTS.line
 iface vasp workfunction LOCPOT OUTCAR --plot-output workfunction.png
 iface vasp pack campaign_outputs.zip --root runs/vasp
+iface vasp archive-models stored_models.zip --root successful_runs
 ```
+
+`iface vasp archive-models` packages only run directories containing a
+nonempty `ML_AB`. It preserves `ML_AB` together with available MLFF model
+state, inputs, compact trajectory outputs, launchers, and logs, and writes a
+SHA-256 manifest inside the ZIP for long-term integrity checks. `POTCAR` is
+always excluded. Add `--include-large` to retain `OUTCAR`, `vasprun.xml`,
+`XDATCAR`, and `LOCPOT`. Model presence is a discovery rule, not a scientific
+validation claim: point `--root` at runs you have already accepted.
 
 `recover expand` requires a recognized capacity failure in OUTCAR unless
 `--force-expand` is explicitly supplied.

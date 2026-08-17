@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import zipfile
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
@@ -750,5 +753,147 @@ def package_outputs(
         "output": str(output_path),
         "files": len(files),
         "include_large": include_large,
+        "potcar_excluded": True,
+    }
+
+
+_MODEL_ARCHIVE_FILES = {
+    "INCAR",
+    "KPOINTS",
+    "POSCAR",
+    "CONTCAR",
+    "OSZICAR",
+    "ML_LOGFILE",
+    "REPORT",
+    "run.slurm",
+    "runvasp.sh",
+    "XDATCAR_FINAL",
+    "vasp_md_FINAL.dat",
+    "ML_AB",
+    "ML_ABN",
+    "ML_FF",
+    "ML_FFN",
+}
+_MODEL_ARCHIVE_LARGE_FILES = {"OUTCAR", "vasprun.xml", "XDATCAR", "LOCPOT"}
+_MODEL_ARCHIVE_MANIFEST = "interfaceforge-model-archive.json"
+
+
+def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def archive_mlff_models(
+    root: str | Path,
+    output: str | Path,
+    *,
+    include_large: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Archive user-selected VASP-MLFF runs containing a nonempty ML_AB.
+
+    Model presence is used only for discovery. The command intentionally does
+    not claim that a model is scientifically validated; callers should point it
+    at runs they have already accepted. POTCAR is never included.
+    """
+
+    source_root = Path(root).expanduser().resolve()
+    output_path = Path(output).expanduser().resolve()
+    if not source_root.is_dir():
+        raise SafetyError(f"Model archive root is not a directory: {source_root}")
+    if output_path.exists() and not force:
+        raise SafetyError(f"Refusing to overwrite existing archive: {output_path}")
+
+    model_paths = sorted(
+        path
+        for path in source_root.rglob("ML_AB")
+        if path.is_file()
+        and not path.is_symlink()
+        and path.stat().st_size
+        and ".interfaceforge/archive" not in path.as_posix()
+    )
+    if not model_paths:
+        raise SafetyError(f"No nonempty ML_AB files found below {source_root}")
+
+    selected_names = set(_MODEL_ARCHIVE_FILES)
+    if include_large:
+        selected_names.update(_MODEL_ARCHIVE_LARGE_FILES)
+
+    runs: list[dict[str, Any]] = []
+    files_to_archive: list[tuple[Path, Path]] = []
+    for model_path in model_paths:
+        run = model_path.parent
+        relative_run = run.relative_to(source_root)
+        artifacts: list[dict[str, Any]] = []
+        for name in sorted(selected_names):
+            path = run / name
+            if not path.is_file() or path.is_symlink() or not path.stat().st_size:
+                continue
+            archive_name = relative_run / name
+            artifacts.append(
+                {
+                    "path": archive_name.as_posix(),
+                    "size_bytes": path.stat().st_size,
+                    "sha256": _sha256_file(path),
+                }
+            )
+            files_to_archive.append((path, archive_name))
+        runs.append(
+            {
+                "relative_path": relative_run.as_posix() or ".",
+                "artifacts": artifacts,
+            }
+        )
+
+    manifest = {
+        "format": "interfaceforge-vasp-mlff-model-archive",
+        "schema_version": 1,
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "source_root": str(source_root),
+        "selection": "directories containing a nonempty ML_AB; scientific acceptance is user-supplied",
+        "include_large": include_large,
+        "potcar_excluded": True,
+        "runs": runs,
+    }
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            dir=output_path.parent,
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+        with zipfile.ZipFile(
+            temporary_path,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=6,
+        ) as archive:
+            for path, archive_name in files_to_archive:
+                archive.write(path, archive_name.as_posix())
+            archive.writestr(
+                _MODEL_ARCHIVE_MANIFEST,
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            )
+        os.replace(temporary_path, output_path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+    return {
+        "root": str(source_root),
+        "output": str(output_path),
+        "archive_sha256": _sha256_file(output_path),
+        "runs": len(runs),
+        "files": len(files_to_archive),
+        "include_large": include_large,
+        "manifest": _MODEL_ARCHIVE_MANIFEST,
         "potcar_excluded": True,
     }

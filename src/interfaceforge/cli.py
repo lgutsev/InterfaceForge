@@ -45,6 +45,7 @@ from .validation import adhesion_from_csv, parity_from_csv, separation_curve_fro
 from .vasp import (
     INCAR_PRESETS,
     apply_incar_preset,
+    archive_mlff_models,
     assemble_potcar,
     ensure_run_potcar,
     package_outputs,
@@ -377,6 +378,18 @@ def cmd_vasp_incar(args: argparse.Namespace) -> int:
 def cmd_vasp_pack(args: argparse.Namespace) -> int:
     _json(
         package_outputs(
+            args.root,
+            args.output,
+            include_large=args.include_large,
+            force=args.force,
+        )
+    )
+    return 0
+
+
+def cmd_vasp_archive_models(args: argparse.Namespace) -> int:
+    _json(
+        archive_mlff_models(
             args.root,
             args.output,
             include_large=args.include_large,
@@ -885,6 +898,15 @@ def build_parser() -> argparse.ArgumentParser:
     pack.add_argument("--include-large", action="store_true")
     pack.add_argument("--force", action="store_true")
     pack.set_defaults(func=cmd_vasp_pack)
+    archive_models = vasp_commands.add_parser(
+        "archive-models",
+        help="Archive accepted VASP-MLFF runs with ML_AB and checksum provenance",
+    )
+    archive_models.add_argument("output")
+    archive_models.add_argument("--root", default=".")
+    archive_models.add_argument("--include-large", action="store_true")
+    archive_models.add_argument("--force", action="store_true")
+    archive_models.set_defaults(func=cmd_vasp_archive_models)
     vsubmit = vasp_commands.add_parser(
         "submit", help="Submit one VASP run, optionally preparing an MLFF recovery first"
     )

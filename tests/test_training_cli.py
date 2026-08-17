@@ -296,6 +296,13 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(args.output, "archive.zip")
         self.assertEqual(args.root, "runs")
 
+    def test_archive_models_parser_uses_unambiguous_output(self) -> None:
+        args = build_parser().parse_args(
+            ["vasp", "archive-models", "models.zip", "--root", "successful"]
+        )
+        self.assertEqual(args.output, "models.zip")
+        self.assertEqual(args.root, "successful")
+
     def test_init_writes_campaign_and_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "new_campaign"
