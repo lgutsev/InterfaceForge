@@ -788,7 +788,7 @@ def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 def archive_mlff_models(
     root: str | Path,
-    output: str | Path,
+    output: str | Path | None = None,
     *,
     include_large: bool = False,
     force: bool = False,
@@ -801,9 +801,14 @@ def archive_mlff_models(
     """
 
     source_root = Path(root).expanduser().resolve()
-    output_path = Path(output).expanduser().resolve()
     if not source_root.is_dir():
         raise SafetyError(f"Model archive root is not a directory: {source_root}")
+    if output is None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        folder_name = source_root.name or "root"
+        output_path = (Path.cwd() / f"MLFF_Models_{folder_name}_{stamp}.zip").resolve()
+    else:
+        output_path = Path(output).expanduser().resolve()
     if output_path.exists() and not force:
         raise SafetyError(f"Refusing to overwrite existing archive: {output_path}")
 

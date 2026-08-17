@@ -902,7 +902,11 @@ def build_parser() -> argparse.ArgumentParser:
         "archive-models",
         help="Archive accepted VASP-MLFF runs with ML_AB and checksum provenance",
     )
-    archive_models.add_argument("output")
+    archive_models.add_argument(
+        "output",
+        nargs="?",
+        help="ZIP path (default: timestamped archive in the current directory)",
+    )
     archive_models.add_argument("--root", default=".")
     archive_models.add_argument("--include-large", action="store_true")
     archive_models.add_argument("--force", action="store_true")

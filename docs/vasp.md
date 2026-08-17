@@ -206,6 +206,10 @@ After accepting one or more trained models, preserve their model state and
 compact run provenance in one verifiable ZIP:
 
 ```bash
+cd successful_runs
+iface vasp archive-models
+
+# Or choose the source root and output name explicitly:
 iface vasp archive-models stored_models/perovskite_mlff_v1.zip \
     --root successful_runs
 ```
@@ -216,6 +220,11 @@ logs. It adds `interfaceforge-model-archive.json`, containing per-file sizes
 and SHA-256 checksums, and reports the checksum of the completed ZIP. `POTCAR`
 is excluded. Use `--include-large` when `OUTCAR`, `vasprun.xml`, `XDATCAR`, and
 `LOCPOT` are also worth the storage cost.
+
+With no arguments, the command scans the current folder and writes a
+timestamped `MLFF_Models_<folder>_<UTC timestamp>.zip` there, matching the
+working-directory behavior of the earlier `PackageOutputsMD` script without
+its unconditional deletion step.
 
 The command does not infer scientific success from VASP termination or an
 error threshold. Point `--root` at models you have already accepted after the

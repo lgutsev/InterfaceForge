@@ -117,6 +117,17 @@ class VaspTests(unittest.TestCase):
             with self.assertRaisesRegex(SafetyError, "No nonempty ML_AB"):
                 archive_mlff_models(root, root / "models.zip")
 
+    def test_model_archive_can_name_output_in_current_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "ML_AB").write_text("accepted model\n", encoding="utf-8")
+            with patch("interfaceforge.vasp.Path.cwd", return_value=root):
+                result = archive_mlff_models(root)
+            output = Path(result["output"])
+            self.assertEqual(output.parent, root)
+            self.assertRegex(output.name, r"^MLFF_Models_.+_\d{8}T\d{6}Z\.zip$")
+            self.assertTrue(output.is_file())
+
     def test_continue_recovery_does_not_self_copy_only_ml_ab(self) -> None:
         # When ML_ABN is absent/empty, _continue_source() falls back to
         # ML_AB itself; recovery must not shutil.copy2() that file onto

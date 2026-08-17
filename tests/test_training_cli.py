@@ -303,6 +303,11 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(args.output, "models.zip")
         self.assertEqual(args.root, "successful")
 
+    def test_archive_models_parser_defaults_to_current_folder_and_generated_name(self) -> None:
+        args = build_parser().parse_args(["vasp", "archive-models"])
+        self.assertIsNone(args.output)
+        self.assertEqual(args.root, ".")
+
     def test_init_writes_campaign_and_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "new_campaign"
