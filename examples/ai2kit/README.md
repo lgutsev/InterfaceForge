@@ -9,11 +9,12 @@ AI2-Kit controller environment used by the InterfaceForge adapter:
 
 ## Status
 
-As of 2026-08-17, the job has been submitted for a real LONI run. The script
-passes `bash -n`, but successful environment creation and package validation
-have not yet been confirmed from the Slurm output. This is therefore operational
-setup code under human testing, not a completed end-to-end active-learning
-validation.
+On 2026-08-17, job 968863 created the Python 3.11 controller environment on
+LONI and a follow-up isolated validation confirmed `pip check`,
+`ai2-kit==1.0.9`, `oh-my-batch==0.7.5`, and both command-line interfaces.
+Environment creation is therefore human-tested on LONI. No end-to-end
+active-learning campaign has yet completed through exploration, VASP labeling,
+dataset import, and retraining.
 
 ## Submit
 
@@ -55,6 +56,11 @@ no longer useful.
 
 `CONDA_OFFLINE=false` corrects an accidentally enabled Conda offline setting;
 it cannot provide network access when a node is genuinely disconnected.
+
+The script also clears inherited `PYTHONPATH`/`PYTHONHOME` and sets
+`PYTHONNOUSERSITE=1`. This is required on the tested LONI account because an
+otherwise clean controller prefix could see unrelated user-site packages such
+as phonopy, sumo, and symfc, causing a false failure from `pip check`.
 
 ## Execution boundary
 
