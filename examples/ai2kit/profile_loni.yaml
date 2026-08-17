@@ -3,20 +3,21 @@ scheduler: slurm
 
 ai2kit:
   commands:
-    ai2kit: /project/YOUR_PROJECT/envs/mace/bin/ai2-kit
-    omb: /project/YOUR_PROJECT/envs/mace/bin/omb
-    python: /project/YOUR_PROJECT/envs/mace/bin/python
-    mace: /project/YOUR_PROJECT/envs/mace/bin/mace_run_train
+    controller_python: /project/lgutsev/env/iface_ai2kit_controller/bin/python
+    ai2kit: /project/lgutsev/env/iface_ai2kit_controller/bin/ai2-kit
+    omb: /project/lgutsev/env/iface_ai2kit_controller/bin/omb
+    python: /project/lgutsev/env/iface_mace_runtime/bin/python
+    mace: /project/lgutsev/env/iface_mace_runtime/bin/mace_run_train
   jobs: {train: mace_gpu, explore: openmm_gpu, label: vasp_cpu}
   potcar_source:
-    Ti: /project/YOUR_PROJECT/potcars/Ti_pv/POTCAR
-    Si: /project/YOUR_PROJECT/potcars/Si/POTCAR
-    N: /project/YOUR_PROJECT/potcars/N/POTCAR
+    Ti: /home/lgutsev/pot/potpaw_PBE/Ti_pv/POTCAR
+    Si: /home/lgutsev/pot/potpaw_PBE/Si/POTCAR
+    N: /home/lgutsev/pot/potpaw_PBE/N/POTCAR
 
 jobs:
   mace_gpu:
     partition: gpu2
-    account: YOUR_ACCOUNT
+    account: loni_perovsk27
     nodes: 1
     ntasks: 1
     cpus_per_task: 8
@@ -32,7 +33,7 @@ jobs:
 
   openmm_gpu:
     partition: gpu2
-    account: YOUR_ACCOUNT
+    account: loni_perovsk27
     nodes: 1
     ntasks: 1
     cpus_per_task: 8
@@ -43,7 +44,7 @@ jobs:
 
   vasp_cpu:
     partition: workq
-    account: YOUR_ACCOUNT
+    account: loni_perovsk27
     nodes: 1
     ntasks: 64
     cpus_per_task: 1

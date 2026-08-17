@@ -55,16 +55,57 @@ a small reviewed sample.
 
 ## Installation
 
-Install InterfaceForge, AI2-Kit and oh-my-batch in the controller environment:
+Use two environments. AI2-Kit 1.0.9 pins NumPy 1.24.3 and cannot be installed
+reliably with Python 3.12, so keep it in a small Python 3.11 controller
+environment instead of changing the environment that trained the MACE models:
 
 ```bash
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda create --prefix /project/lgutsev/env/iface_ai2kit_controller python=3.11 pip -y
+conda activate /project/lgutsev/env/iface_ai2kit_controller
+cd /path/to/InterfaceForge
 python -m pip install -e '.[ai2kit]'
 ```
 
-The GPU environment referenced by `profile.ai2kit.commands.python` must also
-provide `mace-torch`, `openmm`, and OpenMM-ML (`import openmmml`). The command
-paths are explicit so the controller does not depend on interactive Conda shell
-initialization. Edit the Slurm profile to match the LONI allocation and modules.
+Clone the proven MACE environment before adding OpenMM so that the training
+environment remains recoverable:
+
+```bash
+conda create --prefix /project/lgutsev/env/iface_mace_runtime \
+  --clone /project/lgutsev/env/mace_env -y
+conda activate /project/lgutsev/env/iface_mace_runtime
+conda install -c conda-forge openmm openmm-ml -y
+python -c 'import ase, mace, openmm, openmmml; print("MACE/OpenMM runtime OK")'
+```
+
+The controller commands (`controller_python`, `ai2kit`, and `omb`) point to the
+first environment. The GPU commands (`python` and `mace`) point to the cloned
+MACE environment. All paths are explicit, so neither login-shell Conda state nor
+job-shell activation is required.
+
+For the Ti/Si/N LONI campaign, use:
+
+```yaml
+ai2kit:
+  commands:
+    controller_python: /project/lgutsev/env/iface_ai2kit_controller/bin/python
+    ai2kit: /project/lgutsev/env/iface_ai2kit_controller/bin/ai2-kit
+    omb: /project/lgutsev/env/iface_ai2kit_controller/bin/omb
+    python: /project/lgutsev/env/iface_mace_runtime/bin/python
+    mace: /project/lgutsev/env/iface_mace_runtime/bin/mace_run_train
+  potcar_source:
+    Ti: /home/lgutsev/pot/potpaw_PBE/Ti_pv/POTCAR
+    Si: /home/lgutsev/pot/potpaw_PBE/Si/POTCAR
+    N: /home/lgutsev/pot/potpaw_PBE/N/POTCAR
+```
+
+Confirm the three POTCAR files before export:
+
+```bash
+for element in Ti_pv Si N; do
+  test -r "/home/lgutsev/pot/potpaw_PBE/$element/POTCAR" || echo "missing: $element"
+done
+```
 
 ## Operation
 
@@ -78,6 +119,12 @@ iface active-learning ai2kit run -c campaign.yaml
 iface active-learning ai2kit run -c campaign.yaml --execute
 iface active-learning ai2kit status -c campaign.yaml
 ```
+
+Preflight is intentionally substantial: it checks the controller Python and
+package versions, `sbatch`/`squeue`/`sacct`, every model and source checksum,
+the VASP inputs and POTCAR files, loads all committee models through MACE on
+CPU, and asks OpenMM-ML to build a CPU system from the first model. A failed
+preflight must be corrected rather than bypassed.
 
 `run` is a dry-run unless `--execute` is supplied. The generated controller is
 `runs/active_learning/ai2kit/generated/run.sh`. It calls `omb job slurm submit

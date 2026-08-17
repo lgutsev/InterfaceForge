@@ -2,10 +2,11 @@ name: loni
 scheduler: slurm
 ai2kit:
   commands:
-    ai2kit: /project/YOUR_PROJECT/envs/mace/bin/ai2-kit
-    omb: /project/YOUR_PROJECT/envs/mace/bin/omb
-    python: /project/YOUR_PROJECT/envs/mace/bin/python
-    mace: /project/YOUR_PROJECT/envs/mace/bin/mace_run_train
+    controller_python: /project/YOUR_PROJECT/envs/ai2kit-controller/bin/python
+    ai2kit: /project/YOUR_PROJECT/envs/ai2kit-controller/bin/ai2-kit
+    omb: /project/YOUR_PROJECT/envs/ai2kit-controller/bin/omb
+    python: /project/YOUR_PROJECT/envs/mace-runtime/bin/python
+    mace: /project/YOUR_PROJECT/envs/mace-runtime/bin/mace_run_train
   jobs: {train: mace_gpu, explore: openmm_gpu, label: vasp_workq}
   potcar_source:
     H: /project/YOUR_PROJECT/potcars/H/POTCAR
@@ -40,7 +41,7 @@ jobs:
     gpus: 1
     time: "72:00:00"
     modules: []
-    preamble: ['source "${MACE_ACTIVATE_SCRIPT:?Set MACE_ACTIVATE_SCRIPT}"']
+    preamble: ['if [[ -n "${MACE_ACTIVATE_SCRIPT:-}" ]]; then source "${MACE_ACTIVATE_SCRIPT}"; fi']
     environment: {OMP_NUM_THREADS: "1", MKL_NUM_THREADS: "1", PYTHONUNBUFFERED: "1"}
   openmm_gpu:
     partition: gpu2
@@ -51,7 +52,7 @@ jobs:
     gpus: 1
     time: "12:00:00"
     modules: []
-    preamble: ['source "${MACE_ACTIVATE_SCRIPT:?Set MACE_ACTIVATE_SCRIPT}"']
+    preamble: ['if [[ -n "${MACE_ACTIVATE_SCRIPT:-}" ]]; then source "${MACE_ACTIVATE_SCRIPT}"; fi']
     environment: {OMP_NUM_THREADS: "1", MKL_NUM_THREADS: "1", PYTHONUNBUFFERED: "1"}
   deepmd_gpu:
     partition: gpu2

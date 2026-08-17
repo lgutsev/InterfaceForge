@@ -4,10 +4,11 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
-from interfaceforge.ai2kit import adapter_status, export_adapter, run_adapter
+from interfaceforge.ai2kit import adapter_status, export_adapter, preflight_adapter, run_adapter
 from interfaceforge.config import load_campaign
 from interfaceforge.errors import ConfigurationError
 
@@ -36,6 +37,7 @@ def write_tesla_fixture(root: Path) -> Path:
         "scheduler": "slurm",
         "ai2kit": {
             "commands": {
+                "controller_python": "python",
                 "ai2kit": "ai2-kit",
                 "omb": "omb",
                 "python": "python",
@@ -126,7 +128,12 @@ class Ai2KitTeslaTests(unittest.TestCase):
             self.assertIn("ai2-kit tool model_devi", iteration)
             self.assertIn("committee-models.txt", iteration)
             self.assertIn("model_devi.out", iteration)
+            self.assertIn('NEW_DATASET_DIR="$ITER_DIR/new-dataset"', iteration)
             self.assertNotIn("+  --name", (generated / "00-config/mace/run.sh").read_text(encoding="utf-8"))
+            header = (generated / "00-config/openmm/slurm-header.sh").read_text(encoding="utf-8")
+            self.assertLess(header.index('PBS_O_WORKDIR:='), header.index("set -euo pipefail"))
+            self.assertEqual(set(manifest["reference_inputs"]), {"INCAR", "KPOINTS"})
+            self.assertEqual(set(manifest["potcars"]), {"Ti", "N"})
             for script in generated.rglob("*.sh"):
                 result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, 0, f"{script}: {result.stderr}")
@@ -152,6 +159,32 @@ class Ai2KitTeslaTests(unittest.TestCase):
             path.write_text(yaml.safe_dump(payload), encoding="utf-8")
             with self.assertRaisesRegex(ConfigurationError, "committee_models must match"):
                 load_campaign(path)
+
+    def test_preflight_checks_python_and_source_integrity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = load_campaign(write_tesla_fixture(root))
+            export_adapter(campaign)
+            (root / "potcars/Ti/POTCAR").write_text("tampered\n", encoding="utf-8")
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                if "-c" in command and any("importlib.metadata" in token for token in command):
+                    return subprocess.CompletedProcess(command, 0, "3.12\n1.0.9\n0.7.2\n", "")
+                return subprocess.CompletedProcess(command, 0, "ok\n", "")
+
+            with (
+                patch("interfaceforge.ai2kit_tesla.shutil.which", return_value="/mock/executable"),
+                patch("interfaceforge.ai2kit_tesla.subprocess.run", side_effect=fake_run),
+            ):
+                report = preflight_adapter(campaign)
+
+            checks = {item["name"]: item for item in report["checks"]}
+            self.assertFalse(report["passed"])
+            self.assertFalse(checks["controller_python"]["ok"])
+            self.assertFalse(checks["potcar:Ti"]["ok"])
+            self.assertTrue(checks["potcar:N"]["ok"])
+            self.assertIn("command:sbatch", checks)
+            self.assertIn("openmm_mace_system", checks)
 
 
 if __name__ == "__main__":

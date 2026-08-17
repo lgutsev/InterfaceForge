@@ -105,7 +105,9 @@ def _profile(campaign: Campaign) -> tuple[dict[str, Any], dict[str, Any]]:
         raise ConfigurationError(
             f"profile.ai2kit.commands is missing: {', '.join(missing)}"
         )
-    for key in required_commands:
+    for key in (*required_commands, "controller_python"):
+        if key not in commands:
+            continue
         if not SAFE_COMMAND.fullmatch(str(commands[key])):
             raise ConfigurationError(f"Unsafe profile.ai2kit.commands.{key} token")
     if not isinstance(jobs, dict) or any(not jobs.get(key) for key in ("train", "explore", "label")):
@@ -139,7 +141,10 @@ def _slurm_header(profile: dict[str, Any], job_key: str, job_name: str) -> str:
     ]
     if int(job.get("gpus", 0) or 0) > 0:
         lines.append(f"#SBATCH --gres=gpu:{int(job['gpus'])}")
-    lines.extend(["", "set -euo pipefail"])
+    # oh-my-batch 0.7.x emits a PBS compatibility check that expands
+    # $PBS_O_WORKDIR. Slurm does not normally define it, so initialize it
+    # before nounset is enabled or every generated batch exits immediately.
+    lines.extend(["", ': "${PBS_O_WORKDIR:=}"', "set -euo pipefail"])
     modules = list(job.get("modules", []))
     if modules:
         lines.append("module purge")
@@ -179,6 +184,10 @@ def _input_records(paths: list[Path]) -> list[dict[str, Any]]:
             record["sha256"] = sha256_file(path)
         records.append(record)
     return records
+
+
+def _input_record(path: Path) -> dict[str, Any]:
+    return _input_records([path])[0]
 
 
 def _expand_xyz_artifacts(paths: list[Path], label: str) -> list[Path]:
@@ -417,7 +426,8 @@ MACE_DIR="$ITER_DIR/mace"
 OPENMM_DIR="$ITER_DIR/openmm"
 SCREENING_DIR="$ITER_DIR/screening"
 LABELING_DIR="$ITER_DIR/vasp"
-mkdir -p "$MACE_DIR" "$OPENMM_DIR" "$SCREENING_DIR" "$LABELING_DIR"
+NEW_DATASET_DIR="$ITER_DIR/new-dataset"
+mkdir -p "$MACE_DIR" "$OPENMM_DIR" "$SCREENING_DIR" "$LABELING_DIR" "$NEW_DATASET_DIR"
 [[ -f "$ITER_DIR/iter.done" ]] && exit 0
 
 if [[ "$ITER_NAME" == "000" ]]; then
@@ -483,9 +493,9 @@ fi
   add_cmds "bash ./run.sh" - make "$LABELING_DIR/vasp-{{i}}.slurm" --concurrency "$LABEL_WORKERS"
 {omb} job slurm submit "$LABELING_DIR"/vasp-*.slurm --max_tries 2 --wait --recovery "$LABELING_DIR/slurm-recovery.json"
 {ai2kit} tool ase read "$LABELING_DIR/job-*/OUTCAR" --format vasp-out --ignore_error - \\
-  write "$ITER_DIR/new-dataset/raw-labels.data" --format extxyz
+  write "$NEW_DATASET_DIR/raw-labels.data" --format extxyz
 $PYTHON_CMD "$CONFIG_DIR/normalize-labels.py" \\
-  "$ITER_DIR/new-dataset/raw-labels.data" "$ITER_DIR/new-dataset/dataset.xyz"
+  "$NEW_DATASET_DIR/raw-labels.data" "$NEW_DATASET_DIR/dataset.xyz"
 if [[ "$UPDATE_MD_STRUCTURES" -gt 0 && -s "$SCREENING_DIR/good.xyz" ]]; then
   rm -f "$WORK_DIR"/openmm-data/*.xyz
   {ai2kit} tool ase read "$SCREENING_DIR/good.xyz" --format extxyz - \\
@@ -660,6 +670,16 @@ def export_tesla_adapter(
         "training": _input_records(training),
         "validation": _input_records(validation),
         "exploration": _input_records(exploration),
+        "reference_inputs": {
+            "INCAR": _input_record(incar),
+            "KPOINTS": _input_record(kpoints),
+        },
+        "potcars": {
+            element: _input_record(
+                _resolve(campaign, str(potcar_source[element]), f"POTCAR source for {element}")
+            )
+            for element in type_map
+        },
         "command": ["bash", str(generated / "run.sh")],
         "execution_state": "exported",
         "verification": "generated and unit-tested; awaiting a human-supervised LONI round",
@@ -689,24 +709,55 @@ def preflight_tesla_adapter(
     def add(name: str, ok: bool, detail: str, required: bool = True) -> None:
         checks.append({"name": name, "ok": bool(ok), "required": required, "detail": detail[:800]})
 
+    def add_input(name: str, record: Any) -> None:
+        if not isinstance(record, dict) or not record.get("path"):
+            add(name, False, "missing input record; export the adapter again")
+            return
+        path = Path(str(record["path"]))
+        ok = path.is_file() and sha256_file(path) == record.get("sha256")
+        add(name, ok, str(path))
+
     fingerprint, _ = _fingerprint(campaign, generated)
     add("export_fingerprint", fingerprint == manifest.get("export_fingerprint"), fingerprint)
     for record in manifest.get("committee", []):
-        path = Path(record["path"])
-        add(f"committee:{path.name}", path.is_file() and sha256_file(path) == record.get("sha256"), str(path))
+        path = Path(str(record.get("path", "")))
+        add_input(f"committee:{path.name}", record)
+    reference_records = manifest.get("reference_inputs", {})
+    if not isinstance(reference_records, dict):
+        reference_records = {}
+    for label in ("INCAR", "KPOINTS"):
+        add_input(f"reference:{label}", reference_records.get(label))
+    potcar_records = manifest.get("potcars", {})
+    if not isinstance(potcar_records, dict):
+        potcar_records = {}
+    for element in campaign.dataset.get("type_map", []):
+        add_input(f"potcar:{element}", potcar_records.get(element))
     executables: dict[str, str | None] = {}
-    for key in ("ai2kit", "omb", "python", "mace"):
+    configured_commands = ["ai2kit", "omb", "python", "mace"]
+    if "controller_python" in commands:
+        configured_commands.append("controller_python")
+    for key in configured_commands:
         executable = shutil.which(str(commands[key]))
         executables[key] = executable
         add(f"command:{key}", executable is not None, executable or str(commands[key]))
+    for key in ("sbatch", "squeue", "sacct"):
+        executable = shutil.which(key)
+        add(f"command:{key}", executable is not None, executable or f"not found: {key}")
     python_cmd = str(commands["python"])
-    if executables["python"]:
+    controller_python = str(commands.get("controller_python", python_cmd))
+    controller_python_available = (
+        executables.get("controller_python")
+        if "controller_python" in commands
+        else executables["python"]
+    )
+    if controller_python_available:
         version_probe = subprocess.run(
             [
-                python_cmd,
+                controller_python,
                 "-c",
                 (
-                    "import importlib.metadata as m; "
+                    "import importlib.metadata as m, sys; "
+                    "print(f'{sys.version_info.major}.{sys.version_info.minor}'); "
                     "print(m.version('ai2-kit')); print(m.version('oh-my-batch'))"
                 ),
             ],
@@ -715,15 +766,22 @@ def preflight_tesla_adapter(
             check=False,
         )
         version_lines = version_probe.stdout.splitlines()
+        python_version = version_lines[0].strip() if len(version_lines) > 0 else "unknown"
         ai2kit_version = (
-            version_lines[0].strip() if len(version_lines) > 0 else "not-installed"
-        )
-        omb_version = (
             version_lines[1].strip() if len(version_lines) > 1 else "not-installed"
         )
+        omb_version = (
+            version_lines[2].strip() if len(version_lines) > 2 else "not-installed"
+        )
     else:
+        python_version = "unavailable"
         ai2kit_version = "not-installed"
         omb_version = "not-installed"
+    add(
+        "controller_python",
+        python_version in {"3.10", "3.11"},
+        f"installed={python_version}; AI2-Kit 1.0.9 requires Python 3.10 or 3.11 in this workflow",
+    )
     add(
         "ai2kit_version",
         ai2kit_version == TARGET_AI2KIT_VERSION,
@@ -734,9 +792,41 @@ def preflight_tesla_adapter(
         omb_version == str(_settings(campaign).get("omb_version", TARGET_OMB_VERSION)),
         f"installed={omb_version}",
     )
+    for key, executable_key, command in (
+        (
+            "ai2kit_model_devi_cli",
+            "ai2kit",
+            [str(commands["ai2kit"]), "tool", "model_devi", "--help"],
+        ),
+        (
+            "omb_slurm_cli",
+            "omb",
+            [str(commands["omb"]), "job", "slurm", "submit", "--help"],
+        ),
+    ):
+        probe = (
+            subprocess.run(command, capture_output=True, text=True, check=False)
+            if executables[executable_key]
+            else None
+        )
+        add(
+            key,
+            probe is not None and probe.returncode == 0,
+            probe.stderr or probe.stdout or "ok" if probe is not None else "command unavailable",
+        )
+    committee_paths = [str(record.get("path", "")) for record in manifest.get("committee", [])]
     runtime_probe = (
         subprocess.run(
-            [python_cmd, "-c", "import ase, mace, openmm, openmmml"],
+            [
+                python_cmd,
+                "-c",
+                (
+                    "import ase, mace, openmm, openmmml, sys; "
+                    "from openmmml import MLPotential; "
+                    "MLPotential('mace', modelPath=sys.argv[1])"
+                ),
+                committee_paths[0] if committee_paths else "",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -755,8 +845,98 @@ def preflight_tesla_adapter(
             else "configured Python command is unavailable"
         ),
     )
-    shell = subprocess.run(["bash", "-n", str(generated / "run.sh")], capture_output=True, text=True, check=False)
-    add("run_shell_syntax", shell.returncode == 0, shell.stderr or "ok")
+    model_probe = (
+        subprocess.run(
+            [
+                python_cmd,
+                "-c",
+                (
+                    "import gc, sys\n"
+                    "from mace.calculators import MACECalculator\n"
+                    "for path in sys.argv[2:]:\n"
+                    "    calculator = MACECalculator(model_paths=[path], device='cpu', default_dtype=sys.argv[1])\n"
+                    "    del calculator\n"
+                    "    gc.collect()\n"
+                ),
+                str(_settings(campaign)["default_dtype"]),
+                *committee_paths,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if executables["python"] and committee_paths
+        else None
+    )
+    add(
+        "committee_model_load",
+        model_probe is not None and model_probe.returncode == 0,
+        model_probe.stderr if model_probe is not None and model_probe.stderr else "all committee models load on CPU",
+    )
+    exploration_records = manifest.get("exploration", [])
+    exploration_path = (
+        str(exploration_records[0].get("path", ""))
+        if isinstance(exploration_records, list)
+        and exploration_records
+        and isinstance(exploration_records[0], dict)
+        else ""
+    )
+    openmm_model_probe = (
+        subprocess.run(
+            [
+                python_cmd,
+                "-c",
+                (
+                    "import sys\n"
+                    "import ase.io\n"
+                    "import numpy as np\n"
+                    "import openmm\n"
+                    "from openmm import app, unit\n"
+                    "from openmmml import MLPotential\n"
+                    "atoms = ase.io.read(sys.argv[2])\n"
+                    "topology = app.Topology()\n"
+                    "chain = topology.addChain()\n"
+                    "residue = topology.addResidue('SYS', chain)\n"
+                    "for symbol in atoms.get_chemical_symbols():\n"
+                    "    topology.addAtom(symbol, app.Element.getBySymbol(symbol), residue)\n"
+                    "cell_nm = np.asarray(atoms.cell) * 0.1\n"
+                    "if bool(np.asarray(atoms.pbc).any()):\n"
+                    "    topology.setPeriodicBoxVectors([openmm.Vec3(*v) * unit.nanometer for v in cell_nm])\n"
+                    "potential = MLPotential('mace', modelPath=sys.argv[1])\n"
+                    "system = potential.createSystem(topology, device='cpu')\n"
+                    "assert system.getNumParticles() == len(atoms)\n"
+                ),
+                committee_paths[0],
+                exploration_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if executables["python"] and committee_paths and exploration_path
+        else None
+    )
+    add(
+        "openmm_mace_system",
+        openmm_model_probe is not None and openmm_model_probe.returncode == 0,
+        (
+            openmm_model_probe.stderr
+            if openmm_model_probe is not None and openmm_model_probe.stderr
+            else "OpenMM-ML builds a CPU MACE system from the first committee model"
+            if openmm_model_probe is not None
+            else "model, structure, or Python command unavailable"
+        ),
+    )
+    for script in sorted(generated.rglob("*.sh")):
+        shell = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True, check=False)
+        add(f"shell:{script.relative_to(generated)}", shell.returncode == 0, shell.stderr or "ok")
+    for script in sorted(generated.rglob("*.py")):
+        try:
+            compile(script.read_text(encoding="utf-8"), str(script), "exec")
+        except (OSError, SyntaxError) as exc:
+            add(f"python:{script.relative_to(generated)}", False, str(exc))
+        else:
+            add(f"python:{script.relative_to(generated)}", True, "ok")
     if os.environ.get("SLURM_JOB_ID"):
         add("controller_context", False, "TESLA controller must run on a login/service host, not inside a Slurm job")
     else:
