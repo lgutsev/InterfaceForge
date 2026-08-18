@@ -23,6 +23,13 @@ def discover_model(value: str) -> Path:
         item for item in search_root.rglob("*")
         if item.is_file() and item.suffix.lower() in {".model", ".pt", ".pth"}
     ]
+    # MACE training directories may contain both the ordinary stage-two model
+    # and an exported/compiled derivative.  Native MACE and OpenMM-ML parity
+    # should start from the ordinary model; a compiled file remains usable when
+    # the caller supplies its path explicitly.
+    ordinary = [item for item in candidates if "compiled" not in item.name.lower()]
+    if ordinary:
+        candidates = ordinary
     preferred = [
         item for item in candidates
         if any(token in item.name.lower() for token in ("stagetwo", "stage_two", "stage2"))
