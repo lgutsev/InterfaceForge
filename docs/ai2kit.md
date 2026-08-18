@@ -55,6 +55,8 @@ a small reviewed sample.
 
 ## Installation
 
+For the tested LONI environment builders, rebuild manifests, module policy, and GPU parity test, see [Reproducible LONI environments](loni-environments.md).
+
 Use two environments. AI2-Kit 1.0.9 pins NumPy 1.24.3 and cannot be installed
 reliably with Python 3.12, so keep it in a small Python 3.11 controller
 environment instead of changing the environment that trained the MACE models:
