@@ -4,7 +4,7 @@
 #SBATCH --partition=gpu2
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:20:00
 #SBATCH --output=mace_omm_smoke_%j.out
