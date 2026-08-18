@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gpus=1
+#SBATCH --gres=gpu:1
 #SBATCH --time=00:20:00
 #SBATCH --output=mace_omm_smoke_%j.out
 #SBATCH --error=mace_omm_smoke_%j.err
