@@ -308,6 +308,19 @@ class TrainingTests(unittest.TestCase):
         self.assertIsNone(args.output)
         self.assertEqual(args.root, ".")
 
+    def test_archive_models_parser_accepts_folder_exclusion_list(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "vasp",
+                "archive-models",
+                "--exclude-folders",
+                "omit_300",
+                "omit_450",
+            ]
+        )
+        self.assertEqual(args.exclude_folders, ["omit_300", "omit_450"])
+        self.assertFalse(args.recursive)
+
     def test_init_writes_campaign_and_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "new_campaign"

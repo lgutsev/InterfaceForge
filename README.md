@@ -179,6 +179,7 @@ iface vasp workfunction LOCPOT OUTCAR --plot-output workfunction.png
 iface vasp pack campaign_outputs.zip --root runs/vasp
 iface vasp archive-models  # current folder; automatic timestamped ZIP name
 iface vasp archive-models stored_models.zip --root successful_runs
+iface vasp archive-models --exclude-folders old_300 test_run rejected_model
 ```
 
 `iface vasp archive-models` packages only run directories containing a
@@ -195,6 +196,11 @@ Directory trees are pruned when any folder name contains `backup`
 `X_OutPack...` outputs from being archived again. `CHG`, `CHGCAR`, and
 `WAVECAR` are never retained. The command reports compressed and uncompressed
 sizes plus the ten largest stored files.
+By default, only the current directory and its immediate child folders are
+checked; daughter folders below those children are not scanned. Supply exact
+names with `--exclude-folders NAME [NAME ...]` to prune additional folders at
+the first scanned level. Use `--recursive` only when nested run discovery is
+intentional.
 
 `recover expand` requires a recognized capacity failure in OUTCAR unless
 `--force-expand` is explicitly supplied.

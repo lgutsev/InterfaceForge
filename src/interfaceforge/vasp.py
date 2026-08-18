@@ -801,30 +801,42 @@ def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def _excluded_model_directory_name(name: str) -> bool:
-    return "backup" in name.casefold() or name.startswith("X")
+def _excluded_model_directory_name(name: str, excluded_names: set[str]) -> bool:
+    return (
+        "backup" in name.casefold()
+        or name.startswith("X")
+        or name in excluded_names
+    )
 
 
-def _discover_ml_ab_files(source_root: Path) -> tuple[list[Path], list[str]]:
+def _discover_ml_ab_files(
+    source_root: Path,
+    *,
+    excluded_names: set[str],
+    recursive: bool,
+) -> tuple[list[Path], list[str]]:
     """Find ML_AB files while pruning backup and generated-package trees."""
 
-    if _excluded_model_directory_name(source_root.name):
+    if _excluded_model_directory_name(source_root.name, excluded_names):
         return [], ["."]
 
     models: list[Path] = []
     excluded_directories: list[str] = []
     for current, directory_names, file_names in os.walk(source_root, topdown=True):
         current_path = Path(current)
-        retained_directories: list[str] = []
-        for name in directory_names:
-            candidate = current_path / name
-            if name == ".interfaceforge" or candidate.is_symlink():
-                continue
-            if _excluded_model_directory_name(name):
-                excluded_directories.append(candidate.relative_to(source_root).as_posix())
-                continue
-            retained_directories.append(name)
-        directory_names[:] = retained_directories
+        if not recursive and current_path != source_root:
+            directory_names[:] = []
+        else:
+            retained_directories: list[str] = []
+            for name in directory_names:
+                candidate = current_path / name
+                if name == ".interfaceforge" or candidate.is_symlink():
+                    continue
+                if _excluded_model_directory_name(name, excluded_names):
+                    excluded_directories.append(candidate.relative_to(source_root).as_posix())
+                    continue
+                retained_directories.append(name)
+            directory_names[:] = retained_directories
 
         if "ML_AB" not in file_names:
             continue
@@ -839,6 +851,8 @@ def archive_mlff_models(
     output: str | Path | None = None,
     *,
     include_large: bool = False,
+    exclude_folders: Iterable[str] = (),
+    recursive: bool = False,
     force: bool = False,
 ) -> dict[str, Any]:
     """Archive user-selected VASP-MLFF runs containing a nonempty ML_AB.
@@ -860,11 +874,16 @@ def archive_mlff_models(
     if output_path.exists() and not force:
         raise SafetyError(f"Refusing to overwrite existing archive: {output_path}")
 
-    model_paths, excluded_directories = _discover_ml_ab_files(source_root)
+    excluded_names = {str(name).strip() for name in exclude_folders if str(name).strip()}
+    model_paths, excluded_directories = _discover_ml_ab_files(
+        source_root,
+        excluded_names=excluded_names,
+        recursive=recursive,
+    )
     if not model_paths:
         raise SafetyError(
             f"No nonempty ML_AB files found below {source_root} after excluding "
-            "directories containing 'backup' or starting with 'X'"
+            "configured directories and applying the selected scan depth"
         )
 
     selected_names = set(_MODEL_ARCHIVE_FILES)
@@ -904,10 +923,16 @@ def archive_mlff_models(
         "source_root": str(source_root),
         "selection": "directories containing a nonempty ML_AB; scientific acceptance is user-supplied",
         "include_large": include_large,
+        "recursive": recursive,
         "potcar_excluded": True,
         "large_restart_files_excluded": ["CHG", "CHGCAR", "WAVECAR"],
         "directory_exclusions": {
-            "rules": ["name contains 'backup' (case-insensitive)", "name starts with 'X'"],
+            "rules": [
+                "name contains 'backup' (case-insensitive)",
+                "name starts with 'X'",
+                "exact user-supplied folder names",
+            ],
+            "requested_names": sorted(excluded_names),
             "excluded": excluded_directories,
         },
         "runs": runs,
@@ -958,8 +983,10 @@ def archive_mlff_models(
         "runs": len(runs),
         "files": len(files_to_archive),
         "excluded_directories": excluded_directories,
+        "requested_exclude_folders": sorted(excluded_names),
         "largest_files": largest_files,
         "include_large": include_large,
+        "recursive": recursive,
         "manifest": _MODEL_ARCHIVE_MANIFEST,
         "potcar_excluded": True,
         "chg_chgcar_wavecar_excluded": True,
