@@ -114,25 +114,32 @@ def incar_preset(
     temperature: float = 300.0,
     nsw: int = 3000,
     potim: float = 1.0,
+    workfunction: bool = False,
 ) -> tuple[dict[str, Any], set[str]]:
     """Return a small, explicit ionic/electronic-control preset.
 
     The presets intentionally avoid system-dependent convergence choices such
     as ENCUT, KSPACING, EDIFF, spin, and dispersion corrections.
+
+    ``workfunction=True`` additionally sets ``LVHAR = True``. VASP only
+    writes the local electrostatic potential (not just the charge density)
+    into LOCPOT when this tag is set, and that potential is required by any
+    work-function analysis, including :mod:`interfaceforge.workfunction` and
+    the standalone ``examples/vasp/workfunction/plot_workfunc.py`` script.
     """
 
     if name == "static":
-        return (
+        changes, delete = (
             {"IBRION": -1, "NSW": 0},
             {"MDALGO", "SMASS", "TEBEG", "TEEND", "POTIM", "EDIFFG"},
         )
-    if name == "relax":
-        return (
+    elif name == "relax":
+        changes, delete = (
             {"IBRION": 2, "NSW": nsw, "ISIF": 3, "EDIFFG": -0.02},
             {"MDALGO", "SMASS", "TEBEG", "TEEND", "POTIM"},
         )
-    if name == "md":
-        return (
+    elif name == "md":
+        changes, delete = (
             {
                 "IBRION": 0,
                 "NSW": nsw,
@@ -145,8 +152,8 @@ def incar_preset(
             },
             {"EDIFFG"},
         )
-    if name == "dos":
-        return (
+    elif name == "dos":
+        changes, delete = (
             {
                 "IBRION": -1,
                 "NSW": 0,
@@ -157,7 +164,12 @@ def incar_preset(
             },
             {"MDALGO", "SMASS", "TEBEG", "TEEND", "POTIM", "EDIFFG"},
         )
-    raise ValueError(f"Unknown INCAR preset {name!r}; choose from {INCAR_PRESETS}")
+    else:
+        raise ValueError(f"Unknown INCAR preset {name!r}; choose from {INCAR_PRESETS}")
+    if workfunction:
+        changes = {**changes, "LVHAR": ".TRUE."}
+        delete = delete - {"LVHAR"}
+    return changes, delete
 
 
 def apply_incar_preset(
@@ -167,6 +179,7 @@ def apply_incar_preset(
     temperature: float = 300.0,
     nsw: int = 3000,
     potim: float = 1.0,
+    workfunction: bool = False,
     create: bool = False,
 ) -> dict[str, Any]:
     """Apply one conservative preset without overwriting unrelated settings."""
@@ -176,11 +189,13 @@ def apply_incar_preset(
         temperature=temperature,
         nsw=nsw,
         potim=potim,
+        workfunction=workfunction,
     )
     output = update_incar(path, changes, delete=delete, create=create)
     return {
         "incar": str(output.resolve()),
         "preset": preset,
+        "workfunction": workfunction,
         "changes": changes,
         "removed_tags": sorted(delete),
     }

@@ -62,6 +62,21 @@ class VaspTests(unittest.TestCase):
             self.assertEqual(parsed["TEBEG"], "450")
             self.assertEqual(parsed["POTIM"], "0.5")
 
+    def test_workfunction_flag_sets_lvhar_without_touching_other_presets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            incar = Path(temporary) / "INCAR"
+            incar.write_text("ENCUT = 500\n", encoding="utf-8")
+            result = apply_incar_preset(incar, "relax", workfunction=True)
+            parsed = parse_incar(incar)
+            self.assertEqual(parsed["LVHAR"], ".TRUE.")
+            self.assertEqual(parsed["ENCUT"], "500")
+            self.assertTrue(result["workfunction"])
+
+            other = Path(temporary) / "INCAR2"
+            other.write_text("ENCUT = 500\n", encoding="utf-8")
+            apply_incar_preset(other, "relax")
+            self.assertNotIn("LVHAR", parse_incar(other))
+
     def test_portable_archive_excludes_potcar(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -586,6 +601,131 @@ class VaspTests(unittest.TestCase):
             markdown = Path(payload["outputs"]["markdown"]).read_text(encoding="utf-8")
             self.assertIn("Force RMSE (train)", markdown)
             self.assertIn("0.02 eV/A", markdown)
+
+    def test_opt_audit_recognizes_converged_relaxation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text(
+                "IBRION=2\nNSW=10\nISIF=3\nEDIFFG=-0.02\n", encoding="utf-8"
+            )
+            (run / "OUTCAR").write_text(
+                "\n".join(
+                    [
+                        " FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)",
+                        "  ---------------------------------------------------",
+                        "  free  energy   TOTEN  =      -100.111111 eV",
+                        "",
+                        "  energy  without entropy=     -100.100000  "
+                        "energy(sigma->0) =     -100.105000",
+                        "",
+                        " POSITION                                       TOTAL-FORCE (eV/Angst)",
+                        " -----------------------------------------------------------------------------------",
+                        "      1.00000      1.00000      1.00000        -0.010000     0.020000    -0.015000",
+                        " -----------------------------------------------------------------------------------",
+                        "",
+                        " FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)",
+                        "  ---------------------------------------------------",
+                        "  free  energy   TOTEN  =      -100.211111 eV",
+                        "",
+                        "  energy  without entropy=     -100.200000  "
+                        "energy(sigma->0) =     -100.205000",
+                        "",
+                        " POSITION                                       TOTAL-FORCE (eV/Angst)",
+                        " -----------------------------------------------------------------------------------",
+                        "      1.00000      1.00000      1.00000        -0.000100     0.000200    -0.000150",
+                        " -----------------------------------------------------------------------------------",
+                        "",
+                        " reached required accuracy - stopping structural energy minimisation",
+                        " General timing and accounting informations for this job",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            row = audit_run(run, run)
+
+            self.assertEqual(row["run_kind"], "opt")
+            self.assertEqual(row["ionic_steps"], 2)
+            self.assertTrue(row["opt_converged"])
+            self.assertEqual(row["health"], "converged")
+            self.assertAlmostEqual(row["sigma0_energy_ev_last"], -100.205)
+            self.assertAlmostEqual(row["sigma0_energy_delta_last_ev"], -0.1)
+            self.assertLess(row["max_force_ev_a_last"], row["max_force_ev_a_max"])
+
+    def test_opt_audit_flags_nsw_reached_without_convergence_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text("IBRION=2\nNSW=2\nISIF=3\n", encoding="utf-8")
+            (run / "OUTCAR").write_text(
+                "\n".join(
+                    [
+                        " FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)",
+                        "  ---------------------------------------------------",
+                        "  free  energy   TOTEN  =      -100.111111 eV",
+                        "",
+                        "  energy  without entropy=     -100.100000  "
+                        "energy(sigma->0) =     -100.105000",
+                        "",
+                        " FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)",
+                        "  ---------------------------------------------------",
+                        "  free  energy   TOTEN  =      -100.121111 eV",
+                        "",
+                        "  energy  without entropy=     -100.110000  "
+                        "energy(sigma->0) =     -100.115000",
+                        "",
+                        " General timing and accounting informations for this job",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            row = audit_run(run, run)
+
+            self.assertEqual(row["run_kind"], "opt")
+            self.assertFalse(row["opt_converged"])
+            self.assertEqual(row["health"], "not converged: reached NSW")
+
+    def test_md_audit_reports_stable_average_temperature(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text(
+                "IBRION=0\nNSW=1000\nPOTIM=1\nTEBEG=300\nTEEND=300\n", encoding="utf-8"
+            )
+            (run / "OSZICAR").write_text(
+                " 1 T= 298.0 E= -100.0\n 2 T= 302.0 E= -100.0\n 3 T= 299.5 E= -100.0\n",
+                encoding="utf-8",
+            )
+            (run / "OUTCAR").write_text(
+                "General timing and accounting informations for this job\n",
+                encoding="utf-8",
+            )
+
+            row = audit_run(run, run)
+
+            self.assertEqual(row["run_kind"], "md")
+            self.assertEqual(row["health"], "completed; average behavior reported")
+            self.assertAlmostEqual(row["temperature_mean_k"], (298.0 + 302.0 + 299.5) / 3)
+
+    def test_md_audit_flags_temperature_drift_from_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text(
+                "IBRION=0\nNSW=1000\nPOTIM=1\nTEBEG=300\nTEEND=300\n", encoding="utf-8"
+            )
+            (run / "OSZICAR").write_text(
+                " 1 T= 480.0 E= -100.0\n 2 T= 490.0 E= -100.0\n", encoding="utf-8"
+            )
+            (run / "OUTCAR").write_text(
+                "General timing and accounting informations for this job\n",
+                encoding="utf-8",
+            )
+
+            row = audit_run(run, run)
+
+            self.assertEqual(row["run_kind"], "md")
+            self.assertEqual(row["health"], "temperature drift from target")
 
 
 if __name__ == "__main__":

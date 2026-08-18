@@ -125,6 +125,30 @@ succeeds. The recovery is refused unless OUTCAR contains a recognized
 configuration allocation together with `--ml-mb`.
 
 
+## Work function (surface optimizations)
+
+Two ways exist to plot the planar-averaged LOCPOT potential and estimate a
+work function; both require `LVHAR = .TRUE.` in the INCAR that produced
+LOCPOT, since VASP only writes the electrostatic potential (rather than just
+the charge density) into LOCPOT with that tag set:
+
+```bash
+iface vasp incar static INCAR --workfunction   # or: relax ... --workfunction
+```
+
+- Interactively, from a controller/analysis environment with InterfaceForge,
+  ASE, and matplotlib installed: `iface vasp workfunction LOCPOT OUTCAR
+  --plot-output workfunction.png`. This path is unit tested and also writes
+  a JSON summary.
+- Unattended, at the end of a LONI Slurm job with no InterfaceForge install
+  on the compute node: the standalone
+  [`examples/vasp/workfunction/plot_workfunc.py`](../examples/vasp/workfunction/plot_workfunc.py),
+  deployed to `/home/$USER/bin` and invoked directly by `runvasp.sh`/
+  `runvasp_bigmem.sh` after VASP exits. The invocation is guarded on `LVHAR`
+  so it is a no-op for any job that did not request a work function. See
+  [`examples/vasp/workfunction/README.md`](../examples/vasp/workfunction/README.md)
+  for deployment and the exact guard.
+
 ## Audit
 
 `iface audit` interprets train, refit and run modes differently. It parses
@@ -135,6 +159,39 @@ audit also writes `audit.xlsx`: its first `At a glance` sheet contains the key
 progress, error, health and next-action columns, while `Full audit` preserves
 every parsed field. The compact view is always available separately as
 `audit_summary.csv`, even when Excel support is not installed.
+
+### Standard (non-MLFF) relaxation and MD runs
+
+A run directory without `ML_MODE`/`ML_LMLFF` is not an MLFF stage, so `iface
+audit` classifies it from `IBRION`/`NSW` instead and reports it as `run_kind`
+`opt`, `md`, or `static` alongside the existing `train`/`refit`/`run` modes,
+in the same JSON/CSV/Markdown/xlsx outputs:
+
+- **`opt`** (a standard ionic relaxation, `IBRION` in `1,2,3,5,6,7,8` with
+  `NSW > 0`): tracks every ionic step's `energy(sigma->0)` (the same quantity
+  a `grep "FREE ENERGIE OF THE ION-ELECTRON SYSTEM" OUTCAR | grep "without
+  entropy" | tail -1 | awk '{print $7}'` pipeline collects, kept as a full
+  series here rather than only the final value) and the last ionic step's
+  maximum atomic force from `OUTCAR`. Health is one of `converged` (VASP's
+  "reached required accuracy - stopping structural energy minimisation"
+  found), `not converged: reached NSW`, `energy increased on the last ionic
+  step`, `incomplete or running`, or `finished; convergence marker not
+  found`.
+- **`md`** (`IBRION=0` with `NSW > 0`, no MLFF tags): reuses the same
+  temperature series already parsed from `OSZICAR` and reports the average
+  behavior of the trajectory — `temperature_mean_k`/`temperature_std_k`
+  against the `TEBEG`/`TEEND` target — rather than a per-frame judgment.
+  Health is `completed; average behavior reported`, `temperature drift from
+  target` (mean temperature off the target by more than 15%), `incomplete or
+  running`, or `no MD steps parsed`.
+- **`static`** (`IBRION=-1` or `NSW` unset/zero): reports only whether the
+  calculation finished normally.
+
+As with the MLFF modes, this is triage, not a correctness proof: a
+`converged` relaxation still warrants checking that `EDIFFG`/`ISIF` matched
+the intended degrees of freedom, and a `completed` MD run still warrants
+checking `XDATCAR` for structural drift the temperature average would not
+show.
 
 Run directories with `archive` anywhere in their relative path are excluded by
 default, so recovery snapshots do not distort the current campaign summary.
