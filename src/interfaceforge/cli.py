@@ -369,6 +369,7 @@ def cmd_vasp_incar(args: argparse.Namespace) -> int:
             temperature=args.temperature,
             nsw=args.nsw,
             potim=args.potim,
+            workfunction=args.workfunction,
             create=args.create,
         )
     )
@@ -890,6 +891,12 @@ def build_parser() -> argparse.ArgumentParser:
     incar.add_argument("--temperature", type=float, default=300.0)
     incar.add_argument("--nsw", type=int, default=3000)
     incar.add_argument("--potim", type=float, default=1.0)
+    incar.add_argument(
+        "--workfunction",
+        action="store_true",
+        help="Also set LVHAR=True so LOCPOT contains the electrostatic potential "
+        "needed for work-function analysis of a surface calculation",
+    )
     incar.add_argument("--create", action="store_true")
     incar.set_defaults(func=cmd_vasp_incar)
     pack = vasp_commands.add_parser("pack", help="Package lightweight reproducibility outputs")

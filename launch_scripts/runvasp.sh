@@ -15,3 +15,11 @@ export SINGULARITYENV_OMP_NUM_THREADS=1
 # This command uses 128 MPI processes on two nodes
 srun -n128 vasp_gam
 echo "took $SECONDS sec."
+
+# Work-function plot: only fires for jobs that requested LVHAR = .TRUE.
+# (e.g. `iface vasp incar static INCAR --workfunction`); a no-op otherwise.
+# See examples/vasp/workfunction/README.md. `|| true` keeps a plotting
+# failure from being mistaken for a failed VASP run.
+if grep -Eqi '^\s*LVHAR\s*=\s*\.?(TRUE|T)\.?' INCAR 2>/dev/null && [ -s LOCPOT ]; then
+    python "$HOME/bin/plot_workfunc.py" --title "$SLURM_JOB_NAME" || true
+fi

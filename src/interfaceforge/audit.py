@@ -42,9 +42,17 @@ AT_A_GLANCE_COLUMNS = (
     ("relative_path", "Relative path"),
     ("readiness_profile", "Readiness profile"),
     ("ml_mode", "Mode"),
+    ("run_kind", "Run kind"),
     ("progress_pct", "Progress (%)"),
     ("md_steps", "MD steps"),
+    ("ionic_steps", "Ionic steps"),
     ("nsw_target", "NSW target"),
+    ("opt_converged", "OPT converged"),
+    ("sigma0_energy_ev_last", "Energy sigma->0 last (eV)"),
+    ("sigma0_energy_delta_last_ev", "Energy delta last (eV)"),
+    ("max_force_ev_a_last", "Max force last (eV/A)"),
+    ("temperature_mean_k", "MD mean T (K)"),
+    ("temperature_std_k", "MD std T (K)"),
     ("finished_normally", "Finished normally"),
     ("health", "Health"),
     ("learning_event_rate_pct", "Learning events (%)"),
@@ -231,6 +239,143 @@ def parse_oszicar(path: Path) -> dict[str, Any]:
     }
 
 
+_SIGMA0_ENERGY = re.compile(r"energy\(sigma->0\)\s*=\s*([-+0-9.Ee]+)")
+_WITHOUT_ENTROPY_ENERGY = re.compile(r"energy\s+without\s+entropy\s*=\s*([-+0-9.Ee]+)")
+_OPT_CONVERGED_MARKER = "reached required accuracy - stopping structural energy minimisation"
+_TOTAL_FORCE_BLOCK = re.compile(r"TOTAL-FORCE \(eV/Angst\)\s*\n\s*-+\n(.*?)\n\s*-+", re.S)
+
+
+def parse_relaxation_progress(run: Path) -> dict[str, Any]:
+    """Track ionic-step energy and force progress for a standard (non-ML) run.
+
+    ``energy(sigma->0)`` is the same quantity historically collected across
+    many run folders with a one-line ``grep ... | tail -1 | awk '{print $7}'``
+    pipeline against "FREE ENERGIE OF THE ION-ELECTRON SYSTEM"; this keeps
+    every ionic step so a convergence trend, not just the final value, is
+    available.
+    """
+
+    # Normalize CRLF up front: the other parsers in this module work
+    # line-by-line via str.splitlines(), which treats "\r\n" as one line
+    # break automatically, but the TOTAL-FORCE block below matches literal
+    # "\n" across multiple lines and would otherwise silently miss every
+    # block in a CRLF-terminated OUTCAR.
+    text = read_tail(run / "OUTCAR").replace("\r\n", "\n")
+    sigma0 = [float(value) for value in _SIGMA0_ENERGY.findall(text)]
+    without_entropy = [float(value) for value in _WITHOUT_ENTROPY_ENERGY.findall(text)]
+    forces: list[float] = []
+    for block in _TOTAL_FORCE_BLOCK.findall(text):
+        magnitudes = []
+        for line in block.strip().splitlines():
+            tokens = line.split()
+            if len(tokens) < 6:
+                continue
+            try:
+                fx, fy, fz = (float(tokens[-3]), float(tokens[-2]), float(tokens[-1]))
+            except ValueError:
+                continue
+            magnitudes.append(math.sqrt(fx * fx + fy * fy + fz * fz))
+        if magnitudes:
+            forces.append(max(magnitudes))
+    result: dict[str, Any] = {
+        "ionic_steps": len(sigma0),
+        "opt_converged": _OPT_CONVERGED_MARKER in text.lower(),
+        "max_force_ev_a_last": forces[-1] if forces else None,
+        "max_force_ev_a_max": max(forces) if forces else None,
+        "sigma0_energy_delta_last_ev": sigma0[-1] - sigma0[-2] if len(sigma0) >= 2 else None,
+    }
+    result.update(_stats(sigma0, "sigma0_energy_ev"))
+    result.update(_stats(without_entropy, "energy_without_entropy_ev"))
+    return result
+
+
+def classify_run_kind(row: dict[str, Any], incar: dict[str, str]) -> str:
+    """Classify a run as an MLFF stage, a standard relaxation, MD, or static.
+
+    ML runs are already distinguished by ``ML_MODE``/``ML_LMLFF``. For
+    everything else, InterfaceForge previously had no opinion beyond
+    "unknown mode"; this reads the same ``IBRION``/``NSW`` tags a human would
+    to tell a geometry optimization apart from ab initio MD or a single
+    static point.
+    """
+
+    if row.get("ml_mode") or str(row.get("ml_lmlff", "")).strip().upper() in {"T", ".TRUE.", "TRUE"}:
+        return f"ml_{row.get('ml_mode') or 'unknown'}"
+    ibrion_raw = incar.get("IBRION")
+    try:
+        ibrion = int(float(ibrion_raw)) if ibrion_raw not in (None, "") else None
+    except ValueError:
+        ibrion = None
+    nsw = row.get("nsw_target") or 0
+    if ibrion in (1, 2, 3, 5, 6, 7, 8) and nsw > 0:
+        return "opt"
+    if ibrion == 0 and nsw > 0:
+        return "md"
+    return "static"
+
+
+def _assess_opt(row: dict[str, Any]) -> Assessment:
+    if row.get("oom_or_killed"):
+        return Assessment("failed: OOM/killed", "Fix memory or resources before interpreting the run.")
+    if not row.get("ionic_steps"):
+        return Assessment(
+            "no ionic steps parsed",
+            "Inspect OUTCAR for an initialization or SCF-convergence failure.",
+        )
+    if row.get("opt_converged"):
+        return Assessment(
+            "converged",
+            "Relaxation reached VASP's required accuracy. Inspect CONTCAR, then "
+            "consider a follow-up static run for final energies/properties.",
+        )
+    if not row.get("finished_normally"):
+        return Assessment("incomplete or running", "Inspect scheduler state and the latest ionic step in OUTCAR.")
+    target = row.get("nsw_target")
+    steps = row.get("ionic_steps") or 0
+    if target and steps >= target:
+        return Assessment(
+            "not converged: reached NSW",
+            "Continue from CONTCAR with additional NSW, or reconsider EDIFFG/ISIF "
+            "if the geometry is not expected to move further.",
+        )
+    delta = row.get("sigma0_energy_delta_last_ev")
+    if delta is not None and delta > 0:
+        return Assessment(
+            "energy increased on the last ionic step",
+            "Inspect the last few ionic steps and forces; consider restarting "
+            "from an earlier CONTCAR with a smaller POTIM or a different IBRION.",
+        )
+    return Assessment(
+        "finished; convergence marker not found",
+        "Inspect the final OUTCAR ionic step and forces before accepting CONTCAR.",
+    )
+
+
+def _assess_md(row: dict[str, Any]) -> Assessment:
+    if row.get("oom_or_killed"):
+        return Assessment("failed: OOM/killed", "Fix memory or resources before interpreting the run.")
+    if not row.get("md_steps"):
+        return Assessment("no MD steps parsed", "Fix initialization or SCF convergence.")
+    if not row.get("finished_normally"):
+        return Assessment("incomplete or running", "Inspect scheduler state and the latest OSZICAR step.")
+    tebeg = row.get("tebeg_k")
+    teend = row.get("teend_k")
+    target = (float(tebeg) + float(teend)) / 2 if tebeg is not None and teend is not None else None
+    mean_temp = row.get("temperature_mean_k")
+    if target and mean_temp is not None and abs(mean_temp - target) > 0.15 * target:
+        return Assessment(
+            "temperature drift from target",
+            f"Mean temperature {mean_temp:.1f} K deviates from the ~{target:.0f} K "
+            "target by more than 15%; check the thermostat (MDALGO/SMASS) and "
+            "equilibration length.",
+        )
+    return Assessment(
+        "completed; average behavior reported",
+        "Review temperature_mean_k/temperature_std_k and inspect XDATCAR for "
+        "structural drift before using these frames.",
+    )
+
+
 def parse_outcar(run: Path) -> dict[str, Any]:
     chunks = [read_tail(run / "OUTCAR")]
     for pattern in ("slurm-*.out", "slurm-*.err", "vasp.*.out", "vasp.*.err"):
@@ -388,6 +533,16 @@ def assess(row: dict[str, Any], readiness_profile: str = "general") -> Assessmen
         if spilling >= SFF_MODERATE_EXTRAPOLATION:
             return Assessment("moderate extrapolation", "Prioritize high-SFF frames for DFT checks.")
         return Assessment("stable within represented space", "Proceed to paired DFT/ML validation.")
+    if not mode:
+        run_kind = row.get("run_kind")
+        if run_kind == "opt":
+            return _assess_opt(row)
+        if run_kind == "md":
+            return _assess_md(row)
+        if run_kind == "static":
+            if row.get("finished_normally"):
+                return Assessment("static calculation finished", "Inspect OUTCAR for the desired properties.")
+            return Assessment("incomplete or running", "Inspect scheduler state and the latest OUTCAR output.")
     return Assessment("unknown mode", "Set or inspect ML_MODE; supported modes are train, refit, and run.")
 
 
@@ -464,6 +619,8 @@ def audit_run(run: Path, root: Path, *, readiness_profile: str = "general") -> d
     row.update(parse_outcar(run))
     row.update(parse_oszicar(run / "OSZICAR"))
     row.update(parse_ml_log(run / "ML_LOGFILE"))
+    row.update(parse_relaxation_progress(run))
+    row["run_kind"] = classify_run_kind(row, incar)
     for name in ("ML_AB", "ML_ABN", "ML_FF", "ML_FFN", "CONTCAR", "XDATCAR"):
         row[f"{name.lower()}_size_mb"] = _file_mb(run / name)
     row["ml_lfast_header"] = _fast_header(run)
@@ -480,7 +637,8 @@ def audit_run(run: Path, root: Path, *, readiness_profile: str = "general") -> d
         row["last_updated_file"] = ""
         row["last_update_age_min"] = None
     target = row.get("nsw_target")
-    row["progress_pct"] = 100.0 * row["md_steps"] / target if target else None
+    steps_for_progress = row["ionic_steps"] if row["run_kind"] == "opt" else row["md_steps"]
+    row["progress_pct"] = 100.0 * steps_for_progress / target if target else None
     verdict = assess(row, readiness_profile)
     row["health"] = verdict.health
     row["next_action"] = verdict.next_action
@@ -635,8 +793,9 @@ def run_audit(
             progress = "" if row["progress_pct"] is None else f"{row['progress_pct']:.1f}%"
             force_rmse = row.get("training_force_rmse_ev_a_last")
             force_rmse_text = "" if force_rmse is None else f"{force_rmse:.6g} eV/A"
+            mode_text = row["ml_mode"] or row.get("run_kind", "")
             markdown.append(
-                f"| `{row['relative_path']}` | {row['ml_mode']} | {progress} | {force_rmse_text} | "
+                f"| `{row['relative_path']}` | {mode_text} | {progress} | {force_rmse_text} | "
                 f"{row['health']} | {row['next_action']} |"
             )
     md_path.write_text("\n".join(markdown) + "\n", encoding="utf-8")
