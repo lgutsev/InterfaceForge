@@ -49,6 +49,12 @@ directory it searches `mace_model/` and prefers a filename containing
 `stagetwo`, `stage_two`, or `stage2`.  It then compares energy and forces from
 native MACE and OpenMM-ML on one ASE-readable structure:
 
+The launcher locates `mace_openmm_smoke.py` in the submission directory first,
+then beside the launcher, and finally in the InterfaceForge checkout exposed by
+the active or configured development Conda environment's editable install. Set
+`IFACE_REPO_ROOT` or `IFACE_DEV_ENV` when the checkout or environment is in a
+non-default location.
+
 ```bash
 sbatch examples/ai2kit/run_mace_openmm_smoke.sh \
   /path/to/mace_committee/seed_0 \
