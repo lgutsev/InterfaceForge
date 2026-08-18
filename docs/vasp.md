@@ -266,6 +266,9 @@ compact run provenance in one verifiable ZIP:
 cd successful_runs
 iface vasp archive-models
 
+# Skip named immediate children:
+iface vasp archive-models --exclude-folders old_300 test_run rejected_model
+
 # Or choose the source root and output name explicitly:
 iface vasp archive-models stored_models/perovskite_mlff_v1.zip \
     --root successful_runs
@@ -284,6 +287,13 @@ The scanner does not descend into a directory whose name contains `backup`
 and `WAVECAR` are always excluded. The JSON result reports the archive size,
 total uncompressed size, excluded directories, and the ten largest retained
 files so unexpectedly large archives can be diagnosed directly.
+
+The default scan depth is the current folder plus its immediate child folders,
+matching the original shell script's `*/` loop. It does not inspect daughter
+folders below those children. Add exact names with
+`--exclude-folders NAME [NAME ...]`; the option may be repeated. Matching is
+case-sensitive and applies at every scanned depth. `--recursive` opts back into
+deeper discovery when it is genuinely needed.
 
 With no arguments, the command scans the current folder and writes a
 timestamped `MLFF_Models_<folder>_<UTC timestamp>.zip` there, matching the

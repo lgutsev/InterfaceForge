@@ -394,6 +394,8 @@ def cmd_vasp_archive_models(args: argparse.Namespace) -> int:
             args.root,
             args.output,
             include_large=args.include_large,
+            exclude_folders=args.exclude_folders,
+            recursive=args.recursive,
             force=args.force,
         )
     )
@@ -915,6 +917,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="ZIP path (default: timestamped archive in the current directory)",
     )
     archive_models.add_argument("--root", default=".")
+    archive_models.add_argument(
+        "--exclude-folder",
+        "--exclude-folders",
+        dest="exclude_folders",
+        action="extend",
+        nargs="+",
+        default=[],
+        metavar="NAME",
+        help="Exact folder names to skip; accepts a list and may be repeated",
+    )
+    archive_models.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Also scan below immediate child folders (off by default)",
+    )
     archive_models.add_argument("--include-large", action="store_true")
     archive_models.add_argument("--force", action="store_true")
     archive_models.set_defaults(func=cmd_vasp_archive_models)

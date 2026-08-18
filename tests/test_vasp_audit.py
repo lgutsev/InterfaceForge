@@ -147,7 +147,7 @@ class VaspTests(unittest.TestCase):
                 (run / "INCAR").write_text("ML_MODE=train\n", encoding="utf-8")
 
             output = root / "stored_models.zip"
-            result = archive_mlff_models(root, output)
+            result = archive_mlff_models(root, output, recursive=True)
 
             self.assertEqual(result["runs"], 1)
             self.assertEqual(
@@ -159,6 +159,51 @@ class VaspTests(unittest.TestCase):
             self.assertIn("accepted/ML_AB", names)
             self.assertFalse(any("backup" in name.casefold() for name in names))
             self.assertFalse(any(part.startswith("X") for name in names for part in Path(name).parts))
+
+    def test_model_archive_accepts_exact_folder_exclusion_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("keep_300", "omit_450", "omit_trained"):
+                run = root / name
+                run.mkdir()
+                (run / "ML_AB").write_text(f"model from {name}\n", encoding="utf-8")
+
+            result = archive_mlff_models(
+                root,
+                root / "models.zip",
+                exclude_folders=["omit_450", "omit_trained"],
+            )
+
+            self.assertEqual(result["runs"], 1)
+            self.assertEqual(
+                result["requested_exclude_folders"],
+                ["omit_450", "omit_trained"],
+            )
+            self.assertEqual(result["excluded_directories"], ["omit_450", "omit_trained"])
+            with zipfile.ZipFile(result["output"]) as archive:
+                names = set(archive.namelist())
+            self.assertIn("keep_300/ML_AB", names)
+            self.assertNotIn("omit_450/ML_AB", names)
+            self.assertNotIn("omit_trained/ML_AB", names)
+
+    def test_model_archive_does_not_scan_grandchildren_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            direct = root / "direct"
+            nested = direct / "daughter"
+            nested.mkdir(parents=True)
+            (direct / "ML_AB").write_text("direct model\n", encoding="utf-8")
+            (nested / "ML_AB").write_text("nested model\n", encoding="utf-8")
+
+            shallow = archive_mlff_models(root, root / "shallow.zip")
+            recursive = archive_mlff_models(root, root / "recursive.zip", recursive=True)
+
+            self.assertEqual(shallow["runs"], 1)
+            self.assertFalse(shallow["recursive"])
+            self.assertEqual(recursive["runs"], 2)
+            self.assertTrue(recursive["recursive"])
+            with zipfile.ZipFile(shallow["output"]) as archive:
+                self.assertNotIn("direct/daughter/ML_AB", archive.namelist())
 
     def test_model_archive_requires_nonempty_ml_ab(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
