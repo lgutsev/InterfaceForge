@@ -56,6 +56,30 @@ def make_topology(atoms) -> app.Topology:
     return topology
 
 
+def canonicalize_periodic_geometry(atoms):
+    """Rotate a periodic ASE structure into OpenMM's box convention."""
+    result = atoms.copy()
+    if not np.any(result.pbc):
+        return result
+    if not np.all(result.pbc):
+        raise SystemExit(
+            "The smoke test requires either three-dimensional periodicity or "
+            "a fully non-periodic structure; partial PBC cannot be represented "
+            "faithfully by an OpenMM Topology."
+        )
+
+    # ASE returns a lower-triangular cell R and an orthogonal transformation Q
+    # such that R @ Q equals the input cell.  Retaining fractional coordinates
+    # while replacing the cell with R rotates positions and the cell together,
+    # preserving the physical structure and satisfying OpenMM's requirement
+    # that a is parallel to x and b lies in the xy plane.
+    scaled_positions = result.get_scaled_positions(wrap=False)
+    standard_cell, _ = result.cell.standard_form()
+    result.set_cell(standard_cell, scale_atoms=False)
+    result.set_scaled_positions(scaled_positions)
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("model", help="model file, mace_model directory, or seed directory")
@@ -65,7 +89,7 @@ def main() -> None:
     args = parser.parse_args()
 
     model = discover_model(args.model)
-    atoms = read(args.structure, index=0)
+    atoms = canonicalize_periodic_geometry(read(args.structure, index=0))
     if not openmm.Platform.getNumPlatforms():
         raise SystemExit("OpenMM did not load any compute platform")
 
