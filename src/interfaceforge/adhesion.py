@@ -35,6 +35,7 @@ from .validation import adhesion_from_csv, separation_curve_from_csv
 
 EV_A2_TO_J_M2 = 16.02176634
 METHODS = ("mlff", "dft")
+SLAB_MODES = ("relax", "static")
 Vec = tuple[float, float, float]
 Lattice = tuple[Vec, Vec, Vec]
 
@@ -273,6 +274,34 @@ def _mlff_relax_incar(base: str) -> str:
     )
 
 
+def _mlff_static_slab_incar(base: str, name: str) -> str:
+    return _adapt_incar(
+        base,
+        [
+            ("SYSTEM", f"adhesion static isolated slab {name}"),
+            ("ML_LMLFF", ".TRUE."), ("ML_MODE", "run"),
+            ("IBRION", "-1"), ("NSW", "1"), ("ISIF", "2"), ("ISYM", "0"),
+            ("ML_OUTPUT_MODE", "1"), ("ML_OUTBLOCK", "1"),
+            ("LWAVE", ".FALSE."), ("LCHARG", ".FALSE."), ("LVHAR", ".FALSE."),
+        ],
+        remove={"EDIFFG", "POTIM"},
+    )
+
+
+def _dft_static_slab_incar(base: str, name: str) -> str:
+    return _adapt_incar(
+        base,
+        [
+            ("SYSTEM", f"adhesion DFT static isolated slab {name}"),
+            ("IBRION", "-1"), ("NSW", "0"),
+            ("EDIFF", "1E-6"), ("ISIF", "2"), ("ISYM", "0"),
+            ("LWAVE", ".FALSE."), ("LCHARG", ".FALSE."), ("LVHAR", ".FALSE."),
+        ],
+        remove={"EDIFFG", "POTIM"},
+        remove_prefixes=("ML_",),
+    )
+
+
 def _static_incar(base: str, distance: float) -> str:
     return _adapt_incar(
         base,
@@ -379,19 +408,32 @@ def prepare_adhesion(
     output_dir: str | Path | None = None,
     launcher: str | None = None,
     propagate_launcher: bool = True,
+    slab_mode: str = "relax",
 ) -> dict[str, Any]:
     """Prepare a work-of-adhesion calculation tree from a reference interface run.
 
     The reference directory (POSCAR/CONTCAR, KPOINTS, POTCAR, and an
     appropriate INCAR; MLFF mode additionally requires ML_FF) is never
     modified. The generated sibling tree keeps ``reference`` at its head as a
-    relative symlink (the zero-separation point), creates relaxed
-    isolated-slab inputs for each fragment, and creates static
-    positive-separation inputs (a rigid separation curve). In MLFF mode every
-    generated run receives a verified hard link to the reference ML_FF: VASP
-    sees a regular file, while all copies share one inode and consume no
-    additional model storage. DFT mode removes ML tags and creates no ML_FF.
-    This function never launches VASP.
+    relative symlink (the zero-separation point), creates isolated-slab
+    inputs for each fragment, and creates static positive-separation inputs
+    (a rigid separation curve). In MLFF mode every generated run receives a
+    verified hard link to the reference ML_FF: VASP sees a regular file,
+    while all copies share one inode and consume no additional model
+    storage. DFT mode removes ML tags and creates no ML_FF. This function
+    never launches VASP.
+
+    ``slab_mode="relax"`` (the default) lets each isolated slab relax
+    (``IBRION=2``). ``slab_mode="static"`` instead evaluates it at the
+    as-cut geometry (``IBRION=-1``, no ionic motion). Prefer ``static`` when
+    the driving model is known or suspected to extrapolate poorly for an
+    isolated, vacuum-exposed fragment far outside its training distribution
+    — for example an MLIP trained mostly on the interface that lets a pure
+    fragment (a bare nitride slab, say) collapse into an unphysical geometry
+    when allowed to relax on its own. A collapsed isolated-slab energy makes
+    the work of adhesion meaningless regardless of how well the interface
+    itself is described, so this is worth checking (inspect each slab's
+    CONTCAR) before trusting ``relax`` results from any MLIP.
 
     When ``propagate_launcher`` is true (the default), the same launcher
     ``iface vasp submit`` would pick for the reference directory
@@ -403,6 +445,8 @@ def prepare_adhesion(
 
     if method not in METHODS:
         raise ValueError(f"Unknown adhesion method {method!r}; choose one of {METHODS}")
+    if slab_mode not in SLAB_MODES:
+        raise ValueError(f"Unknown slab mode {slab_mode!r}; choose one of {SLAB_MODES}")
     source = Path(interface_dir).resolve()
     if not source.is_dir():
         raise NotADirectoryError(source)
@@ -491,8 +535,15 @@ def prepare_adhesion(
     slab_records = []
     for name, atoms in ((lower_name, lower), (upper_name, upper)):
         run = output / "slabs" / name
-        relax_text = _mlff_relax_incar(base_incar) if method == "mlff" else _dft_relax_incar(base_incar)
-        _make_run_dir(run, relax_text, kpoints_path, model, launcher_path)
+        if slab_mode == "static":
+            slab_text = (
+                _mlff_static_slab_incar(base_incar, name)
+                if method == "mlff"
+                else _dft_static_slab_incar(base_incar, name)
+            )
+        else:
+            slab_text = _mlff_relax_incar(base_incar) if method == "mlff" else _dft_relax_incar(base_incar)
+        _make_run_dir(run, slab_text, kpoints_path, model, launcher_path)
         _write_poscar(run / "POSCAR", parsed, parsed.lattice, atoms)
         species = _present_species(atoms)
         _subset_potcar(run / "POTCAR", parsed.species, blocks, species)
@@ -550,11 +601,23 @@ def prepare_adhesion(
         "rigid_curve": curve_records,
         "model_storage": "verified hard links to reference/ML_FF" if model is not None else "not used for DFT",
         "launcher": launcher_path.name if launcher_path is not None else None,
+        "slab_mode": slab_mode,
         "notes": [
             "The reference directory is the zero-separation point and is not modified.",
             "Rigid curve is static unless curve_incar is supplied.",
             "Upper slab and c vector move by the same distance, preserving outer vacuum.",
             "No calculations were launched.",
+            (
+                "Slabs are static at the as-cut geometry (slab_mode=static); no ionic "
+                "relaxation is performed on either isolated fragment."
+                if slab_mode == "static"
+                else "Slabs are allowed to relax (slab_mode=relax). Inspect each slab's "
+                "CONTCAR once finished, especially for an MLIP: a model trained mostly on "
+                "the interface can extrapolate poorly for an isolated, vacuum-exposed "
+                "fragment and let it collapse into an unphysical geometry, which makes "
+                "the resulting work of adhesion meaningless. Re-prepare with "
+                "slab_mode='static' if that happens."
+            ),
             (
                 f"{launcher_path.name} was copied into every slab and rigid-curve directory "
                 "from the reference; submit each independently."

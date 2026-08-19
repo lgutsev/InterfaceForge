@@ -12,6 +12,7 @@ from typing import Any
 
 from . import __version__
 from .adhesion import METHODS as ADHESION_METHODS
+from .adhesion import SLAB_MODES as ADHESION_SLAB_MODES
 from .adhesion import audit_adhesion, prepare_adhesion
 from .ai2kit import (
     adapter_status,
@@ -560,6 +561,7 @@ def cmd_adhesion_prepare(args: argparse.Namespace) -> int:
             output_dir=args.output_dir,
             launcher=args.launcher,
             propagate_launcher=not args.no_launcher,
+            slab_mode=args.slab_mode,
         )
     )
     return 0
@@ -1074,6 +1076,14 @@ def build_parser() -> argparse.ArgumentParser:
     adhesion_prepare.add_argument("--min-side-fraction", type=float, default=0.10)
     adhesion_prepare.add_argument("--lower-name", default="lower")
     adhesion_prepare.add_argument("--upper-name", default="upper")
+    adhesion_prepare.add_argument(
+        "--slab-mode",
+        choices=ADHESION_SLAB_MODES,
+        default="relax",
+        help="relax (default) lets each isolated slab relax; static evaluates it at the "
+        "as-cut geometry with no ionic motion -- use this when the driving model "
+        "extrapolates poorly for an isolated fragment (e.g. it collapses on relaxation)",
+    )
     adhesion_prepare.add_argument(
         "--distances",
         nargs="+",

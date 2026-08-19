@@ -172,9 +172,18 @@ gap), then generates:
 
 - **`reference`**: a relative symlink back to the untouched reference
   directory — the zero-separation point.
-- **`slabs/<lower-name>` and `slabs/<upper-name>`**: relaxed isolated-slab
-  inputs for each fragment (`IBRION=2`, `ISIF=2`), with a POTCAR subset to
-  only the species present in that fragment.
+- **`slabs/<lower-name>` and `slabs/<upper-name>`**: isolated-slab inputs
+  for each fragment, with a POTCAR subset to only the species present in
+  that fragment. `--slab-mode relax` (the default, `IBRION=2, ISIF=2`) lets
+  each slab relax; `--slab-mode static` (`IBRION=-1`, no ionic motion)
+  evaluates it at the as-cut geometry instead. Prefer `static` when the
+  driving model extrapolates poorly for an isolated, vacuum-exposed
+  fragment — for example an MLIP trained mostly on the interface that lets
+  a bare fragment collapse into an unphysical geometry once allowed to
+  relax on its own. A collapsed slab makes the work of adhesion meaningless
+  regardless of how well the interface itself is described, so inspect each
+  slab's `CONTCAR` under `relax` before trusting the result, especially for
+  an MLIP.
 - **`rigid_curve/sep_XXX.XX_A/`**: one static single-point (`IBRION=-1,
   NSW=1`) per `--distances` value, with the upper fragment and the cell's
   *c* vector both translated along the interface normal by that separation —

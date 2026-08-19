@@ -85,6 +85,58 @@ class AdhesionTests(unittest.TestCase):
             self.assertIn("ENCUT = 500", incar)
             self.assertIn("EDIFF           = 1E-6", incar)
 
+    def test_slab_mode_static_disables_ionic_relaxation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+
+            manifest = prepare_adhesion(
+                source, method="dft", distances=[], slab_mode="static"
+            )
+
+            self.assertEqual(manifest["slab_mode"], "static")
+            output = Path(manifest["output_directory"])
+            for name in ("lower", "upper"):
+                incar = (output / "slabs" / name / "INCAR").read_text(encoding="utf-8")
+                self.assertIn("IBRION          = -1", incar)
+                self.assertNotIn("IBRION          = 2", incar)
+
+    def test_slab_mode_defaults_to_relax(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+
+            manifest = prepare_adhesion(source, method="dft", distances=[])
+
+            self.assertEqual(manifest["slab_mode"], "relax")
+            output = Path(manifest["output_directory"])
+            incar = (output / "slabs" / "lower" / "INCAR").read_text(encoding="utf-8")
+            self.assertIn("IBRION          = 2", incar)
+
+    def test_slab_mode_static_works_for_mlff_too(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root)
+
+            manifest = prepare_adhesion(
+                source, method="mlff", distances=[], slab_mode="static"
+            )
+
+            output = Path(manifest["output_directory"])
+            incar = (output / "slabs" / "lower" / "INCAR").read_text(encoding="utf-8")
+            self.assertIn("IBRION          = -1", incar)
+            self.assertIn("ML_LMLFF", incar)
+            # A hard link to ML_FF is still expected in static mode.
+            self.assertTrue((output / "slabs" / "lower" / "ML_FF").exists())
+
+    def test_invalid_slab_mode_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+
+            with self.assertRaises(ValueError):
+                prepare_adhesion(source, method="dft", distances=[], slab_mode="bogus")
+
     def test_rigid_curve_shifts_upper_fragment_and_expands_cell(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
