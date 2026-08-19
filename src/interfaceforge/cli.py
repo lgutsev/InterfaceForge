@@ -12,7 +12,7 @@ from typing import Any
 
 from . import __version__
 from .adhesion import METHODS as ADHESION_METHODS
-from .adhesion import prepare_adhesion
+from .adhesion import audit_adhesion, prepare_adhesion
 from .ai2kit import (
     adapter_status,
     approve_round,
@@ -565,6 +565,11 @@ def cmd_adhesion_prepare(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_adhesion_audit(args: argparse.Namespace) -> int:
+    _json(audit_adhesion(args.output_dir))
+    return 0
+
+
 def cmd_intermat(args: argparse.Namespace) -> int:
     if args.intermat_command == "status":
         payload = intermat_status()
@@ -1090,6 +1095,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not copy a launcher into the generated slab/rigid-curve directories",
     )
     adhesion_prepare.set_defaults(func=cmd_adhesion_prepare)
+    adhesion_audit = adhesion_commands.add_parser(
+        "audit",
+        help="Read back finished slab/rigid-curve runs and compute work of adhesion + curve",
+    )
+    adhesion_audit.add_argument(
+        "output_dir", help="Directory previously created by 'adhesion prepare'"
+    )
+    adhesion_audit.set_defaults(func=cmd_adhesion_audit)
 
     geom = vasp_commands.add_parser("geom", help="ASE-backed geometry preparation")
     geom_commands = geom.add_subparsers(dest="geometry", required=True)

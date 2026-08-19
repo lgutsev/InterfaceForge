@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from interfaceforge.adhesion import prepare_adhesion
+from interfaceforge.adhesion import audit_adhesion, prepare_adhesion
 from interfaceforge.errors import SafetyError
 
 _POSCAR = """test interface
@@ -180,6 +180,96 @@ class AdhesionTests(unittest.TestCase):
             manifest = prepare_adhesion(source, method="dft", distances=[])
 
             self.assertIsNone(manifest["launcher"])
+
+
+def _fake_outcar(energy: float) -> str:
+    return (
+        " FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)\n"
+        "  ---------------------------------------------------\n"
+        f"  free  energy   TOTEN  =      {energy:.6f} eV\n\n"
+        f"  energy  without entropy=     {energy + 0.01:.6f}  "
+        f"energy(sigma->0) =     {energy:.6f}\n\n"
+        " General timing and accounting informations for this job\n"
+    )
+
+
+class AdhesionAuditTests(unittest.TestCase):
+    def test_audit_computes_work_of_adhesion_and_curve_once_runs_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+            (source / "OUTCAR").write_text(_fake_outcar(-200.0), encoding="utf-8")
+
+            manifest = prepare_adhesion(source, method="dft", distances=[1, 2])
+            output = Path(manifest["output_directory"])
+            (output / "slabs" / "lower" / "OUTCAR").write_text(
+                _fake_outcar(-90.0), encoding="utf-8"
+            )
+            (output / "slabs" / "upper" / "OUTCAR").write_text(
+                _fake_outcar(-95.0), encoding="utf-8"
+            )
+            (output / "rigid_curve" / "sep_001.00_A" / "OUTCAR").write_text(
+                _fake_outcar(-184.0), encoding="utf-8"
+            )
+            (output / "rigid_curve" / "sep_002.00_A" / "OUTCAR").write_text(
+                _fake_outcar(-186.0), encoding="utf-8"
+            )
+
+            result = audit_adhesion(output)
+
+            row = result["work_of_adhesion"]["rows"][0]
+            self.assertAlmostEqual(row["work_of_adhesion_ev_a2"], 0.6)
+            self.assertAlmostEqual(row["work_of_adhesion_j_m2"], 0.6 * 16.02176634)
+            self.assertEqual(result["rigid_curve_points_ready"], 2)
+            self.assertEqual(result["rigid_curve_points_total"], 2)
+            self.assertTrue(Path(result["audit_json"]).is_file())
+            self.assertTrue(Path(result["audit_markdown"]).is_file())
+
+    def test_audit_reports_none_before_anything_has_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+
+            manifest = prepare_adhesion(source, method="dft", distances=[1])
+            output = Path(manifest["output_directory"])
+
+            result = audit_adhesion(output)
+
+            self.assertIsNone(result["work_of_adhesion"])
+            self.assertIsNone(result["separation_curve"])
+            self.assertEqual(result["rigid_curve_points_ready"], 0)
+            self.assertFalse(result["reference"]["finished_normally"])
+
+    def test_audit_computes_partial_curve_with_some_points_still_running(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+            (source / "OUTCAR").write_text(_fake_outcar(-200.0), encoding="utf-8")
+
+            manifest = prepare_adhesion(source, method="dft", distances=[1, 2])
+            output = Path(manifest["output_directory"])
+            (output / "slabs" / "lower" / "OUTCAR").write_text(
+                _fake_outcar(-90.0), encoding="utf-8"
+            )
+            (output / "slabs" / "upper" / "OUTCAR").write_text(
+                _fake_outcar(-95.0), encoding="utf-8"
+            )
+            # Only one of the two rigid-curve points has finished.
+            (output / "rigid_curve" / "sep_001.00_A" / "OUTCAR").write_text(
+                _fake_outcar(-184.0), encoding="utf-8"
+            )
+
+            result = audit_adhesion(output)
+
+            self.assertIsNotNone(result["work_of_adhesion"])
+            self.assertIsNotNone(result["separation_curve"])
+            self.assertEqual(result["rigid_curve_points_ready"], 1)
+            self.assertEqual(result["rigid_curve_points_total"], 2)
+
+    def test_audit_requires_an_existing_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(SafetyError):
+                audit_adhesion(Path(temporary) / "never_prepared")
 
 
 if __name__ == "__main__":

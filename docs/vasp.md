@@ -208,33 +208,59 @@ W_ad = (E_lower_slab + E_upper_slab - E_reference) / interface_area_A2
 ```
 
 `one_interface_J_m2_per_eV` in the manifest is the eV/Å² → J/m² conversion
-factor for that specific interface area. This command only prepares inputs
-and never runs that division itself; two existing commands do, and were
-already implemented and unit tested before this preparation command existed,
-just not previously documented:
-
-- **`iface validate adhesion energies.csv results.csv`** computes
-  `work_of_adhesion_ev_a2`/`work_of_adhesion_j_m2` (plus propagated
-  uncertainty) per row of an input CSV with columns `area_a2`,
-  `interface_energy_ev`, `slab_a_energy_ev`, `slab_b_energy_ev`, and optional
-  `interface_sigma_ev`/`slab_a_sigma_ev`/`slab_b_sigma_ev`. Use
-  `manifest.json`'s `interface_area_A2` for `area_a2`, the converged energy
-  from `reference/OUTCAR` for `interface_energy_ev`, and the converged
-  energies from `slabs/<lower-name>/OUTCAR` and `slabs/<upper-name>/OUTCAR`
-  for `slab_a_energy_ev`/`slab_b_energy_ev`.
-- **`iface validate separation energies.csv results.csv`** normalizes a
-  rigid-separation curve to a traction-energy curve, using CSV columns
-  `model`, `distance_a`, `energy_ev`, and optional `area_a2`. Use each
-  `rigid_curve/*/` run's `separation_A` (from `manifest.json`) as
-  `distance_a` and its converged `OUTCAR` energy as `energy_ev`.
-
-Neither command reads VASP output directly; assembling the small CSV from
-the OUTCARs this command's runs produce remains a separate step.
+factor for that specific interface area. `prepare` only prepares inputs and
+never computes that division itself.
 
 A guard distance (`--guard`, default `0.20` Å) refuses to cut through an atom
 that sits too close to the split plane; `--min-side-fraction` bounds how
 unbalanced an auto-detected split may be. The command refuses to write into
 an existing output directory rather than overwrite prior calculations.
+
+### Auditing finished calculations
+
+Once the propagated launcher (or your own) has run the reference, both
+slabs, and the rigid-curve points, read the results back with:
+
+```bash
+iface vasp adhesion audit path/to/interface_run_adhesion_dft
+```
+
+This audits the reference and every generated directory with the same
+mode-aware OUTCAR/OSZICAR parsing `iface audit` uses (so it works whether
+each run was MLFF or DFT), taking each run's converged energy as
+`energy(sigma->0)` from its last completed ionic step. For whichever runs
+have already finished, it assembles the small CSVs
+`iface validate adhesion` and `iface validate separation` expect and calls
+that existing, unit-tested math directly rather than duplicating it — so
+those two commands remain available separately for CSVs assembled by hand
+or from a non-`adhesion`-prepared campaign. Partial results are reported for
+an in-progress campaign: the work of adhesion needs the reference and both
+slabs to have finished; the separation curve is computed from whichever
+rigid-curve points have finished, and `rigid_curve_points_ready`/
+`rigid_curve_points_total` in the output say how many that is. This never
+launches or resubmits VASP.
+
+Output lands under `<output_dir>/audit/`:
+
+```text
+adhesion_audit.json       # full per-run status, work_of_adhesion, separation_curve
+adhesion_audit.md         # human-readable summary table
+adhesion_energies.csv     # assembled input to iface validate adhesion (when ready)
+adhesion_results.csv      # iface validate adhesion's own output
+separation_energies.csv   # assembled input to iface validate separation (when any point is ready)
+separation_curve.csv      # iface validate separation's own output
+```
+
+`iface validate adhesion`/`iface validate separation` remain independently
+usable for a CSV assembled by hand or from a campaign that did not go
+through `adhesion prepare` — `adhesion audit` is a convenience on top, not a
+replacement:
+
+- **`iface validate adhesion energies.csv results.csv`** expects columns
+  `area_a2`, `interface_energy_ev`, `slab_a_energy_ev`, `slab_b_energy_ev`,
+  and optional `interface_sigma_ev`/`slab_a_sigma_ev`/`slab_b_sigma_ev`.
+- **`iface validate separation energies.csv results.csv`** expects columns
+  `model`, `distance_a`, `energy_ev`, and optional `area_a2`.
 
 ## Audit
 

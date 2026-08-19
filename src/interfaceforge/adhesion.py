@@ -1,19 +1,25 @@
-"""Prepare a work-of-adhesion calculation tree from a reference VASP interface.
+"""Prepare and audit a work-of-adhesion calculation tree for a VASP interface.
 
-Given a finished (or in-progress) VASP-MLFF or DFT interface run, this module
-prepares a sibling directory tree with everything needed to later compute the
-work of adhesion: relaxed isolated-slab inputs for each fragment, and a rigid
-separation curve (static single points at increasing rigid separation). The
-reference directory is the zero-separation point and is never modified; this
-module never launches VASP.
+Given a finished (or in-progress) VASP-MLFF or DFT interface run,
+``prepare_adhesion`` builds a sibling directory tree with everything needed
+to later compute the work of adhesion: relaxed isolated-slab inputs for each
+fragment, and a rigid separation curve (static single points at increasing
+rigid separation). The reference directory is the zero-separation point and
+is never modified; nothing in this module launches VASP.
 
-Ported from a standalone script (``split_vasp_interface.py``) that predates
-its InterfaceForge integration; the geometry/INCAR logic is intentionally
-close to the original.
+Once those calculations have run, ``audit_adhesion`` reads them back with the
+same mode-aware OUTCAR/OSZICAR parsing ``iface audit`` uses, and drives the
+existing :mod:`interfaceforge.validation` work-of-adhesion and
+separation-curve math for whichever runs have already finished.
+
+``prepare_adhesion`` was ported from a standalone script
+(``split_vasp_interface.py``) that predates its InterfaceForge integration;
+the geometry/INCAR logic is intentionally close to the original.
 """
 
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
@@ -23,7 +29,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .audit import audit_run
 from .errors import SafetyError
+from .validation import adhesion_from_csv, separation_curve_from_csv
 
 EV_A2_TO_J_M2 = 16.02176634
 METHODS = ("mlff", "dft")
@@ -564,3 +572,169 @@ def prepare_adhesion(
     manifest["output_directory"] = str(output)
     manifest["manifest"] = str(manifest_path)
     return manifest
+
+
+def _audit_one(label: str, directory: Path, **extra: Any) -> dict[str, Any]:
+    row = audit_run(directory, directory)
+    return {
+        "label": label,
+        "directory": str(directory),
+        "run_kind": row.get("run_kind"),
+        "finished_normally": row.get("finished_normally"),
+        "health": row.get("health"),
+        "warnings": row.get("warnings"),
+        "sigma0_energy_ev": row.get("sigma0_energy_ev_last"),
+        "energy_without_entropy_ev": row.get("energy_without_entropy_ev_last"),
+        "opt_converged": row.get("opt_converged"),
+        "ionic_steps": row.get("ionic_steps"),
+        **extra,
+    }
+
+
+def _is_ready(row: dict[str, Any]) -> bool:
+    return bool(row.get("finished_normally")) and row.get("sigma0_energy_ev") is not None
+
+
+def audit_adhesion(output_dir: str | Path) -> dict[str, Any]:
+    """Audit a prepared work-of-adhesion tree once VASP has run on it.
+
+    Reads ``manifest.json`` from a directory ``prepare_adhesion`` created,
+    audits the reference, both slabs, and every rigid-curve point with the
+    same mode-aware OUTCAR/OSZICAR parsing ``iface audit`` uses (so it works
+    whether each run was MLFF or DFT), and, for whichever runs have already
+    finished, computes the work of adhesion and the rigid-separation curve
+    by writing the small energy CSVs :mod:`interfaceforge.validation`
+    already expects and calling its existing, unit-tested math rather than
+    duplicating it. Partial results are reported for an in-progress
+    campaign — this never launches or resubmits VASP.
+
+    Every run's converged energy is taken as ``energy(sigma->0)`` from its
+    last completed ionic step (the same quantity ``iface audit``'s ``opt``
+    mode already tracks), for consistency with the DFT convention used
+    throughout this project rather than the free energy (``TOTEN``) or the
+    entropy-uncorrected energy.
+    """
+
+    output = Path(output_dir).resolve()
+    manifest_path = output / "manifest.json"
+    if not manifest_path.is_file():
+        raise SafetyError(f"No manifest.json in {output}; run prepare_adhesion first")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SafetyError(f"Could not parse {manifest_path}: {exc}") from exc
+
+    reference_row = _audit_one("reference", Path(manifest["reference_directory"]))
+    slab_rows = [
+        _audit_one(slab["name"], output / slab["directory"], formula=slab["formula"])
+        for slab in manifest["slabs"]
+    ]
+    curve_rows = [
+        _audit_one(
+            f"sep_{point['separation_A']:.2f}",
+            output / point["directory"],
+            separation_A=point["separation_A"],
+        )
+        for point in manifest["rigid_curve"]
+    ]
+
+    area = float(manifest["interface_area_A2"])
+    audit_dir = output / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    adhesion_result: dict[str, Any] | None = None
+    if _is_ready(reference_row) and len(slab_rows) == 2 and all(_is_ready(row) for row in slab_rows):
+        energies_csv = audit_dir / "adhesion_energies.csv"
+        with energies_csv.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=["area_a2", "interface_energy_ev", "slab_a_energy_ev", "slab_b_energy_ev"],
+            )
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "area_a2": area,
+                    "interface_energy_ev": reference_row["sigma0_energy_ev"],
+                    "slab_a_energy_ev": slab_rows[0]["sigma0_energy_ev"],
+                    "slab_b_energy_ev": slab_rows[1]["sigma0_energy_ev"],
+                }
+            )
+        adhesion_result = adhesion_from_csv(energies_csv, audit_dir / "adhesion_results.csv")
+
+    finished_curve_rows = sorted(
+        (row for row in curve_rows if _is_ready(row)), key=lambda row: row["separation_A"]
+    )
+    curve_result: dict[str, Any] | None = None
+    if finished_curve_rows:
+        separation_csv = audit_dir / "separation_energies.csv"
+        with separation_csv.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["model", "distance_a", "energy_ev", "area_a2"])
+            writer.writeheader()
+            for row in finished_curve_rows:
+                writer.writerow(
+                    {
+                        "model": manifest.get("method", "adhesion"),
+                        "distance_a": row["separation_A"],
+                        "energy_ev": row["sigma0_energy_ev"],
+                        "area_a2": area,
+                    }
+                )
+        curve_result = separation_curve_from_csv(separation_csv, audit_dir / "separation_curve.csv")
+
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "output_directory": str(output),
+        "method": manifest.get("method"),
+        "interface_area_A2": area,
+        "reference": reference_row,
+        "slabs": slab_rows,
+        "rigid_curve": curve_rows,
+        "rigid_curve_points_ready": len(finished_curve_rows),
+        "rigid_curve_points_total": len(curve_rows),
+        "work_of_adhesion": adhesion_result,
+        "separation_curve": curve_result,
+    }
+
+    markdown = [f"# Work-of-adhesion audit: {output.name}\n"]
+    markdown.extend(
+        [
+            "## Runs\n",
+            "| Run | Health | Finished | Energy sigma->0 (eV) |",
+            "|---|---|---|---:|",
+        ]
+    )
+    for row in (reference_row, *slab_rows, *curve_rows):
+        energy = row["sigma0_energy_ev"]
+        energy_text = "" if energy is None else f"{energy:.6f}"
+        markdown.append(
+            f"| {row['label']} | {row['health']} | {row['finished_normally']} | {energy_text} |"
+        )
+    markdown.append("")
+    if adhesion_result is not None:
+        computed = adhesion_result["rows"][0]
+        markdown.extend(
+            [
+                "## Work of adhesion\n",
+                f"- **{computed['work_of_adhesion_ev_a2']:.6f} eV/A^2** "
+                f"(**{computed['work_of_adhesion_j_m2']:.4f} J/m^2**)",
+                "",
+            ]
+        )
+    else:
+        markdown.append("## Work of adhesion\n\nNot yet available: reference and both slabs must finish first.\n")
+    if curve_result is not None:
+        markdown.append(
+            f"## Rigid-separation curve\n\n{len(finished_curve_rows)} of {len(curve_rows)} "
+            f"point(s) finished; see `{Path(curve_result['output']).name}`.\n"
+        )
+    elif curve_rows:
+        markdown.append("## Rigid-separation curve\n\nNo rigid-curve point has finished yet.\n")
+
+    audit_json = audit_dir / "adhesion_audit.json"
+    _atomic_text(audit_json, json.dumps(payload, indent=2, default=str) + "\n")
+    audit_markdown = audit_dir / "adhesion_audit.md"
+    _atomic_text(audit_markdown, "\n".join(markdown) + "\n")
+
+    payload["audit_json"] = str(audit_json)
+    payload["audit_markdown"] = str(audit_markdown)
+    return payload
