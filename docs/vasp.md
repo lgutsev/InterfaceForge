@@ -149,6 +149,84 @@ iface vasp incar static INCAR --workfunction   # or: relax ... --workfunction
   [`examples/vasp/workfunction/README.md`](../examples/vasp/workfunction/README.md)
   for deployment and the exact guard.
 
+## Work of adhesion
+
+> **Verification note:** ported from a script the maintainer already used
+> successfully outside InterfaceForge. The CLI wiring and geometry/INCAR
+> logic have automated coverage; no end-to-end adhesion campaign has yet been
+> run and audited through this integration specifically.
+
+`iface vasp adhesion prepare` builds a sibling calculation tree for computing
+the work of adhesion of a two-fragment interface, from either a VASP-MLFF or
+a plain DFT reference run:
+
+```bash
+iface vasp adhesion prepare path/to/interface_run --method mlff \
+  --lower-name TiN --upper-name SiN --distances 0.5 1 2 3 4 6 8
+```
+
+It never launches VASP and never modifies the reference directory. It splits
+the reference structure into two fragments at a Cartesian *z* plane (either
+explicit `--z-plane`, or auto-detected as the most balanced internal vacuum
+gap), then generates:
+
+- **`reference`**: a relative symlink back to the untouched reference
+  directory — the zero-separation point.
+- **`slabs/<lower-name>` and `slabs/<upper-name>`**: relaxed isolated-slab
+  inputs for each fragment (`IBRION=2`, `ISIF=2`), with a POTCAR subset to
+  only the species present in that fragment.
+- **`rigid_curve/sep_XXX.XX_A/`**: one static single-point (`IBRION=-1,
+  NSW=1`) per `--distances` value, with the upper fragment and the cell's
+  *c* vector both translated along the interface normal by that separation —
+  preserving outer vacuum while opening a rigid gap. Supply `--curve-incar`
+  to use one fixed INCAR for every point instead of the generated static one.
+
+In `--method mlff` (the default), every generated run gets a **verified hard
+link** to the reference `ML_FF`: VASP sees a regular file, but all copies
+share one inode, so committee-sized models are not duplicated per run. Link
+identity (same device/inode as the source) is checked immediately after
+creation and before any calculation input is written; a filesystem that
+silently copies instead of linking (some network filesystems do) fails the
+command rather than quietly consuming the storage many times over.
+`--method dft` strips every `ML_` INCAR tag and creates no `ML_FF`.
+
+`manifest.json` in the output directory records the split plane, detected
+gap, interface area, every slab and curve-point directory, and the formula
+to combine converged energies once VASP has run:
+
+```text
+W_ad = (E_lower_slab + E_upper_slab - E_reference) / interface_area_A2
+```
+
+`one_interface_J_m2_per_eV` in the manifest is the eV/Å² → J/m² conversion
+factor for that specific interface area. This command only prepares inputs
+and never runs that division itself; two existing commands do, and were
+already implemented and unit tested before this preparation command existed,
+just not previously documented:
+
+- **`iface validate adhesion energies.csv results.csv`** computes
+  `work_of_adhesion_ev_a2`/`work_of_adhesion_j_m2` (plus propagated
+  uncertainty) per row of an input CSV with columns `area_a2`,
+  `interface_energy_ev`, `slab_a_energy_ev`, `slab_b_energy_ev`, and optional
+  `interface_sigma_ev`/`slab_a_sigma_ev`/`slab_b_sigma_ev`. Use
+  `manifest.json`'s `interface_area_A2` for `area_a2`, the converged energy
+  from `reference/OUTCAR` for `interface_energy_ev`, and the converged
+  energies from `slabs/<lower-name>/OUTCAR` and `slabs/<upper-name>/OUTCAR`
+  for `slab_a_energy_ev`/`slab_b_energy_ev`.
+- **`iface validate separation energies.csv results.csv`** normalizes a
+  rigid-separation curve to a traction-energy curve, using CSV columns
+  `model`, `distance_a`, `energy_ev`, and optional `area_a2`. Use each
+  `rigid_curve/*/` run's `separation_A` (from `manifest.json`) as
+  `distance_a` and its converged `OUTCAR` energy as `energy_ev`.
+
+Neither command reads VASP output directly; assembling the small CSV from
+the OUTCARs this command's runs produce remains a separate step.
+
+A guard distance (`--guard`, default `0.20` Å) refuses to cut through an atom
+that sits too close to the split plane; `--min-side-fraction` bounds how
+unbalanced an auto-detected split may be. The command refuses to write into
+an existing output directory rather than overwrite prior calculations.
+
 ## Audit
 
 `iface audit` interprets train, refit and run modes differently. It parses

@@ -31,6 +31,7 @@ August 2026.
 | Allegro training and LAMMPS integration | Unverified/code-only | No real training or LAMMPS run has established compatibility. |
 | AI2-Kit active-learning adapters | Unverified/code-only | Generated TESLA MACE → OpenMM → VASP/oh-my-batch and legacy DeepMD → LAMMPS → VASP paths have automated coverage, but neither has completed a real external-engine loop. |
 | InterMat adapter | Unverified/code-only | Generated interfaces still require a real dependency-version test and human review of termination, strain, registry, and atom overlap. |
+| Work-of-adhesion slab/rigid-curve preparation | Unverified/code-only | Ported from a script the maintainer already used successfully outside InterfaceForge; the CLI/geometry/INCAR port has automated coverage, but no adhesion campaign has been run and audited through this integration. |
 | Active-learning selection and exploration orchestration | Unverified/code-only | Mathematical and file-level behavior may be tested, but no complete label/train/explore/relabel cycle has been run. |
 | Interface-property validation and HTML reporting | Unverified/code-only | Reporting calculations are not evidence that a trained model reproduces DFT or experiment. |
 | Campaign-wide provenance, restartability, and portability | Unverified as a complete system | Individual mechanisms exist, but the full lifecycle has not been demonstrated across interruption, relocation, and restart. |

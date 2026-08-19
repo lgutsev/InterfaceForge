@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .adhesion import METHODS as ADHESION_METHODS
+from .adhesion import prepare_adhesion
 from .ai2kit import (
     adapter_status,
     approve_round,
@@ -539,6 +541,28 @@ def cmd_workfunction(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_adhesion_prepare(args: argparse.Namespace) -> int:
+    _json(
+        prepare_adhesion(
+            args.interface_dir,
+            method=args.method,
+            structure=args.structure,
+            incar=args.incar,
+            curve_incar=args.curve_incar,
+            kpoints=args.kpoints,
+            potcar=args.potcar,
+            z_plane=args.z_plane,
+            guard=args.guard,
+            min_side_fraction=args.min_side_fraction,
+            lower_name=args.lower_name,
+            upper_name=args.upper_name,
+            distances=args.distances,
+            output_dir=args.output_dir,
+        )
+    )
+    return 0
+
+
 def cmd_intermat(args: argparse.Namespace) -> int:
     if args.intermat_command == "status":
         payload = intermat_status()
@@ -1010,6 +1034,50 @@ def build_parser() -> argparse.ArgumentParser:
     workfunction.add_argument("--plot-output")
     workfunction.add_argument("--summary-output")
     workfunction.set_defaults(func=cmd_workfunction)
+
+    adhesion = vasp_commands.add_parser(
+        "adhesion", help="Prepare work-of-adhesion calculations (MLFF or DFT)"
+    )
+    adhesion_commands = adhesion.add_subparsers(dest="adhesion_command", required=True)
+    adhesion_prepare = adhesion_commands.add_parser(
+        "prepare",
+        help="Create isolated-slab and rigid-separation-curve inputs from a reference interface run",
+    )
+    adhesion_prepare.add_argument(
+        "interface_dir", nargs="?", default=".", help="Reference run directory (default: .)"
+    )
+    adhesion_prepare.add_argument("--method", choices=ADHESION_METHODS, default="mlff")
+    adhesion_prepare.add_argument(
+        "--structure", help="Structure file relative to interface_dir (default: CONTCAR, else POSCAR)"
+    )
+    adhesion_prepare.add_argument(
+        "--incar", help="Slab-relaxation INCAR (default: INCAR_MLFF_RELAX for mlff, else INCAR)"
+    )
+    adhesion_prepare.add_argument(
+        "--curve-incar", help="Optional fixed INCAR for every rigid-curve point (default: generated)"
+    )
+    adhesion_prepare.add_argument("--kpoints", help="default: KPOINTS")
+    adhesion_prepare.add_argument("--potcar", help="default: POTCAR")
+    adhesion_prepare.add_argument(
+        "--z-plane", type=float, help="Cartesian z split plane in Angstrom (default: auto-detected)"
+    )
+    adhesion_prepare.add_argument(
+        "--guard", type=float, default=0.20, help="Minimum atom-to-plane distance in Angstrom"
+    )
+    adhesion_prepare.add_argument("--min-side-fraction", type=float, default=0.10)
+    adhesion_prepare.add_argument("--lower-name", default="lower")
+    adhesion_prepare.add_argument("--upper-name", default="upper")
+    adhesion_prepare.add_argument(
+        "--distances",
+        nargs="+",
+        type=float,
+        default=[0.5, 1, 2, 3, 4, 6, 8],
+        help="Positive rigid-separation distances in Angstrom",
+    )
+    adhesion_prepare.add_argument(
+        "--output-dir", help="default: sibling INTERFACE_DIR_adhesion_METHOD"
+    )
+    adhesion_prepare.set_defaults(func=cmd_adhesion_prepare)
 
     geom = vasp_commands.add_parser("geom", help="ASE-backed geometry preparation")
     geom_commands = geom.add_subparsers(dest="geometry", required=True)

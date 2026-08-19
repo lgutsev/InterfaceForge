@@ -176,6 +176,7 @@ iface audit runs/vasp --readiness-profile perovskite
 iface vasp beef-plot runs/vasp --individual
 iface vasp band scf/ bands/ --kpoints KPOINTS.line
 iface vasp workfunction LOCPOT OUTCAR --plot-output workfunction.png
+iface vasp adhesion prepare interface_run --method mlff --distances 0.5 1 2 3 4 6 8
 iface vasp pack campaign_outputs.zip --root runs/vasp
 iface vasp archive-models  # current folder; automatic timestamped ZIP name
 iface vasp archive-models stored_models.zip --root successful_runs
