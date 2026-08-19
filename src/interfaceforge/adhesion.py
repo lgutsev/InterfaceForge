@@ -316,7 +316,30 @@ def _resolve_file(source: Path, requested: str | None, default: str) -> Path:
     return path
 
 
-def _make_run_dir(path: Path, incar_text: str, kpoints: Path, model: Path | None) -> None:
+def _find_launcher(source: Path, requested: str | None) -> Path | None:
+    """Find the launcher to propagate into every generated run directory.
+
+    Mirrors the preference order ``resolve_launcher`` in ``vasp.py`` already
+    uses at submission time: an explicit name if given (required to exist),
+    otherwise ``runvasp.sh`` then ``run.slurm`` in the source directory if
+    present. Returns ``None`` when auto-detecting and neither exists; a
+    launcher is convenient but was never required to prepare calculations.
+    """
+    if requested:
+        path = (source / requested).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        return path
+    for name in ("runvasp.sh", "run.slurm"):
+        path = source / name
+        if path.is_file():
+            return path
+    return None
+
+
+def _make_run_dir(
+    path: Path, incar_text: str, kpoints: Path, model: Path | None, launcher: Path | None
+) -> None:
     path.mkdir(parents=True, exist_ok=False)
     _atomic_text(path / "INCAR", incar_text)
     shutil.copy2(kpoints, path / "KPOINTS")
@@ -326,6 +349,8 @@ def _make_run_dir(path: Path, incar_text: str, kpoints: Path, model: Path | None
         linked_stat = (path / "ML_FF").stat()
         if (source_stat.st_dev, source_stat.st_ino) != (linked_stat.st_dev, linked_stat.st_ino):
             raise SafetyError(f"Hard-link verification failed for {path / 'ML_FF'}")
+    if launcher is not None:
+        shutil.copy2(launcher, path / launcher.name)
 
 
 def prepare_adhesion(
@@ -344,6 +369,8 @@ def prepare_adhesion(
     upper_name: str = "upper",
     distances: Iterable[float] = (0.5, 1, 2, 3, 4, 6, 8),
     output_dir: str | Path | None = None,
+    launcher: str | None = None,
+    propagate_launcher: bool = True,
 ) -> dict[str, Any]:
     """Prepare a work-of-adhesion calculation tree from a reference interface run.
 
@@ -357,6 +384,13 @@ def prepare_adhesion(
     sees a regular file, while all copies share one inode and consume no
     additional model storage. DFT mode removes ML tags and creates no ML_FF.
     This function never launches VASP.
+
+    When ``propagate_launcher`` is true (the default), the same launcher
+    ``iface vasp submit`` would pick for the reference directory
+    (``runvasp.sh``, else ``run.slurm``; or the explicit ``launcher`` name)
+    is copied into every generated slab and rigid-curve directory, so each
+    is independently submittable. Set ``propagate_launcher=False`` to skip
+    this even if a launcher is present.
     """
 
     if method not in METHODS:
@@ -390,6 +424,7 @@ def prepare_adhesion(
     model = _resolve_file(source, None, "ML_FF") if method == "mlff" else None
     curve_incar_path = _resolve_file(source, curve_incar, "INCAR") if curve_incar else None
     curve_incar_text = curve_incar_path.read_text(encoding="utf-8") if curve_incar_path else None
+    launcher_path = _find_launcher(source, launcher) if propagate_launcher else None
 
     if output_dir is None:
         output = source.parent / f"{source.name}_adhesion_{method}"
@@ -449,7 +484,7 @@ def prepare_adhesion(
     for name, atoms in ((lower_name, lower), (upper_name, upper)):
         run = output / "slabs" / name
         relax_text = _mlff_relax_incar(base_incar) if method == "mlff" else _dft_relax_incar(base_incar)
-        _make_run_dir(run, relax_text, kpoints_path, model)
+        _make_run_dir(run, relax_text, kpoints_path, model, launcher_path)
         _write_poscar(run / "POSCAR", parsed, parsed.lattice, atoms)
         species = _present_species(atoms)
         _subset_potcar(run / "POTCAR", parsed.species, blocks, species)
@@ -472,7 +507,7 @@ def prepare_adhesion(
             curve_text = _static_incar(base_incar, distance)
         else:
             curve_text = _dft_static_incar(base_incar, distance)
-        _make_run_dir(run, curve_text, kpoints_path, model)
+        _make_run_dir(run, curve_text, kpoints_path, model, launcher_path)
         full_species = _present_species(parsed.atoms)
         _subset_potcar(run / "POTCAR", parsed.species, blocks, full_species)
         lattice: Lattice = (a, b, _vadd(c, _vscale(normal, distance)))
@@ -506,11 +541,19 @@ def prepare_adhesion(
         "slabs": slab_records,
         "rigid_curve": curve_records,
         "model_storage": "verified hard links to reference/ML_FF" if model is not None else "not used for DFT",
+        "launcher": launcher_path.name if launcher_path is not None else None,
         "notes": [
             "The reference directory is the zero-separation point and is not modified.",
             "Rigid curve is static unless curve_incar is supplied.",
             "Upper slab and c vector move by the same distance, preserving outer vacuum.",
             "No calculations were launched.",
+            (
+                f"{launcher_path.name} was copied into every slab and rigid-curve directory "
+                "from the reference; submit each independently."
+                if launcher_path is not None
+                else "No launcher (runvasp.sh or run.slurm) was found in the reference "
+                "directory; none was propagated."
+            ),
             "Work of adhesion W_ad = (E_lower_slab + E_upper_slab - E_reference) / interface_area_A2, "
             "using each run's converged energy once VASP has completed; multiply by "
             "one_interface_J_m2_per_eV to convert eV/A^2 to J/m^2.",

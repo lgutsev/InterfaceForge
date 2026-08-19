@@ -558,6 +558,8 @@ def cmd_adhesion_prepare(args: argparse.Namespace) -> int:
             upper_name=args.upper_name,
             distances=args.distances,
             output_dir=args.output_dir,
+            launcher=args.launcher,
+            propagate_launcher=not args.no_launcher,
         )
     )
     return 0
@@ -1076,6 +1078,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     adhesion_prepare.add_argument(
         "--output-dir", help="default: sibling INTERFACE_DIR_adhesion_METHOD"
+    )
+    adhesion_prepare.add_argument(
+        "--launcher",
+        help="Launcher name in interface_dir to propagate (default: auto-detect "
+        "runvasp.sh, then run.slurm)",
+    )
+    adhesion_prepare.add_argument(
+        "--no-launcher",
+        action="store_true",
+        help="Do not copy a launcher into the generated slab/rigid-curve directories",
     )
     adhesion_prepare.set_defaults(func=cmd_adhesion_prepare)
 

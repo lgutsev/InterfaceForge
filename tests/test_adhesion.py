@@ -131,6 +131,56 @@ class AdhesionTests(unittest.TestCase):
             self.assertEqual(manifest["plane_source"], "explicit")
             self.assertIsNone(manifest["detected_gap_A"])
 
+    def test_launcher_is_propagated_to_every_generated_run_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+            launcher_text = "#!/bin/bash\nsrun vasp_gam\n"
+            (source / "runvasp.sh").write_text(launcher_text, encoding="utf-8")
+
+            manifest = prepare_adhesion(source, method="dft", distances=[1])
+
+            self.assertEqual(manifest["launcher"], "runvasp.sh")
+            output = Path(manifest["output_directory"])
+            for relative in ("slabs/lower", "slabs/upper", "rigid_curve/sep_001.00_A"):
+                copied = output / Path(relative) / "runvasp.sh"
+                self.assertTrue(copied.is_file(), relative)
+                self.assertEqual(copied.read_text(encoding="utf-8"), launcher_text)
+
+    def test_launcher_prefers_runvasp_over_run_slurm(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+            (source / "run.slurm").write_text("slurm launcher\n", encoding="utf-8")
+            (source / "runvasp.sh").write_text("runvasp launcher\n", encoding="utf-8")
+
+            manifest = prepare_adhesion(source, method="dft", distances=[])
+
+            self.assertEqual(manifest["launcher"], "runvasp.sh")
+
+    def test_no_launcher_opts_out_even_when_one_is_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+            (source / "runvasp.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+
+            manifest = prepare_adhesion(
+                source, method="dft", distances=[1], propagate_launcher=False
+            )
+
+            self.assertIsNone(manifest["launcher"])
+            output = Path(manifest["output_directory"])
+            self.assertFalse((output / "slabs" / "lower" / "runvasp.sh").exists())
+
+    def test_missing_launcher_is_reported_as_none_not_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+
+            manifest = prepare_adhesion(source, method="dft", distances=[])
+
+            self.assertIsNone(manifest["launcher"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -190,6 +190,15 @@ silently copies instead of linking (some network filesystems do) fails the
 command rather than quietly consuming the storage many times over.
 `--method dft` strips every `ML_` INCAR tag and creates no `ML_FF`.
 
+By default, whichever launcher `iface vasp submit` would pick for the
+reference directory — `runvasp.sh`, else `run.slurm` — is copied into every
+generated slab and rigid-curve directory, so each is independently
+submittable without manually copying a launcher in first. Use `--launcher
+NAME` to propagate a specific script instead of auto-detecting, or
+`--no-launcher` to skip propagation entirely. Neither the reference
+directory nor its launcher is ever modified; each generated directory gets
+its own copy.
+
 `manifest.json` in the output directory records the split plane, detected
 gap, interface area, every slab and curve-point directory, and the formula
 to combine converged energies once VASP has run:
