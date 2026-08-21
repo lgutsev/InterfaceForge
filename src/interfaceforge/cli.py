@@ -41,6 +41,7 @@ from .geometry import (
 )
 from .intermat import generate_intermat_interfaces, intermat_status
 from .mace_roi import evaluate_mace_roi_predictions, prepare_mace_roi_dataset
+from .regfgw import compare_registry_selection, regfgw_status, run_regfgw_optimize
 from .report import build_report
 from .selection import select_from_csv
 from .training import generate_deepmd_training, generate_mace_training
@@ -616,6 +617,36 @@ def cmd_intermat(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_regfgw(args: argparse.Namespace) -> int:
+    if args.regfgw_command == "status":
+        payload = regfgw_status()
+    elif args.regfgw_command == "optimize":
+        payload = run_regfgw_optimize(
+            args.substrate,
+            args.film,
+            args.output_dir,
+            embedding=args.embedding,
+            budget=args.budget,
+            max_miller_idx=args.max_miller_idx,
+            substrate_layers=args.substrate_layers,
+            film_layers=args.film_layers,
+            gap=args.gap,
+            vacuum=args.vacuum,
+        )
+    else:
+        payload = compare_registry_selection(
+            args.topk,
+            args.exhaustive,
+            args.output,
+            id_column=args.id_column,
+            energy_column=args.energy_column,
+            lower_energy_is_better=args.lower_energy_is_better,
+            k_values=tuple(args.k) if args.k else (1, 3, 5),
+        )
+    _json(payload)
+    return 0
+
+
 def add_campaign_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-c", "--campaign", default="campaign.yaml")
 
@@ -906,6 +937,49 @@ def build_parser() -> argparse.ArgumentParser:
     intermat_generate.add_argument("--max-candidates", type=int, default=500)
     intermat_generate.add_argument("--force", action="store_true")
     intermat_generate.set_defaults(func=cmd_intermat)
+
+    regfgw = commands.add_parser(
+        "regfgw",
+        help="Optional RegFGW registry pre-screening adapter and a trial comparison report",
+    )
+    regfgw_commands = regfgw.add_subparsers(dest="regfgw_command", required=True)
+    regfgw_status_parser = regfgw_commands.add_parser(
+        "status", help="Report dependency availability; output schema is not verified"
+    )
+    regfgw_status_parser.set_defaults(func=cmd_regfgw)
+    regfgw_optimize = regfgw_commands.add_parser(
+        "optimize",
+        help="Run regfgw_coherent --mode optimize (does not parse its output)",
+    )
+    regfgw_optimize.add_argument("substrate", help="Substrate structure (CIF)")
+    regfgw_optimize.add_argument("film", help="Film structure (CIF)")
+    regfgw_optimize.add_argument("output_dir")
+    regfgw_optimize.add_argument("--embedding", help="Optional embedding config (JSON)")
+    regfgw_optimize.add_argument("--budget", type=int, default=3)
+    regfgw_optimize.add_argument("--max-miller-idx", type=int)
+    regfgw_optimize.add_argument("--substrate-layers", type=int)
+    regfgw_optimize.add_argument("--film-layers", type=int)
+    regfgw_optimize.add_argument("--gap", type=float)
+    regfgw_optimize.add_argument("--vacuum", type=float)
+    regfgw_optimize.set_defaults(func=cmd_regfgw)
+    regfgw_compare = regfgw_commands.add_parser(
+        "compare",
+        help="Check whether a top-k registry selection preserved the true low-energy ones",
+    )
+    regfgw_compare.add_argument("topk", help="Ranked top-k registry CSV")
+    regfgw_compare.add_argument("exhaustive", help="Exhaustive-grid CSV with relaxed energies")
+    regfgw_compare.add_argument("output")
+    regfgw_compare.add_argument("--id-column", default="registry_id")
+    regfgw_compare.add_argument("--energy-column", default="work_of_adhesion_ev_a2")
+    regfgw_compare.add_argument(
+        "--lower-energy-is-better",
+        action="store_true",
+        help="Set if energy_column is lower-is-better (default: higher, matching work of adhesion)",
+    )
+    regfgw_compare.add_argument(
+        "--k", action="append", type=int, default=None, help="Repeat for multiple k values (default: 1 3 5)"
+    )
+    regfgw_compare.set_defaults(func=cmd_regfgw)
 
     vasp = commands.add_parser("vasp", help="Safe VASP utilities")
     vasp_commands = vasp.add_subparsers(dest="vasp_command", required=True)
