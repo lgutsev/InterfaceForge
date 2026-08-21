@@ -79,6 +79,47 @@ def write_campaign(
 
 
 class ConfigTests(unittest.TestCase):
+    def test_defect_is_a_valid_system_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = write_campaign(root)
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data["systems"][0]["kind"] = "defect"
+            path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+            campaign = load_campaign(path)
+
+            self.assertEqual(campaign.systems[0].kind, "defect")
+
+    def test_run_glob_is_parsed_for_geometry_class_matching(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = write_campaign(root)
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data["systems"][0]["run_glob"] = "*/interface_*/*"
+            path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+            campaign = load_campaign(path)
+
+            self.assertEqual(campaign.systems[0].run_glob, "*/interface_*/*")
+
+    def test_run_glob_defaults_to_none(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign = load_campaign(write_campaign(Path(temporary)))
+
+            self.assertIsNone(campaign.systems[0].run_glob)
+
+    def test_run_glob_must_be_a_string(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = write_campaign(root)
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data["systems"][0]["run_glob"] = 12345
+            path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+            with self.assertRaises(ConfigurationError):
+                load_campaign(path)
+
     def test_rejects_zeroing_reference_forces(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaises(SafetyError):

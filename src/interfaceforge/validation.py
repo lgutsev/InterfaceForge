@@ -172,3 +172,126 @@ def separation_curve_from_csv(source: str | Path, output: str | Path) -> dict[st
         writer.writeheader()
         writer.writerows(results)
     return {"source": str(input_path), "output": str(output_path), "rows": len(results)}
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value).strip().lower() in {"1", "true", "t", "yes"}
+
+
+def stratified_parity_from_csv(
+    source: str | Path,
+    output: str | Path,
+    *,
+    reference_column: str = "reference",
+    predicted_column: str = "predicted",
+    kind_column: str = "kind",
+    high_temperature_column: str = "high_temperature",
+    min_coordination_column: str = "min_coordination_number",
+    low_coordination_percentile: float = 10.0,
+) -> dict[str, Any]:
+    """Report parity errors per geometry class instead of one pooled number.
+
+    Each class is an independent boolean slice, not a mutually exclusive
+    partition: a frame can count toward several rows at once (e.g. an
+    interface frame that is also high-temperature), matching how a real
+    mixed campaign looks rather than forcing one label per frame. Expects
+    a CSV already carrying ``reference_column``/``predicted_column`` plus
+    whichever of ``kind_column``/``high_temperature_column``/
+    ``min_coordination_column`` are present — typically produced by joining
+    ``iface collect``'s ``frames.csv`` (which has ``kind``, ``high_temperature``,
+    ``min_coordination_number``) against a predictions file on
+    ``run_id``/``source_frame``. Any of those columns may be absent; the
+    corresponding rows are simply omitted from the report rather than
+    treated as an error, since not every campaign has all three.
+
+    The low-coordination threshold is derived from this CSV's own
+    ``min_coordination_column`` distribution (its
+    ``low_coordination_percentile``, default the 10th percentile) rather
+    than a hardcoded coordination number, so it needs no per-element
+    reference table and applies unchanged to a different chemistry.
+    """
+
+    input_path = Path(source).resolve()
+    output_path = Path(output).resolve()
+    with input_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        raise ValueError("No rows in source CSV")
+    if reference_column not in rows[0] or predicted_column not in rows[0]:
+        raise ValueError(
+            f"Source CSV must have {reference_column!r} and {predicted_column!r} columns"
+        )
+
+    def _metrics_for(label: str, subset: list[dict[str, str]]) -> dict[str, Any] | None:
+        if not subset:
+            return None
+        reference = [float(row[reference_column]) for row in subset]
+        predicted = [float(row[predicted_column]) for row in subset]
+        return {"class": label, "count": len(subset), **scalar_metrics(reference, predicted)}
+
+    results: list[dict[str, Any]] = []
+    overall = _metrics_for("overall", rows)
+    if overall:
+        results.append(overall)
+
+    if kind_column in rows[0]:
+        kinds = sorted({row[kind_column] for row in rows if row.get(kind_column)})
+        for kind in kinds:
+            entry = _metrics_for(f"kind={kind}", [row for row in rows if row.get(kind_column) == kind])
+            if entry:
+                results.append(entry)
+
+    if high_temperature_column in rows[0]:
+        entry = _metrics_for(
+            "high_temperature",
+            [row for row in rows if _truthy(row.get(high_temperature_column))],
+        )
+        if entry:
+            results.append(entry)
+
+    low_coordination_threshold: float | None = None
+    if min_coordination_column in rows[0]:
+        coordination_values = [
+            float(row[min_coordination_column])
+            for row in rows
+            if row.get(min_coordination_column) not in (None, "")
+        ]
+        if coordination_values:
+            low_coordination_threshold = float(
+                np.percentile(coordination_values, low_coordination_percentile)
+            )
+            entry = _metrics_for(
+                "low_coordination",
+                [
+                    row
+                    for row in rows
+                    if row.get(min_coordination_column) not in (None, "")
+                    and float(row[min_coordination_column]) <= low_coordination_threshold
+                ],
+            )
+            if entry:
+                results.append(entry)
+
+    if not results:
+        raise ValueError(
+            "No class produced any rows; the source CSV may be missing "
+            f"{kind_column!r}/{high_temperature_column!r}/{min_coordination_column!r}"
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fields = list(dict.fromkeys(key for row in results for key in row))
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(results)
+    payload = {
+        "source": str(input_path),
+        "output": str(output_path),
+        "low_coordination_percentile": low_coordination_percentile,
+        "low_coordination_threshold": low_coordination_threshold,
+        "classes": results,
+    }
+    output_path.with_suffix(".json").write_text(
+        json.dumps(_json_clean(payload), indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
+    return payload

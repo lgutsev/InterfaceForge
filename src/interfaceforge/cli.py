@@ -44,7 +44,12 @@ from .mace_roi import evaluate_mace_roi_predictions, prepare_mace_roi_dataset
 from .report import build_report
 from .selection import select_from_csv
 from .training import generate_deepmd_training, generate_mace_training
-from .validation import adhesion_from_csv, parity_from_csv, separation_curve_from_csv
+from .validation import (
+    adhesion_from_csv,
+    parity_from_csv,
+    separation_curve_from_csv,
+    stratified_parity_from_csv,
+)
 from .vasp import (
     INCAR_PRESETS,
     apply_incar_preset,
@@ -255,8 +260,19 @@ def cmd_validate(args: argparse.Namespace) -> int:
         )
     elif args.validation == "adhesion":
         payload = adhesion_from_csv(args.source, args.output)
-    else:
+    elif args.validation == "separation":
         payload = separation_curve_from_csv(args.source, args.output)
+    else:
+        payload = stratified_parity_from_csv(
+            args.source,
+            args.output,
+            reference_column=args.reference_column,
+            predicted_column=args.predicted_column,
+            kind_column=args.kind_column,
+            high_temperature_column=args.high_temperature_column,
+            min_coordination_column=args.min_coordination_column,
+            low_coordination_percentile=args.low_coordination_percentile,
+        )
     _json(payload)
     return 0
 
@@ -780,6 +796,26 @@ def build_parser() -> argparse.ArgumentParser:
     separation.add_argument("source")
     separation.add_argument("output")
     separation.set_defaults(func=cmd_validate)
+    stratified = validation.add_parser(
+        "stratified",
+        help="Report parity errors per geometry class (kind/high-temperature/low-coordination) "
+        "instead of one pooled number",
+    )
+    stratified.add_argument("source")
+    stratified.add_argument("output")
+    stratified.add_argument("--reference-column", default="reference")
+    stratified.add_argument("--predicted-column", default="predicted")
+    stratified.add_argument("--kind-column", default="kind")
+    stratified.add_argument("--high-temperature-column", default="high_temperature")
+    stratified.add_argument("--min-coordination-column", default="min_coordination_number")
+    stratified.add_argument(
+        "--low-coordination-percentile",
+        type=float,
+        default=10.0,
+        help="Percentile of this CSV's own coordination-number distribution used as the "
+        "low-coordination cutoff (default: 10)",
+    )
+    stratified.set_defaults(func=cmd_validate)
 
     report = commands.add_parser("report", help="Build a self-contained HTML dashboard")
     add_campaign_option(report)

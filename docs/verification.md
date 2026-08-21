@@ -34,6 +34,7 @@ August 2026.
 | Work-of-adhesion preparation and audit | Unverified/code-only | Preparation is ported from a script the maintainer already used successfully outside InterfaceForge; the audit step reuses the existing, unit-tested `iface audit`/`iface validate` math. Both have automated coverage, but no adhesion campaign has been run end to end (prepare -> VASP -> audit) through this integration. |
 | Active-learning selection and exploration orchestration | Unverified/code-only | Mathematical and file-level behavior may be tested, but no complete label/train/explore/relabel cycle has been run. |
 | Interface-property validation and HTML reporting | Unverified/code-only | Reporting calculations are not evidence that a trained model reproduces DFT or experiment. |
+| Geometry-stratified validation (kind/temperature/coordination classification and per-class error reporting) | Unverified/code-only | Classification (`iface collect`) and stratified reporting (`iface validate stratified`) have automated coverage but have not been run against a real trained committee's predictions. Per-class physical tests are not yet built. |
 | Campaign-wide provenance, restartability, and portability | Unverified as a complete system | Individual mechanisms exist, but the full lifecycle has not been demonstrated across interruption, relocation, and restart. |
 
 ## What the automated tests establish

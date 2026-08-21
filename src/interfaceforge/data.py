@@ -8,7 +8,7 @@ import json
 import random
 import re
 import shutil
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -16,9 +16,10 @@ from typing import Any
 
 import numpy as np
 
-from .config import SPLITS, Campaign
+from .config import SPLITS, Campaign, SystemSpec
 from .errors import DependencyError, SafetyError
 from .state import StateStore, sha256_file
+from .vasp import parse_incar
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,9 @@ class CollectionRecord:
     split_counts: dict[str, int] = field(default_factory=lambda: {split: 0 for split in SPLITS})
     guard_count: int = 0
     warnings: list[str] = field(default_factory=list)
+    kind: str = "unclassified"
+    tebeg_k: float | None = None
+    high_temperature: bool = False
 
 
 def _ase_io() -> tuple[Any, Any]:
@@ -59,6 +63,65 @@ def _ase_io() -> tuple[Any, Any]:
             "pip install 'interfaceforge[vasp]'"
         ) from exc
     return iread, write
+
+
+def _coordination_stats(atoms: Any) -> tuple[int | None, float | None]:
+    """Return (min, mean) per-atom coordination number for one frame.
+
+    Uses a per-atom cutoff radius from covalent radii (natural_cutoffs,
+    mult=1.2 to tolerate typical bond-length variation) so this needs no
+    per-element reference table and works for any chemistry. Returns
+    (None, None) rather than raising when the frame's geometry can't support
+    a neighbor-list build (e.g. a degenerate or missing cell, or a test
+    double standing in for a real ase.Atoms) -- this is a diagnostic
+    statistic, not a required field, and one bad frame should not abort the
+    whole collection run.
+    """
+
+    try:
+        from ase.neighborlist import natural_cutoffs, neighbor_list
+
+        cutoffs = natural_cutoffs(atoms, mult=1.2)
+        i = neighbor_list("i", atoms, cutoffs)
+        counts = np.bincount(i, minlength=len(atoms))
+        return int(counts.min()), float(counts.mean())
+    except Exception:
+        return None, None
+
+
+def _read_tebeg(outcar_path: Path) -> float | None:
+    """Read TEBEG from the INCAR beside an OUTCAR, if present and numeric."""
+
+    incar_path = outcar_path.parent / "INCAR"
+    if not incar_path.is_file():
+        return None
+    value = parse_incar(incar_path).get("TEBEG")
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def classify_kind(path: Path, source_root: Path, systems: Sequence[SystemSpec]) -> str:
+    """Classify a discovered trajectory by matching against declared systems.
+
+    Matches ``path`` (relative to ``source_root``) against each system's
+    ``run_glob`` in declaration order; the first match wins. A trajectory
+    matching no system's ``run_glob`` (including campaigns that don't set
+    it at all) is reported "unclassified" rather than guessed, so a missing
+    mapping is visible in frames.csv instead of silently absent.
+    """
+
+    relative = path.relative_to(source_root).as_posix()
+    wrapped = f"/{relative}"
+    for system in systems:
+        if not system.run_glob:
+            continue
+        if fnmatch.fnmatch(wrapped, system.run_glob) or fnmatch.fnmatch(relative, system.run_glob):
+            return system.kind
+    return "unclassified"
 
 
 def safe_name(text: str) -> str:
@@ -307,7 +370,18 @@ def _discover_type_map(sources: Sequence[SourceTrajectory], configured: Sequence
     return symbols
 
 
-def _write_extxyz_frame(path: Path, frame: Frame, source: SourceTrajectory, split: str) -> None:
+def _write_extxyz_frame(
+    path: Path,
+    frame: Frame,
+    source: SourceTrajectory,
+    split: str,
+    *,
+    kind: str,
+    tebeg_k: float | None,
+    high_temperature: bool,
+    min_coordination_number: int | None,
+    mean_coordination_number: float | None,
+) -> None:
     _, write = _ase_io()
     atoms = frame.atoms.copy()
     atoms.calc = None
@@ -318,8 +392,19 @@ def _write_extxyz_frame(path: Path, frame: Frame, source: SourceTrajectory, spli
             "source_path": str(source.path),
             "source_frame": frame.source_index,
             "split": split,
+            "IF_kind": kind,
+            "IF_high_temperature": high_temperature,
         }
     )
+    # None values are omitted rather than written: extxyz info values must be
+    # serializable, and these are unavailable (not merely zero) for some
+    # frames (no sibling INCAR, or a degenerate/unsupported cell).
+    if tebeg_k is not None:
+        atoms.info["IF_tebeg_k"] = tebeg_k
+    if min_coordination_number is not None:
+        atoms.info["IF_min_coordination_number"] = min_coordination_number
+    if mean_coordination_number is not None:
+        atoms.info["IF_mean_coordination_number"] = mean_coordination_number
     atoms.arrays["REF_forces"] = frame.forces.copy()
     atoms.arrays["move_mask"] = frame.move_mask.copy()
     if frame.virial is not None:
@@ -392,6 +477,17 @@ def collect_dataset(
     type_map = _discover_type_map(sources, settings.get("type_map", []))
     grouped = assign_grouped(sources, ratios, seed=seed) if strategy == "grouped" else {}
 
+    # Geometry-class metadata for later stratified error reporting (iface
+    # validate stratified), not used for split assignment. high_temperature
+    # compares each trajectory's TEBEG against the highest configured
+    # exploration temperature tier, falling back to a literal 600 K when
+    # none is configured -- a sensible default, overridable by setting
+    # campaign exploration.temperatures.
+    configured_temperatures = [
+        float(value) for value in campaign.exploration.get("temperatures", []) or []
+    ]
+    high_temperature_threshold_k = max(configured_temperatures) if configured_temperatures else 600.0
+
     extxyz = {split: output / f"{split}.extxyz" for split in SPLITS}
     deepmd = {split: output / "deepmd" / split for split in SPLITS}
     for path in deepmd.values():
@@ -400,7 +496,12 @@ def collect_dataset(
     records: list[CollectionRecord] = []
     global_frame_rows: list[dict[str, Any]] = []
     for trajectory_index, source_trajectory in enumerate(sources):
-        record = CollectionRecord(source=source_trajectory)
+        kind = classify_kind(source_trajectory.path, source, campaign.systems)
+        tebeg_k = _read_tebeg(source_trajectory.path)
+        high_temperature = tebeg_k is not None and tebeg_k >= high_temperature_threshold_k
+        record = CollectionRecord(
+            source=source_trajectory, kind=kind, tebeg_k=tebeg_k, high_temperature=high_temperature
+        )
         if not _has_constraint_source(source_trajectory.path):
             record.warnings.append(
                 "no CONTCAR/POSCAR beside OUTCAR: Selective Dynamics constraints "
@@ -441,7 +542,18 @@ def collect_dataset(
                 continue
             record.split_counts[split] = len(split_frames)
             for frame in split_frames:
-                _write_extxyz_frame(extxyz[split], frame, source_trajectory, split)
+                min_cn, mean_cn = _coordination_stats(frame.atoms)
+                _write_extxyz_frame(
+                    extxyz[split],
+                    frame,
+                    source_trajectory,
+                    split,
+                    kind=kind,
+                    tebeg_k=tebeg_k,
+                    high_temperature=high_temperature,
+                    min_coordination_number=min_cn,
+                    mean_coordination_number=mean_cn,
+                )
                 global_frame_rows.append(
                     {
                         "split": split,
@@ -452,6 +564,11 @@ def collect_dataset(
                         "energy_ev": frame.energy,
                         "mobile_atoms": int(frame.move_mask.sum()),
                         "fixed_atoms": int(len(frame.move_mask) - frame.move_mask.sum()),
+                        "kind": kind,
+                        "tebeg_k": tebeg_k,
+                        "high_temperature": high_temperature,
+                        "min_coordination_number": min_cn,
+                        "mean_coordination_number": mean_cn,
                     }
                 )
             _write_deepmd_system(deepmd[split], source_trajectory, split_frames, type_map)
@@ -467,6 +584,9 @@ def collect_dataset(
             "source_sha256": sha256_file(record.source.path),
             "category": record.source.category,
             "group": record.source.group,
+            "kind": record.kind,
+            "tebeg_k": record.tebeg_k,
+            "high_temperature": record.high_temperature,
             "assignment": record.assignment or "guarded",
             "frames_seen": record.frames_seen,
             "frames_retained": record.frames_retained,
@@ -490,6 +610,7 @@ def collect_dataset(
     split_counts = {
         split: sum(int(row[f"{split}_frames"]) for row in manifest_rows) for split in SPLITS
     }
+    kind_counts = Counter(row["kind"] for row in manifest_rows)
     payload = {
         "schema_version": 1,
         "source_root": str(source),
@@ -503,9 +624,18 @@ def collect_dataset(
         "type_map": type_map,
         "trajectories": len(records),
         "frame_counts": split_counts,
+        "kind_counts": dict(kind_counts),
+        "high_temperature_threshold_k": high_temperature_threshold_k,
         "extxyz": {split: str(path) if path.exists() else None for split, path in extxyz.items()},
         "deepmd": {split: str(path) for split, path in deepmd.items()},
     }
+    if kind_counts.get("unclassified"):
+        payload["notes"] = [
+            f"{kind_counts['unclassified']} of {len(records)} trajectories were not matched "
+            "against any system's run_glob and are classified 'unclassified'. Set "
+            "systems[].run_glob in campaign.yaml to enable geometry-class stratified "
+            "reporting (iface validate stratified) for them."
+        ]
     manifest_json = output / "manifest.json"
     manifest_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     state = StateStore(campaign.root)

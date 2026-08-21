@@ -100,6 +100,7 @@ iface audit runs/vasp
 iface collect
 iface train mace
 iface train deepmd
+iface validate stratified predictions.csv results.csv  # per-class errors, see docs/stratified-validation.md
 ```
 
 Collect a completed four-member MACE committee into a compact, immutable bundle

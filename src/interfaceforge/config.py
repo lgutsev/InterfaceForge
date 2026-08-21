@@ -15,7 +15,7 @@ import yaml
 
 from .errors import ConfigurationError, SafetyError
 
-SYSTEM_KINDS = {"bulk", "surface", "interface", "molecule", "adsorbate", "other"}
+SYSTEM_KINDS = {"bulk", "surface", "interface", "molecule", "adsorbate", "defect", "other"}
 SPLITS = ("train", "valid", "test")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
@@ -29,6 +29,12 @@ class SystemSpec:
     structure: Path
     temperature: float | None = None
     tags: dict[str, Any] = field(default_factory=dict)
+    run_glob: str | None = None
+    """fnmatch pattern (matched against a collected trajectory's path relative
+    to the dataset source root, e.g. "*/interface_*/*") identifying which
+    collected OUTCAR trajectories belong to this system, for geometry-class
+    stratified error reporting. A trajectory matching no system's run_glob is
+    classified "unclassified" rather than silently guessed."""
 
 
 @dataclass(frozen=True)
@@ -550,6 +556,9 @@ def load_campaign(path: str | Path) -> Campaign:
         if not structure:
             raise ConfigurationError(f"systems[{index}].structure is required")
         temperature = entry.get("temperature")
+        run_glob = entry.get("run_glob")
+        if run_glob is not None and not isinstance(run_glob, str):
+            raise ConfigurationError(f"systems[{index}].run_glob must be a string")
         systems.append(
             SystemSpec(
                 id=system_id,
@@ -557,6 +566,7 @@ def load_campaign(path: str | Path) -> Campaign:
                 structure=_resolve(root, str(structure)).resolve(),
                 temperature=float(temperature) if temperature is not None else None,
                 tags=_mapping(entry.get("tags"), f"systems[{index}].tags"),
+                run_glob=run_glob,
             )
         )
 
