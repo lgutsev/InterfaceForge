@@ -20,32 +20,51 @@ class LeafDiscoveryTests(unittest.TestCase):
     def test_only_terminal_directories_are_collected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            parent = root / "system" / "400K"
+            parent = root / "material" / "termination" / "400K"
             parent.mkdir(parents=True)
             (parent / "OUTCAR").write_text("parent", encoding="utf-8")
-            leaf_a = parent / "run_01"
-            leaf_b = parent / "run_02"
-            leaf_a.mkdir()
-            leaf_b.mkdir()
-            (leaf_a / "OUTCAR").write_text("a", encoding="utf-8")
-            (leaf_b / "OUTCAR").write_text("b", encoding="utf-8")
+            for replica in ("run_01", "run_02"):
+                leaf = parent / replica
+                leaf.mkdir()
+                (leaf / "OUTCAR").write_text("", encoding="utf-8")
 
             sources = discover_leaf_outcars(root, heritage_depth=2)
 
             self.assertEqual({source.leaf.name for source in sources}, {"run_01", "run_02"})
-            self.assertTrue(all(source.heritage_parts == ("system", "400K") for source in sources))
+            self.assertTrue(
+                all(source.heritage_parts == ("termination", "400K") for source in sources)
+            )
+            self.assertTrue(
+                all(source.heritage_parent == "material/termination/400K" for source in sources)
+            )
 
-    def test_depth_uses_immediate_ancestors_not_leaf(self) -> None:
+    def test_same_folder_labels_in_different_branches_do_not_collapse(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            leaf = root / "chemistry" / "termination" / "450K" / "replica_03"
-            leaf.mkdir(parents=True)
-            (leaf / "OUTCAR").write_text("", encoding="utf-8")
+            for chemistry in ("A", "B"):
+                leaf = root / chemistry / "termination" / "400K" / "run_01"
+                leaf.mkdir(parents=True)
+                (leaf / "OUTCAR").write_text("", encoding="utf-8")
 
-            [source] = discover_leaf_outcars(root, heritage_depth=2)
+            sources = discover_leaf_outcars(root, heritage_depth=2)
 
-            self.assertEqual(source.heritage_parts, ("termination", "450K"))
-            self.assertNotIn("replica_03", source.heritage_key)
+            self.assertEqual(len({source.heritage_key for source in sources}), 2)
+            self.assertEqual(
+                {source.heritage_parent for source in sources},
+                {"A/termination/400K", "B/termination/400K"},
+            )
+
+    def test_backup_and_x_branches_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for branch in ("good", "backup_old", "Xdisabled"):
+                leaf = root / branch / "run_01"
+                leaf.mkdir(parents=True)
+                (leaf / "OUTCAR").write_text("", encoding="utf-8")
+
+            sources = discover_leaf_outcars(root)
+
+            self.assertEqual([source.relative_leaf.as_posix() for source in sources], ["good/run_01"])
 
 
 class HeritageSplitTests(unittest.TestCase):
@@ -61,12 +80,11 @@ class HeritageSplitTests(unittest.TestCase):
             sources = discover_leaf_outcars(root, heritage_depth=2)
             assignment = assign_heritage_groups(sources, (0.6, 0.2, 0.2), seed=9)
 
-            seen: dict[str, str] = {}
+            seen: dict[str, set[str]] = {}
             for source in sources:
-                split = assignment[source.outcar]
-                previous = seen.setdefault(source.heritage_key, split)
-                self.assertEqual(previous, split)
-            self.assertEqual(set(seen.values()), {"train", "valid", "test"})
+                seen.setdefault(source.heritage_key, set()).add(assignment[source.outcar])
+            self.assertTrue(all(len(splits) == 1 for splits in seen.values()))
+            self.assertEqual(set(assignment.values()), {"train", "valid", "test"})
 
 
 class _Cell:
@@ -87,20 +105,21 @@ class _Atoms:
 
 
 class DeepMDContextTests(unittest.TestCase):
-    def test_deepmd_system_physically_preserves_heritage(self) -> None:
+    def test_deepmd_system_physically_preserves_full_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            leaf = root / "chemistry" / "450K" / "replica_01"
+            leaf = root / "chemistry" / "termination" / "450K" / "replica_01"
             leaf.mkdir(parents=True)
             outcar = leaf / "OUTCAR"
             outcar.write_text("", encoding="utf-8")
             source = LeafSource(
                 outcar=outcar,
                 leaf=leaf,
-                relative_leaf=Path("chemistry/450K/replica_01"),
-                run_id="chemistry__450K__replica_01",
-                heritage_parts=("chemistry", "450K"),
-                heritage_key="chemistry__450K",
+                relative_leaf=Path("chemistry/termination/450K/replica_01"),
+                run_id="chemistry__termination__450K__replica_01",
+                heritage_parts=("termination", "450K"),
+                heritage_parent="chemistry/termination/450K",
+                heritage_key="chemistry_termination_450K",
             )
             frame = LeafFrame(
                 source_index=7,
@@ -117,13 +136,21 @@ class DeepMDContextTests(unittest.TestCase):
 
             self.assertEqual(
                 system,
-                root / "dataset" / "train" / "chemistry" / "450K" / "replica_01",
+                root
+                / "dataset"
+                / "train"
+                / "chemistry"
+                / "termination"
+                / "450K"
+                / "replica_01",
             )
             self.assertTrue((system / "set.000" / "coord.npy").is_file())
             context = json.loads((system / "heritage.json").read_text(encoding="utf-8"))
-            self.assertEqual(context["heritage_parts"], ["chemistry", "450K"])
+            self.assertEqual(context["heritage_parent"], "chemistry/termination/450K")
+            self.assertEqual(context["heritage_context"], ["termination", "450K"])
             self.assertEqual(
-                context["source_root_relative_leaf"], "chemistry/450K/replica_01"
+                context["source_root_relative_leaf"],
+                "chemistry/termination/450K/replica_01",
             )
 
 
