@@ -20,6 +20,10 @@ environment paths, wall time, job name, executable, and resource counts before r
   `CONTCAR`, runs `Restart <leaf-name>` from the leaf's parent directory, captures
   the Slurm job ID, checks `squeue`/`sacct` when available, and writes a timestamped
   TSV launch audit.
+- `collect_leaf_mace.py`: collects VASP `OUTCAR` trajectories only from deepest
+  directories into MACE `train.extxyz`, `valid.extxyz`, and `test.extxyz` files.
+- `collect_leaf_deepmd.py`: collects the same leaf trajectories into native DeePMD
+  systems while physically retaining the source directory hierarchy.
 
 Submit the three additional committee members from the directory containing
 `train.extxyz`, `valid.extxyz`, and `test.extxyz`:
@@ -62,3 +66,76 @@ jobs:
 ```bash
 /path/to/InterfaceForge/launch_scripts/restart_leaf_jobs.sh --dry-run
 ```
+
+## Collect leaf calculations for MACE / DeePMD
+
+The leaf collectors deliberately do **not** treat every terminal directory as an
+independent statistical sample. The complete source-root-relative parent lineage is
+the grouping key. All sibling leaf runs from the same parent branch are therefore
+assigned together to train, validation, or test and cannot leak across splits.
+
+`--heritage-depth` controls how many immediate ancestor names are repeated as
+human-readable context metadata. The default is two. The full parent lineage is
+always retained as the actual split-group identity, so repeated folder names in
+unrelated branches do not accidentally merge.
+
+Preview the discovered leaves and their split assignment before writing anything:
+
+```bash
+/path/to/InterfaceForge/launch_scripts/collect_leaf_mace.py \
+  --root . --output mace_leaf_dataset --dry-run
+
+/path/to/InterfaceForge/launch_scripts/collect_leaf_deepmd.py \
+  --root . --output deepmd_leaf_dataset --dry-run
+```
+
+Create the datasets:
+
+```bash
+/path/to/InterfaceForge/launch_scripts/collect_leaf_mace.py \
+  --root . --output mace_leaf_dataset
+
+/path/to/InterfaceForge/launch_scripts/collect_leaf_deepmd.py \
+  --root . --output deepmd_leaf_dataset
+```
+
+Useful options shared by both collectors:
+
+```text
+--heritage-depth 2
+--ratios 0.8 0.1 0.1
+--seed 20260730
+--stride 1
+--include-virial
+--force
+```
+
+For MACE, every emitted frame records `IF_leaf`, `IF_heritage`,
+`IF_heritage_parent`, and `IF_heritage_context` in the extxyz metadata.
+
+For DeePMD, context is additionally preserved in the filesystem itself. A source
+leaf such as:
+
+```text
+material/termination/450K/replica_03/OUTCAR
+```
+
+becomes, for example:
+
+```text
+deepmd_leaf_dataset/train/material/termination/450K/replica_03/
+├── type.raw
+├── type_map.raw
+├── heritage.json
+├── frame_map.csv
+└── set.000/
+    ├── coord.npy
+    ├── box.npy
+    ├── energy.npy
+    └── force.npy
+```
+
+The collectors also write `leaf_manifest.csv` and `leaf_manifest.json`, recording
+source leaf, ancestry/group identity, assigned split, frame count, output path, and
+any failed leaf conversions. Backup-containing paths and directories beginning with
+`X` are ignored.
