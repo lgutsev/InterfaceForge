@@ -1,9 +1,9 @@
 """Leaf-directory VASP collectors for MACE and DeePMD.
 
-Terminal VASP folders are the data sources. One or more immediate ancestor
-folders define a heritage group. Heritage groups, not individual leaves, are
-the indivisible unit for train/validation/test splitting so sibling leaves from
-the same physical/systematic campaign cannot leak across splits.
+Terminal VASP folders are data sources. Their directory ancestry is retained as
+provenance, and the full parent lineage is the indivisible train/valid/test
+grouping unit so sibling leaves from one campaign branch never leak across
+splits.
 """
 
 from __future__ import annotations
@@ -32,8 +32,6 @@ DEFAULT_EXCLUDES = (
     "*/restart_archive_*/*",
     "*/refit_archive_*/*",
     "*/stability_archive_*/*",
-    "*/backup/*",
-    "*/X*/*",
 )
 
 
@@ -44,6 +42,7 @@ class LeafSource:
     relative_leaf: Path
     run_id: str
     heritage_parts: tuple[str, ...]
+    heritage_parent: str
     heritage_key: str
 
 
@@ -72,12 +71,17 @@ def _normalize_ratios(values: Sequence[float]) -> dict[str, float]:
     return {name: value / total for name, value in zip(SPLITS, ratios, strict=True)}
 
 
-def _is_excluded(relative: str, patterns: Sequence[str]) -> bool:
-    wrapped = f"/{relative}"
-    return any(
-        fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(wrapped, pattern)
+def _is_excluded(relative: Path, patterns: Sequence[str]) -> bool:
+    text = relative.as_posix()
+    wrapped = f"/{text}"
+    if any(
+        fnmatch.fnmatch(text, pattern) or fnmatch.fnmatch(wrapped, pattern)
         for pattern in patterns
-    )
+    ):
+        return True
+    # Match existing InterfaceForge campaign hygiene: do not harvest backup
+    # branches or deliberately disabled X* branches.
+    return any("backup" in part.lower() or part.startswith("X") for part in relative.parts)
 
 
 def _has_child_directories(directory: Path) -> bool:
@@ -87,18 +91,20 @@ def _has_child_directories(directory: Path) -> bool:
         return True
 
 
-def _heritage_for(relative_leaf: Path, depth: int) -> tuple[str, ...]:
-    """Use the immediate ancestors above the leaf as its grouping context.
-
-    Example: material/termination/400K/run_03 with depth=2 becomes
-    (termination, 400K). The leaf name itself is not part of the group.
-    """
+def _heritage_context(relative_leaf: Path, depth: int) -> tuple[str, ...]:
+    """Return up to ``depth`` immediate ancestor labels for explicit metadata."""
     if depth < 1:
         raise ValueError("heritage_depth must be at least 1")
     ancestors = relative_leaf.parts[:-1]
-    if ancestors:
-        return tuple(ancestors[-depth:])
-    return (relative_leaf.name,)
+    if not ancestors:
+        return ("__root__",)
+    return tuple(ancestors[-depth:])
+
+
+def _parent_lineage(relative_leaf: Path) -> str:
+    """Return the complete source-root-relative parent lineage for grouping."""
+    ancestors = relative_leaf.parts[:-1]
+    return "/".join(ancestors) if ancestors else "__root__"
 
 
 def discover_leaf_outcars(
@@ -108,7 +114,13 @@ def discover_leaf_outcars(
     outcar_name: str = "OUTCAR",
     exclude: Sequence[str] = DEFAULT_EXCLUDES,
 ) -> list[LeafSource]:
-    """Discover OUTCARs only in terminal/deepest directories."""
+    """Discover OUTCARs only in terminal/deepest directories.
+
+    ``heritage_depth`` controls how many immediate ancestor names are repeated
+    in human-readable metadata. Group identity uses the *complete* parent
+    lineage, preventing unrelated branches with repeated folder names from
+    being merged accidentally.
+    """
     source_root = Path(root).expanduser().resolve()
     if not source_root.is_dir():
         raise SafetyError(f"Leaf source root is not a directory: {source_root}")
@@ -118,7 +130,7 @@ def discover_leaf_outcars(
     for outcar in sorted(source_root.rglob(outcar_name)):
         if not outcar.is_file():
             continue
-        relative_outcar = outcar.relative_to(source_root).as_posix()
+        relative_outcar = outcar.relative_to(source_root)
         if _is_excluded(relative_outcar, exclude):
             continue
         leaf = outcar.parent
@@ -129,7 +141,8 @@ def discover_leaf_outcars(
         collision = seen_ids.get(run_id_base, 0)
         seen_ids[run_id_base] = collision + 1
         run_id = run_id_base if collision == 0 else f"{run_id_base}__dup{collision + 1}"
-        heritage_parts = _heritage_for(relative_leaf, heritage_depth)
+        heritage_parts = _heritage_context(relative_leaf, heritage_depth)
+        heritage_parent = _parent_lineage(relative_leaf)
         discovered.append(
             LeafSource(
                 outcar=outcar,
@@ -137,7 +150,8 @@ def discover_leaf_outcars(
                 relative_leaf=relative_leaf,
                 run_id=run_id,
                 heritage_parts=heritage_parts,
-                heritage_key=safe_name("__".join(heritage_parts)),
+                heritage_parent=heritage_parent,
+                heritage_key=safe_name(heritage_parent.replace("/", "__")),
             )
         )
     return discovered
@@ -149,7 +163,7 @@ def assign_heritage_groups(
     *,
     seed: int = 20260730,
 ) -> dict[Path, str]:
-    """Assign whole heritage groups, never individual sibling leaves, to splits."""
+    """Assign whole parent-lineage groups, never individual sibling leaves."""
     normalized = _normalize_ratios(ratios)
     active = [name for name in SPLITS if normalized[name] > 0]
     if not active:
@@ -180,15 +194,13 @@ def assign_heritage_groups(
         group_split[heritage_key] = split
         totals[split] += len(group_sources)
 
-    # Populate requested splits when enough independent heritage groups exist,
-    # moving a whole group at a time.
+    # If enough independent parent lineages exist, populate every requested
+    # split by moving a whole lineage rather than a correlated leaf.
     if len(groups) >= len(active):
         for empty in [name for name in active if totals[name] == 0]:
             donor = max(active, key=lambda name: totals[name] - target[name])
             donor_groups = [
-                (key, items)
-                for key, items in groups
-                if group_split[key] == donor
+                (key, items) for key, items in groups if group_split[key] == donor
             ]
             if len(donor_groups) <= 1:
                 continue
@@ -252,8 +264,6 @@ def iter_leaf_frames(
                 virial=virial,
             )
         except Exception:
-            # Incomplete trailing VASP steps are common. Keep readable labelled
-            # frames and ignore an incomplete final step.
             continue
 
 
@@ -292,7 +302,7 @@ def _write_mace_frames(
     frames: Sequence[LeafFrame],
 ) -> None:
     _, write = _ase_io()
-    heritage_path = "/".join(source.heritage_parts)
+    heritage_context = "/".join(source.heritage_parts)
     for frame in frames:
         atoms = frame.atoms.copy()
         atoms.calc = None
@@ -305,7 +315,8 @@ def _write_mace_frames(
                 "split": split,
                 "IF_leaf": source.relative_leaf.as_posix(),
                 "IF_heritage": source.heritage_key,
-                "IF_heritage_path": heritage_path,
+                "IF_heritage_parent": source.heritage_parent,
+                "IF_heritage_context": heritage_context,
             }
         )
         atoms.arrays["REF_forces"] = frame.forces.copy()
@@ -315,8 +326,8 @@ def _write_mace_frames(
         write(str(path), atoms, format="extxyz", append=path.exists())
 
 
-def _safe_heritage_path(parts: Sequence[str]) -> Path:
-    return Path(*(safe_name(part) for part in parts))
+def _safe_relative_path(relative: Path) -> Path:
+    return Path(*(safe_name(part) for part in relative.parts))
 
 
 def _write_deepmd_system(
@@ -326,14 +337,14 @@ def _write_deepmd_system(
     frames: Sequence[LeafFrame],
     type_map: Sequence[str],
 ) -> Path:
-    """Write one leaf as one DeePMD system beneath its heritage hierarchy."""
+    """Write one leaf as one DeePMD system while retaining its full lineage."""
     if not frames:
         raise ValueError("Cannot write an empty DeePMD system")
 
-    # Preserve context physically: split/<heritage...>/<leaf>/set.000.
-    system = split_root / _safe_heritage_path(source.heritage_parts) / safe_name(source.leaf.name)
+    # Preserve the complete source tree: split/<relative leaf>/set.000.
+    system = split_root / _safe_relative_path(source.relative_leaf)
     if system.exists():
-        system = split_root / _safe_heritage_path(source.heritage_parts) / source.run_id
+        system = system.parent / f"{safe_name(source.leaf.name)}__{source.run_id}"
     set_dir = system / "set.000"
     set_dir.mkdir(parents=True, exist_ok=False)
 
@@ -368,8 +379,8 @@ def _write_deepmd_system(
         "source_outcar": str(source.outcar),
         "run_id": source.run_id,
         "heritage_key": source.heritage_key,
-        "heritage_parts": list(source.heritage_parts),
-        "heritage_path": "/".join(source.heritage_parts),
+        "heritage_parent": source.heritage_parent,
+        "heritage_context": list(source.heritage_parts),
         "frames": len(frames),
     }
     (system / "heritage.json").write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
@@ -382,7 +393,8 @@ def _write_deepmd_system(
                 "source_path",
                 "relative_leaf",
                 "heritage_key",
-                "heritage_path",
+                "heritage_parent",
+                "heritage_context",
             ]
         )
         for index, frame in enumerate(frames):
@@ -393,6 +405,7 @@ def _write_deepmd_system(
                     str(source.outcar),
                     source.relative_leaf.as_posix(),
                     source.heritage_key,
+                    source.heritage_parent,
                     "/".join(source.heritage_parts),
                 ]
             )
@@ -433,7 +446,8 @@ def collect_leaf_dataset(
             "outcar": str(source.outcar),
             "run_id": source.run_id,
             "heritage_key": source.heritage_key,
-            "heritage_path": "/".join(source.heritage_parts),
+            "heritage_parent": source.heritage_parent,
+            "heritage_context": "/".join(source.heritage_parts),
             "split": assignments[source.outcar],
         }
         for source in sources
@@ -471,7 +485,8 @@ def collect_leaf_dataset(
             "outcar": str(source.outcar),
             "run_id": source.run_id,
             "heritage_key": source.heritage_key,
-            "heritage_path": "/".join(source.heritage_parts),
+            "heritage_parent": source.heritage_parent,
+            "heritage_context": "/".join(source.heritage_parts),
             "split": split,
             "frames": 0,
             "status": "OK",
@@ -522,7 +537,10 @@ def collect_leaf_dataset(
         "source_root": str(source_root),
         "output_root": str(output_root),
         "heritage_depth": heritage_depth,
-        "heritage_rule": "immediate ancestors excluding leaf; groups are indivisible across splits",
+        "heritage_rule": (
+            "full source-root-relative parent lineage is indivisible across splits; "
+            "heritage_depth controls repeated context labels"
+        ),
         "ratios": list(ratios),
         "seed": seed,
         "stride": stride,
@@ -547,7 +565,7 @@ def collect_leaf_dataset(
         payload["type_map"] = resolved_type_map
         payload["deepmd"] = {name: str(split_roots[name]) for name in SPLITS}
         payload["context_preservation"] = (
-            "split/<heritage...>/<leaf>/set.000 plus heritage.json and frame_map.csv"
+            "split/<full source-root-relative leaf>/set.000 plus heritage.json and frame_map.csv"
         )
 
     manifest_json = output_root / "leaf_manifest.json"
@@ -559,8 +577,8 @@ def collect_leaf_dataset(
 def build_parser(default_engine: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Collect VASP OUTCARs from terminal directories while keeping parent/grandparent "
-            "heritage groups intact across train/valid/test splits."
+            "Collect VASP OUTCARs from terminal directories while keeping directory heritage "
+            "intact across train/valid/test splits."
         )
     )
     if default_engine is None:
@@ -571,7 +589,10 @@ def build_parser(default_engine: str | None = None) -> argparse.ArgumentParser:
         "--heritage-depth",
         type=int,
         default=2,
-        help="Immediate ancestors above each leaf used as one indivisible group (default: 2)",
+        help=(
+            "Number of immediate ancestor labels repeated in provenance metadata (default: 2); "
+            "the full parent lineage is always the split grouping key"
+        ),
     )
     parser.add_argument(
         "--ratios",
