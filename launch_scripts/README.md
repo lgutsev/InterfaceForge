@@ -15,6 +15,11 @@ environment paths, wall time, job name, executable, and resource counts before r
   It uses conservative batches (`8` training, `4` validation), expandable CUDA
   segments, and records five-second GPU telemetry in each seed directory as
   `gpu_usage_<jobid>.log`.
+- `restart_daughter_jobs.sh`: one-level campaign helper for immediate VASP daughter
+  directories. It can run either `Restart <daughter>` or `TotalRestart <daughter>`,
+  copies root `INCAR`, `KPOINTS`, and `runvasp.sh`, verifies the expected restart
+  postcondition, preserves `CONTCAR` independently before `TotalRestart`, and writes
+  a timestamped TSV launch audit.
 - `restart_leaf_jobs.sh`: campaign helper that copies the root `INCAR` and
   `runvasp.sh` into every deepest/leaf calculation directory, requires a non-empty
   `CONTCAR`, runs `Restart <leaf-name>` from the leaf's parent directory, captures
@@ -36,6 +41,49 @@ done
 
 The original `mace_model/TiN_SiN_mace_stagetwo.model` is retained as the first
 committee member. New runs are stored under `mace_committee/seed_<seed>/`.
+
+## Restart immediate daughter calculations
+
+Use `restart_daughter_jobs.sh` when the campaign root directly contains the VASP
+calculation directories you want to start. It only selects immediate daughter
+folders containing `POSCAR` or `CONTCAR`; directories beginning with `X` and names
+containing `backup` are ignored.
+
+Preview a normal restart campaign first:
+
+```bash
+/path/to/InterfaceForge/launch_scripts/restart_daughter_jobs.sh restart --dry-run
+```
+
+Then launch it:
+
+```bash
+/path/to/InterfaceForge/launch_scripts/restart_daughter_jobs.sh restart
+```
+
+For each selected daughter, the helper copies the root `INCAR`, `KPOINTS`, and
+`runvasp.sh`, requires a non-empty `CONTCAR`, executes `Restart <daughter-name>`
+from the campaign root, and verifies afterward that the daughter `POSCAR` matches
+the pre-launch `CONTCAR`.
+
+For a clean restart that intentionally discards VASP electronic/continuation state:
+
+```bash
+/path/to/InterfaceForge/launch_scripts/restart_daughter_jobs.sh total-restart --dry-run
+/path/to/InterfaceForge/launch_scripts/restart_daughter_jobs.sh total-restart
+```
+
+Before invoking `TotalRestart <daughter-name>`, InterfaceForge independently saves
+any non-empty `CONTCAR` as
+`CONTCAR.pre_TotalRestart_<timestamp>_<pid>`. After the helper returns, it checks
+that `WAVECAR`, `CHGCAR`, and `CONTCAR` are gone. Thus the wrapper does not merely
+assume the personal `TotalRestart` helper behaved as intended.
+
+Both modes capture a Slurm `Submitted batch job <id>` when available, query
+`squeue`/`sacct`, and write `daughter_restart_audit_YYYYmmdd_HHMMSS.tsv`. Use
+`--no-copy` if the daughter inputs should be left untouched. `Restart` and
+`TotalRestart` may be executables, shell functions, or aliases loaded by
+`~/.bashrc`.
 
 ## Restart all leaf calculations
 
