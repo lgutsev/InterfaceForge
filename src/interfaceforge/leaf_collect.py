@@ -16,6 +16,7 @@ import random
 import re
 import shutil
 from collections import defaultdict
+from hashlib import sha256
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -210,6 +211,48 @@ def assign_heritage_groups(
             totals[empty] += len(items)
 
     return {source.outcar: group_split[source.heritage_key] for source in sources}
+
+
+
+def assign_random_frame_splits(
+    frames: Sequence[LeafFrame],
+    ratios: Sequence[float] = (0.8, 0.1, 0.1),
+    *,
+    seed: int = 20260730,
+    leaf_key: str,
+) -> dict[str, list[LeafFrame]]:
+    """Randomly split frames within one leaf using deterministic membership."""
+    normalized = _normalize_ratios(ratios)
+    shuffled = list(frames)
+    random.Random(f"{seed}:{leaf_key}").shuffle(shuffled)
+
+    exact = {name: normalized[name] * len(shuffled) for name in SPLITS}
+    counts = {name: int(exact[name]) for name in SPLITS}
+    remainder = len(shuffled) - sum(counts.values())
+    order = sorted(
+        SPLITS,
+        key=lambda name: (
+            exact[name] - counts[name],
+            normalized[name],
+            -SPLITS.index(name),
+        ),
+        reverse=True,
+    )
+    for name in order[:remainder]:
+        counts[name] += 1
+
+    partitions: dict[str, list[LeafFrame]] = {}
+    cursor = 0
+    for name in SPLITS:
+        selected = shuffled[cursor : cursor + counts[name]]
+        partitions[name] = sorted(selected, key=lambda frame: frame.source_index)
+        cursor += counts[name]
+    return partitions
+
+
+def _frame_digest(frames: Sequence[LeafFrame]) -> str:
+    membership = ",".join(str(frame.source_index) for frame in frames)
+    return sha256(membership.encode("utf-8")).hexdigest()
 
 
 def _ase_io() -> tuple[Any, Any]:
@@ -423,13 +466,17 @@ def collect_leaf_dataset(
     stride: int = 1,
     include_virial: bool = False,
     type_map: Sequence[str] = (),
+    split_mode: str = "heritage",
     force: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Collect terminal VASP calculations into MACE or DeePMD training data."""
     engine = engine.lower()
+    split_mode = split_mode.lower()
     if engine not in {"mace", "deepmd"}:
         raise ValueError("engine must be 'mace' or 'deepmd'")
+    if split_mode not in {"heritage", "random-frame"}:
+        raise ValueError("split_mode must be 'heritage' or 'random-frame'")
     if stride < 1:
         raise ValueError("stride must be >= 1")
 
@@ -438,7 +485,11 @@ def collect_leaf_dataset(
     sources = discover_leaf_outcars(source_root, heritage_depth=heritage_depth)
     if not sources:
         raise SafetyError(f"No leaf-directory OUTCARs found below {source_root}")
-    assignments = assign_heritage_groups(sources, ratios, seed=seed)
+    assignments = (
+        assign_heritage_groups(sources, ratios, seed=seed)
+        if split_mode == "heritage"
+        else {}
+    )
 
     preview_rows = [
         {
@@ -448,7 +499,11 @@ def collect_leaf_dataset(
             "heritage_key": source.heritage_key,
             "heritage_parent": source.heritage_parent,
             "heritage_context": "/".join(source.heritage_parts),
-            "split": assignments[source.outcar],
+            "split": (
+                assignments[source.outcar]
+                if split_mode == "heritage"
+                else "randomized within leaf"
+            ),
         }
         for source in sources
     ]
@@ -458,6 +513,7 @@ def collect_leaf_dataset(
             "source_root": str(source_root),
             "output_root": str(output_root),
             "heritage_depth": heritage_depth,
+            "split_mode": split_mode,
             "ratios": list(ratios),
             "leaves": len(sources),
             "heritage_groups": len({source.heritage_key for source in sources}),
@@ -476,43 +532,82 @@ def collect_leaf_dataset(
 
     manifest_rows: list[dict[str, Any]] = []
     frame_counts = {name: 0 for name in SPLITS}
-    failures = 0
+    failed_sources: set[Path] = set()
 
     for source in sources:
-        split = assignments[source.outcar]
-        row = {
+        base_row = {
             "relative_leaf": source.relative_leaf.as_posix(),
             "outcar": str(source.outcar),
             "run_id": source.run_id,
             "heritage_key": source.heritage_key,
             "heritage_parent": source.heritage_parent,
             "heritage_context": "/".join(source.heritage_parts),
-            "split": split,
-            "frames": 0,
-            "status": "OK",
-            "output": "",
-            "detail": "",
         }
         try:
-            frames = list(iter_leaf_frames(source, stride=stride, include_virial=include_virial))
+            frames = list(
+                iter_leaf_frames(source, stride=stride, include_virial=include_virial)
+            )
             if not frames:
                 raise SafetyError("no readable labelled frames")
-            row["frames"] = len(frames)
-            frame_counts[split] += len(frames)
-            if engine == "mace":
-                target = output_root / f"{split}.extxyz"
-                _write_mace_frames(target, source, split, frames)
-                row["output"] = str(target)
+            if split_mode == "heritage":
+                partitions = {
+                    assignments[source.outcar]: frames,
+                }
             else:
-                system = _write_deepmd_system(
-                    split_roots[split], source, split, frames, resolved_type_map
+                partitions = assign_random_frame_splits(
+                    frames,
+                    ratios,
+                    seed=seed,
+                    leaf_key=source.relative_leaf.as_posix(),
                 )
-                row["output"] = str(system)
         except Exception as exc:
-            failures += 1
-            row["status"] = "FAILED"
-            row["detail"] = str(exc)
-        manifest_rows.append(row)
+            failed_sources.add(source.outcar)
+            manifest_rows.append(
+                {
+                    **base_row,
+                    "split": assignments.get(source.outcar, "unassigned"),
+                    "frames": 0,
+                    "frame_digest": "",
+                    "status": "FAILED",
+                    "output": "",
+                    "detail": str(exc),
+                }
+            )
+            continue
+
+        for split in SPLITS:
+            selected = partitions.get(split, [])
+            if not selected:
+                continue
+            row = {
+                **base_row,
+                "split": split,
+                "frames": len(selected),
+                "frame_digest": _frame_digest(selected),
+                "status": "OK",
+                "output": "",
+                "detail": "",
+            }
+            try:
+                if engine == "mace":
+                    target = output_root / f"{split}.extxyz"
+                    _write_mace_frames(target, source, split, selected)
+                    row["output"] = str(target)
+                else:
+                    system = _write_deepmd_system(
+                        split_roots[split],
+                        source,
+                        split,
+                        selected,
+                        resolved_type_map,
+                    )
+                    row["output"] = str(system)
+                frame_counts[split] += len(selected)
+            except Exception as exc:
+                failed_sources.add(source.outcar)
+                row["status"] = "FAILED"
+                row["detail"] = str(exc)
+            manifest_rows.append(row)
 
     manifest_csv = output_root / "leaf_manifest.csv"
     with manifest_csv.open("w", newline="", encoding="utf-8") as handle:
@@ -521,13 +616,15 @@ def collect_leaf_dataset(
         writer.writerows(manifest_rows)
 
     group_splits: dict[str, str] = {}
-    for source in sources:
-        split = assignments[source.outcar]
-        previous = group_splits.setdefault(source.heritage_key, split)
-        if previous != split:
-            raise AssertionError(
-                f"heritage leakage detected internally: {source.heritage_key} -> {previous}, {split}"
-            )
+    if split_mode == "heritage":
+        for source in sources:
+            split = assignments[source.outcar]
+            previous = group_splits.setdefault(source.heritage_key, split)
+            if previous != split:
+                raise AssertionError(
+                    f"heritage leakage detected internally: "
+                    f"{source.heritage_key} -> {previous}, {split}"
+                )
 
     empty_splits = [name for name in SPLITS if frame_counts[name] == 0]
     payload: dict[str, Any] = {
@@ -537,9 +634,11 @@ def collect_leaf_dataset(
         "source_root": str(source_root),
         "output_root": str(output_root),
         "heritage_depth": heritage_depth,
-        "heritage_rule": (
-            "full source-root-relative parent lineage is indivisible across splits; "
-            "heritage_depth controls repeated context labels"
+        "split_mode": split_mode,
+        "split_rule": (
+            "full source-root-relative parent lineage is indivisible across splits"
+            if split_mode == "heritage"
+            else "frames are deterministically randomized within every leaf"
         ),
         "ratios": list(ratios),
         "seed": seed,
@@ -547,25 +646,30 @@ def collect_leaf_dataset(
         "include_virial": include_virial,
         "preserve_raw_forces": True,
         "leaves_discovered": len(sources),
-        "heritage_groups": len(group_splits),
+        "heritage_groups": len(
+            {source.heritage_key for source in sources}
+        ),
         "heritage_group_splits": group_splits,
         "frame_counts": frame_counts,
         "empty_splits": empty_splits,
-        "failed_leaves": failures,
+        "failed_leaves": len(failed_sources),
         "manifest_csv": str(manifest_csv),
     }
     if engine == "mace":
         payload["extxyz"] = {
-            name: str(output_root / f"{name}.extxyz")
-            if (output_root / f"{name}.extxyz").is_file()
-            else None
+            name: (
+                str(output_root / f"{name}.extxyz")
+                if (output_root / f"{name}.extxyz").is_file()
+                else None
+            )
             for name in SPLITS
         }
     else:
         payload["type_map"] = resolved_type_map
         payload["deepmd"] = {name: str(split_roots[name]) for name in SPLITS}
         payload["context_preservation"] = (
-            "split/<full source-root-relative leaf>/set.000 plus heritage.json and frame_map.csv"
+            "split/<full source-root-relative leaf>/set.000 plus "
+            "heritage.json and frame_map.csv"
         )
 
     manifest_json = output_root / "leaf_manifest.json"
@@ -602,6 +706,15 @@ def build_parser(default_engine: str | None = None) -> argparse.ArgumentParser:
         default=(0.8, 0.1, 0.1),
     )
     parser.add_argument("--seed", type=int, default=20260730)
+    parser.add_argument(
+        "--split-mode",
+        choices=("heritage", "random-frame"),
+        default="heritage",
+        help=(
+            "heritage keeps complete parent lineages indivisible; random-frame "
+            "deterministically stratifies every leaf across active splits"
+        ),
+    )
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--include-virial", action="store_true")
     parser.add_argument(
@@ -629,6 +742,7 @@ def main(argv: Sequence[str] | None = None, *, default_engine: str | None = None
         stride=args.stride,
         include_virial=args.include_virial,
         type_map=args.type_map,
+        split_mode=args.split_mode,
         force=args.force,
         dry_run=args.dry_run,
     )
