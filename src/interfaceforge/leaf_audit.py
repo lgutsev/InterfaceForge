@@ -228,7 +228,7 @@ def _write_svg(path: Path, report: dict[str, Any]) -> None:
     ]
     reference = report.get("reference_provenance", {})
     if reference:
-        settings = reference.get("incar_tag_values", {})
+        settings = reference.get("effective_setting_values", {})
         summary = " · ".join(
             f"{tag}={','.join(settings.get(tag, []))}"
             for tag in ("ENCUT", "IVDW", "POTIM")
@@ -315,7 +315,7 @@ def write_leaf_audit(report: dict[str, Any], output: str | Path) -> dict[str, st
             f"- Exact INCAR files identical: `{reference.get('exact_incar_files_identical')}`"
         )
         for tag in ("ENCUT", "IVDW", "POTIM"):
-            values = reference.get("incar_tag_values", {}).get(tag, [])
+            values = reference.get("effective_setting_values", {}).get(tag, [])
             lines.append(f"- `{tag}`: `{', '.join(values)}`")
         lines.append(
             f"- VASP versions: `{', '.join(reference.get('vasp_versions', []))}`"

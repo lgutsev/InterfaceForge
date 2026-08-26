@@ -128,8 +128,9 @@ a leaf failed conversion, or a requested split is empty.
 ## VASP provenance and balanced sampling
 
 Mapped campaigns are strict by default. Before ASE reads the trajectories, the
-staging pass requires explicit `ENCUT`, `IVDW`, and `POTIM` in every leaf INCAR
-and requires those values to agree across all leaves. It hashes every staged
+staging pass resolves `ENCUT`, `IVDW`, and `POTIM` from the saved INCAR and the
+values actually echoed by OUTCAR, fails if both records disagree, and requires
+the effective values to agree across all leaves. It hashes every staged
 source file and records the complete parsed INCAR, VASP version, POTCAR `TITEL`
 identities, `NKPTS`, and detected ionic-frame count. The records and audit are
 written to `reference_runs/reference_provenance.json`, a flattened

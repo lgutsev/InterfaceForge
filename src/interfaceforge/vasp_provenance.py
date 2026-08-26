@@ -97,8 +97,12 @@ def build_vasp_reference_record(
     incar_path = resolved_paths.get("INCAR", source_leaf / "INCAR")
     incar_tags = parse_incar(incar_path)
     required = [str(tag).upper() for tag in required_incar_tags]
-    missing = [tag for tag in required if not incar_tags.get(tag)]
     identity = _outcar_fingerprint(source_outcar, tracked_tags=required)
+    executed_tags = identity["outcar_executed_tags"]
+    effective_settings = {
+        tag: executed_tags.get(tag, incar_tags.get(tag, "")) for tag in required
+    }
+    missing = [tag for tag, value in effective_settings.items() if not value]
     hashes = {}
     for name in included_files:
         path = resolved_paths.get(name, source_leaf / name)
@@ -118,7 +122,8 @@ def build_vasp_reference_record(
         },
         "incar_tags": dict(sorted(incar_tags.items())),
         "required_incar_tags": required,
-        "missing_required_incar_tags": missing,
+        "effective_required_settings": effective_settings,
+        "missing_required_settings": missing,
         **identity,
     }
 
@@ -131,12 +136,14 @@ def audit_vasp_reference_records(
     consistent = [str(tag).upper() for tag in consistent_incar_tags]
     problems: list[dict[str, Any]] = []
     for record in records:
-        missing = list(record.get("missing_required_incar_tags", []))
+        missing = list(record.get("missing_required_settings", []))
         if missing:
             problems.append(
                 {
                     "staged_leaf": record["staged_leaf"],
-                    "issues": [f"missing explicit INCAR tag: {tag}" for tag in missing],
+                    "issues": [
+                        f"missing {tag} from both INCAR and OUTCAR" for tag in missing
+                    ],
                 }
             )
         incar_tags = record.get("incar_tags", {})
@@ -178,7 +185,14 @@ def audit_vasp_reference_records(
     unique_values: dict[str, list[str]] = {}
     for tag in consistent:
         values = sorted(
-            {str(record.get("incar_tags", {}).get(tag, "<MISSING>")) for record in records}
+            {
+                str(
+                    record.get("effective_required_settings", {}).get(
+                        tag, "<MISSING>"
+                    )
+                )
+                for record in records
+            }
         )
         unique_values[tag] = values
         if len(values) > 1:
@@ -235,7 +249,8 @@ def audit_vasp_reference_records(
         "status": "FAILED" if problems else "OK",
         "records": len(records),
         "consistent_incar_tags": consistent,
-        "incar_tag_values": unique_values,
+        "incar_tag_values": incar_tag_values,
+        "effective_setting_values": unique_values,
         "exact_incar_files_identical": len(incar_hashes) == 1,
         "unique_incar_sha256": incar_hashes,
         "differing_incar_tags": differing_incar_tags,
@@ -284,14 +299,22 @@ def write_vasp_reference_provenance(
     csv_rows = []
     for record in records:
         tags = record.get("incar_tags", {})
+        executed = record.get("outcar_executed_tags", {})
+        effective = record.get("effective_required_settings", {})
         hashes = record.get("file_sha256", {})
         csv_rows.append(
             {
                 "staged_leaf": record["staged_leaf"],
                 "source_outcar": record["source_outcar"],
-                "ENCUT": tags.get("ENCUT", ""),
-                "IVDW": tags.get("IVDW", ""),
-                "POTIM": tags.get("POTIM", ""),
+                "ENCUT": effective.get("ENCUT", ""),
+                "IVDW": effective.get("IVDW", ""),
+                "POTIM": effective.get("POTIM", ""),
+                "incar_ENCUT": tags.get("ENCUT", ""),
+                "incar_IVDW": tags.get("IVDW", ""),
+                "incar_POTIM": tags.get("POTIM", ""),
+                "outcar_ENCUT": executed.get("ENCUT", ""),
+                "outcar_IVDW": executed.get("IVDW", ""),
+                "outcar_POTIM": executed.get("POTIM", ""),
                 "vasp_version": record.get("vasp_version", ""),
                 "nkpts": record.get("nkpts", ""),
                 "ionic_frames_detected": record.get("ionic_frames_detected", 0),
@@ -300,9 +323,7 @@ def write_vasp_reference_provenance(
                 "kpoints_sha256": hashes.get("KPOINTS", ""),
                 "potcar_sha256": hashes.get("POTCAR", ""),
                 "potcar_titles": " | ".join(record.get("potcar_titles", [])),
-                "missing_required_tags": ",".join(
-                    record.get("missing_required_incar_tags", [])
-                ),
+                "missing_required_tags": ",".join(record.get("missing_required_settings", [])),
             }
         )
     with csv_path.open("w", newline="", encoding="utf-8") as handle:

@@ -118,11 +118,31 @@ class MappedCollectionTests(unittest.TestCase):
             with patch.dict(os.environ, {"TEST_CAMPAIGN_ROOT": str(campaign)}):
                 config = load_mapped_config(config_path)
                 leaves = discover_mapped_leaves(config)
-                with self.assertRaisesRegex(Exception, "inconsistent ENCUT"):
+                with self.assertRaisesRegex(Exception, "INCAR/OUTCAR mismatch for ENCUT"):
                     stage_mapped_leaves(config, leaves)
 
             audit = campaign / "reference_runs/reference_provenance_audit.json"
             self.assertTrue(audit.is_file())
+
+    def test_outcar_echo_recovers_setting_missing_from_saved_incar(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = root / "campaign"
+            config_path = self._fixture(root)
+            second = root / "source/N_Term/x0.5/INCAR"
+            second.write_text(
+                "ENCUT = 520\nPOTIM = 1.0\nTEBEG = 300\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"TEST_CAMPAIGN_ROOT": str(campaign)}):
+                config = load_mapped_config(config_path)
+                leaves = discover_mapped_leaves(config)
+                result = stage_mapped_leaves(config, leaves)
+
+            self.assertEqual(result["provenance"]["status"], "OK")
+            self.assertEqual(
+                result["provenance"]["effective_setting_values"]["IVDW"], ["12"]
+            )
 
 
 class LeafAuditTests(unittest.TestCase):
