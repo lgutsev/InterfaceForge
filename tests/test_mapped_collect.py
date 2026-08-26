@@ -141,7 +141,36 @@ class LeafAuditTests(unittest.TestCase):
             report = audit_leaf_manifests(mace, deepmd)
 
             self.assertEqual(report["status"], "FAILED")
-            self.assertIn("split mismatch", report["problems"][0]["issues"][0])
+            self.assertTrue(any("missing" in issue for problem in report["problems"] for issue in problem["issues"]))
+
+
+    def test_same_leaf_can_appear_in_every_synchronized_split(self) -> None:
+        rows = [
+            {
+                "relative_leaf": "interface/300K/Real/N_Term/a",
+                "split": split,
+                "frames": frames,
+                "status": "OK",
+                "detail": "",
+            }
+            for split, frames in (("train", 80), ("valid", 10), ("test", 10))
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mace = root / "mace.csv"
+            deepmd = root / "deepmd.csv"
+            self._manifest(mace, rows)
+            self._manifest(deepmd, rows)
+
+            report = audit_leaf_manifests(mace, deepmd)
+
+            self.assertEqual(report["status"], "OK")
+            self.assertEqual(report["leaves"], 1)
+            self.assertEqual(report["split_leaves"], {"train": 1, "valid": 1, "test": 1})
+            self.assertEqual(
+                report["split_frames"],
+                {"train": 80, "valid": 10, "test": 10},
+            )
 
 
 if __name__ == "__main__":
