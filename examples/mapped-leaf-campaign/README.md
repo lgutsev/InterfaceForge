@@ -41,6 +41,13 @@ launch_scripts/prepare_periodic_nitride_mlips.sh \
 ```
 
 
+## LONI batch-launcher convention
+
+Do not set `#SBATCH --mem` or pass `--mem` in InterfaceForge launchers intended
+for LONI. Select the appropriate partition and task/CPU count, and allow LONI to
+supply the node memory according to its site policy. Its Lua submission wrapper
+may warn that manual `--mem` requests are unsupported.
+
 ## Choosing the split policy
 
 The split policy is a scientific choice and must be set deliberately in
