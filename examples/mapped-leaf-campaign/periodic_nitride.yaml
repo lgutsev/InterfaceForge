@@ -38,6 +38,9 @@ sources:
     target: bulk/TiO-Bulk-Ideal_450K
 
 collection:
+  # Every trajectory contributes frames to train, validation, and test. This
+  # maximizes chemistry/temperature/termination variety in the training set.
+  split_mode: random-frame
   heritage_depth: 2
   ratios: [0.8, 0.1, 0.1]
   seed: 20260730
