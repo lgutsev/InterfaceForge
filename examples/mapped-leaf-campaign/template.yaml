@@ -14,6 +14,9 @@ sources:
     target: bulk/material/300K
 
 collection:
+  # heritage: whole parent-lineage groups remain in one split.
+  # random-frame: every leaf is deterministically stratified across all splits.
+  split_mode: heritage
   heritage_depth: 2
   ratios: [0.8, 0.1, 0.1]
   seed: 20260730
