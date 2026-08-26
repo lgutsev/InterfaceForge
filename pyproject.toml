@@ -57,6 +57,10 @@ all = [
 iface = "interfaceforge.cli:main"
 iface-mace-roi = "interfaceforge.mace_roi:main"
 iface-allegro = "interfaceforge.allegro:main"
+iface-mace-leaf-collect = "interfaceforge.leaf_collect:main_mace"
+iface-deepmd-leaf-collect = "interfaceforge.leaf_collect:main_deepmd"
+iface-leaf-audit = "interfaceforge.leaf_audit:main"
+iface-mapped-collect = "interfaceforge.mapped_collect:main"
 
 [project.urls]
 Homepage = "https://github.com/lgutsev/InterfaceForge"

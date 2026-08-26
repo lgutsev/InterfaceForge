@@ -103,6 +103,18 @@ iface train deepmd
 iface validate stratified predictions.csv results.csv  # per-class errors, see docs/stratified-validation.md
 ```
 
+When reference trajectories live under several unrelated roots, use a mapped leaf
+campaign to create synchronized MACE and DeePMD datasets plus a visual cross-audit:
+
+```bash
+iface-mapped-collect examples/mapped-leaf-campaign/template.yaml          # dry-run
+iface-mapped-collect examples/mapped-leaf-campaign/template.yaml --execute --collect
+```
+
+The periodic SiN/TiN/TiO example is available as
+`launch_scripts/prepare_periodic_nitride_mlips.sh`. See the
+[mapped leaf-campaign guide](examples/mapped-leaf-campaign/README.md).
+
 Collect a completed four-member MACE committee into a compact, immutable bundle
 before deployment or active learning:
 

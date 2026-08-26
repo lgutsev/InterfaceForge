@@ -1,0 +1,27 @@
+schema_version: 1
+
+campaign_root: ${MLIP_CAMPAIGN_ROOT}
+staging_root: reference_runs
+initialize_campaign: true
+include_files: [OUTCAR, INCAR, POSCAR, CONTCAR]
+
+# Each source may be anywhere on the same filesystem. Its target is the logical
+# path retained below reference_runs and in collector provenance.
+sources:
+  - source: /absolute/path/to/interface/300K
+    target: interface/300K
+  - source: /absolute/path/to/bulk/300K
+    target: bulk/material/300K
+
+collection:
+  heritage_depth: 2
+  ratios: [0.8, 0.1, 0.1]
+  seed: 20260730
+  stride: 5
+  include_virial: false
+  type_map: [ELEMENT_A, ELEMENT_B]
+  mace_output: datasets/canonical
+  deepmd_output: datasets/canonical/deepmd
+
+audit:
+  output: audit/leaf_datasets

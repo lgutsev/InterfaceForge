@@ -1,0 +1,51 @@
+schema_version: 1
+
+# Override this location without editing the template:
+#   export CER_INTERFACE_BASE=/new/path/Cer_Interface
+campaign_root: ${CER_INTERFACE_BASE}/MD_Period/Periodic_MLIPs
+staging_root: reference_runs
+initialize_campaign: true
+
+# Only files required by the collectors and constraint provenance are staged.
+# They are hard-linked, so the large OUTCARs are not duplicated.
+include_files: [OUTCAR, INCAR, POSCAR, CONTCAR]
+
+sources:
+  - source: ${CER_INTERFACE_BASE}/MD_Period/Step2_300K/Real
+    target: interface/300K/Real
+  - source: ${CER_INTERFACE_BASE}/MD_Period/Step2_450K/Real
+    target: interface/450K/Real
+  - source: ${CER_INTERFACE_BASE}/MD_Period/Step2_300K/Ideal
+    target: interface/300K/Ideal
+  - source: ${CER_INTERFACE_BASE}/MD_Period/Step2_450K/Ideal
+    target: interface/450K/Ideal
+
+  - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/SiN-Bulk_300K
+    target: bulk/SiN-Bulk_300K
+  - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/SiN-Bulk_450K
+    target: bulk/SiN-Bulk_450K
+  - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/TiN-Bulk_300K
+    target: bulk/TiN-Bulk_300K
+  - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/TiN-Bulk_450K
+    target: bulk/TiN-Bulk_450K
+  - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/TiO-Bulk-Real_300K
+    target: bulk/TiO-Bulk-Real_300K
+  - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/TiO-Bulk-Real_450K
+    target: bulk/TiO-Bulk-Real_450K
+  - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/TiO-Bulk-Ideal_300K
+    target: bulk/TiO-Bulk-Ideal_300K
+  - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/TiO-Bulk-Ideal_450K
+    target: bulk/TiO-Bulk-Ideal_450K
+
+collection:
+  heritage_depth: 2
+  ratios: [0.8, 0.1, 0.1]
+  seed: 20260730
+  stride: 5
+  include_virial: true
+  type_map: [Si, N, Ti, O]
+  mace_output: datasets/canonical
+  deepmd_output: datasets/canonical/deepmd
+
+audit:
+  output: audit/leaf_datasets

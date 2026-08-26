@@ -187,3 +187,32 @@ The collectors also write `leaf_manifest.csv` and `leaf_manifest.json`, recordin
 source leaf, ancestry/group identity, assigned split, frame count, output path, and
 any failed leaf conversions. Backup-containing paths and directories beginning with
 `X` are ignored.
+
+## Combine several source trees into synchronized datasets
+
+Use `iface-mapped-collect` when the VASP leaves are distributed across separate
+temperature, termination, interface, and bulk roots. A YAML file maps each physical
+source tree into one clean logical staging hierarchy. Only selected direct VASP files
+are hard-linked into the staged leaves, so large `OUTCAR` files are not duplicated and
+restart/archive daughter directories cannot make a valid calculation non-terminal.
+
+```bash
+iface-mapped-collect examples/mapped-leaf-campaign/template.yaml
+iface-mapped-collect examples/mapped-leaf-campaign/template.yaml --execute --collect
+```
+
+The first command is a non-mutating dry run. `--execute --collect` writes both the
+MACE extxyz and DeePMD NPY representations using the same heritage grouping, ratios,
+seed, stride, and virial policy. It then cross-checks their leaf membership, split
+assignment, frame counts, and conversion status, writing JSON, CSV, Markdown, and a
+self-contained SVG distribution dashboard.
+
+The checked-in periodic SiN/TiN/TiO custom job supplies the exact LA Tech mapping:
+
+```bash
+launch_scripts/prepare_periodic_nitride_mlips.sh
+launch_scripts/prepare_periodic_nitride_mlips.sh --execute --collect
+```
+
+See [`examples/mapped-leaf-campaign/README.md`](../examples/mapped-leaf-campaign/README.md)
+for output locations, path overrides, and instructions for copying the generic template.

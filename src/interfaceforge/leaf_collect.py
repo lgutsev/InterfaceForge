@@ -636,5 +636,15 @@ def main(argv: Sequence[str] | None = None, *, default_engine: str | None = None
     return 1 if payload.get("failed_leaves", 0) else 0
 
 
+def main_mace(argv: Sequence[str] | None = None) -> int:
+    """Installed entry point for the MACE leaf collector."""
+    return main(argv, default_engine="mace")
+
+
+def main_deepmd(argv: Sequence[str] | None = None) -> int:
+    """Installed entry point for the DeePMD leaf collector."""
+    return main(argv, default_engine="deepmd")
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
