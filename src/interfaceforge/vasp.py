@@ -201,8 +201,17 @@ def apply_incar_preset(
     }
 
 
-def stage_tags(stage: str, *, temperature: float, nsw: int, potim: float) -> tuple[dict[str, Any], set[str]]:
-    """Return conservative VASP MLFF tags for one stage."""
+def stage_tags(
+    stage: str, *, temperature: float, nsw: int, potim: float, teend: float | None = None
+) -> tuple[dict[str, Any], set[str]]:
+    """Return conservative VASP MLFF tags for one stage.
+
+    ``teend`` optionally sets a training temperature ramp (``TEBEG=temperature``,
+    ``TEEND=teend``) instead of a single fixed temperature; VASP's MLFF
+    best-practices guidance suggests training somewhat above the highest
+    application temperature for coverage. Ignored for stages other than
+    "train"; when omitted, TEBEG=TEEND=temperature as before.
+    """
 
     common = {
         "ML_LMLFF": ".TRUE.",
@@ -220,7 +229,7 @@ def stage_tags(stage: str, *, temperature: float, nsw: int, potim: float) -> tup
                 "MDALGO": "2",
                 "SMASS": "1.0",
                 "TEBEG": temperature,
-                "TEEND": temperature,
+                "TEEND": teend if teend is not None else temperature,
                 "ISIF": "2",
             },
             {"ML_ISTART", "ML_ESTBLOCK"},
@@ -370,7 +379,7 @@ def prepare_recovery(
 
     run = Path(folder).resolve()
     require_files(run, ("INCAR", "POTCAR", "KPOINTS"))
-    if operation not in {"continue", "discard", "expand", "refit", "stability"}:
+    if operation not in {"continue", "discard", "expand", "refit", "stability", "heat"}:
         raise ValueError(f"Unknown recovery operation: {operation}")
     if increase_eps_low and operation != "discard":
         raise SafetyError("ML_EPS_LOW adjustment is supported only with discard recovery")
@@ -464,6 +473,11 @@ def prepare_recovery(
             nsw=selected_nsw,
             potim=selected_potim,
         )
+        if operation == "heat":
+            # Green-Kubo heat-flux production: identical validated settings
+            # as "stability", plus ML_LHEAT to write ML_HEAT for
+            # postprocessing. See https://vasp.at/wiki/ML_LHEAT
+            changes["ML_LHEAT"] = ".TRUE."
     changes["ISTART"] = 0
     delete.add("ICHARG")
     update_incar(run / "INCAR", changes, delete=delete)

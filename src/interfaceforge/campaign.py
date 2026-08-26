@@ -139,8 +139,10 @@ def prepare_campaign(campaign: Campaign, *, force: bool = False) -> dict[str, An
             )
             nsw = int(settings.get("nsw", 3000))
             potim = float(settings.get("potim", 1.0))
+            teend_setting = settings.get("teend")
+            teend = float(teend_setting) if teend_setting is not None else None
             changes, delete = stage_tags(
-                stage, temperature=temperature, nsw=nsw, potim=potim
+                stage, temperature=temperature, nsw=nsw, potim=potim, teend=teend
             )
             if accuracy_profile:
                 changes.update(

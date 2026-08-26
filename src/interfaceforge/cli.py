@@ -41,6 +41,12 @@ from .geometry import (
 )
 from .intermat import generate_intermat_interfaces, intermat_status
 from .mace_roi import evaluate_mace_roi_predictions, prepare_mace_roi_dataset
+from .mlff_interfaces import (
+    discover_mlff_interface_sources,
+    generate_mlff_interfaces_campaign,
+    mass_audit_mlff_interfaces,
+    write_throttled_array_launcher,
+)
 from .regfgw import compare_registry_selection, regfgw_status, run_regfgw_optimize
 from .report import build_report
 from .selection import select_from_csv
@@ -647,6 +653,50 @@ def cmd_regfgw(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mlff_interfaces(args: argparse.Namespace) -> int:
+    if args.mlff_interfaces_command == "discover":
+        payload = discover_mlff_interface_sources(
+            args.source_root,
+            args.output_manifest,
+            families=tuple(args.families),
+            terms=tuple(args.terms),
+            x_values=tuple(args.x_values),
+            structure_name=args.structure_name,
+        )
+    elif args.mlff_interfaces_command == "build":
+        payload = generate_mlff_interfaces_campaign(
+            args.manifest,
+            args.campaign_root,
+            profile_path=args.profile,
+            profile_name=args.profile_name,
+            encut=args.encut,
+            ivdw=args.ivdw,
+            tebeg=args.tebeg,
+            teend=args.teend,
+            train_nsw=args.train_nsw,
+            refit_nsw=args.refit_nsw,
+            stability_nsw=args.stability_nsw,
+            potim=args.potim,
+            kpoints_source=args.kpoints,
+            force=args.force,
+        )
+    elif args.mlff_interfaces_command == "array-launch":
+        payload = write_throttled_array_launcher(
+            load_campaign(args.campaign),
+            stage=args.stage,
+            concurrency=args.concurrency,
+            array_profile_name=args.array_profile_name,
+            output=args.output,
+            force=args.force,
+        )
+    else:
+        payload = mass_audit_mlff_interfaces(
+            load_campaign(args.campaign), readiness_profile=args.readiness_profile
+        )
+    _json(payload)
+    return 0
+
+
 def add_campaign_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-c", "--campaign", default="campaign.yaml")
 
@@ -981,15 +1031,71 @@ def build_parser() -> argparse.ArgumentParser:
     )
     regfgw_compare.set_defaults(func=cmd_regfgw)
 
+    mlff_interfaces = commands.add_parser(
+        "mlff-interfaces",
+        help="Bulk MLFF training campaign for a family x termination x composition grid",
+    )
+    mlff_interfaces_commands = mlff_interfaces.add_subparsers(
+        dest="mlff_interfaces_command", required=True
+    )
+    mi_discover = mlff_interfaces_commands.add_parser(
+        "discover", help="Best-effort discovery of one structure per grid cell; review before build"
+    )
+    mi_discover.add_argument("source_root")
+    mi_discover.add_argument("output_manifest")
+    mi_discover.add_argument("--families", nargs="+", default=["Real", "Ideal"])
+    mi_discover.add_argument("--terms", nargs="+", default=["N_Term", "Ti_Term"])
+    mi_discover.add_argument(
+        "--x-values", nargs="+", type=float, default=[0.0, 0.25, 0.5, 0.75, 1.0]
+    )
+    mi_discover.add_argument("--structure-name", default="CONTCAR")
+    mi_discover.set_defaults(func=cmd_mlff_interfaces)
+    mi_build = mlff_interfaces_commands.add_parser(
+        "build", help="Generate campaign.yaml from a reviewed (fully 'matched') manifest"
+    )
+    mi_build.add_argument("manifest")
+    mi_build.add_argument("campaign_root")
+    mi_build.add_argument("--profile", required=True, help="Scheduler profile YAML path")
+    mi_build.add_argument("--profile-name", default="vasp_train")
+    mi_build.add_argument("--encut", type=float, default=520.0)
+    mi_build.add_argument("--ivdw", type=int, default=11)
+    mi_build.add_argument("--tebeg", type=float, default=300.0)
+    mi_build.add_argument("--teend", type=float, default=600.0)
+    mi_build.add_argument("--train-nsw", type=int, default=100000)
+    mi_build.add_argument("--refit-nsw", type=int, default=0)
+    mi_build.add_argument("--stability-nsw", type=int, default=20000)
+    mi_build.add_argument("--potim", type=float, default=1.0)
+    mi_build.add_argument("--kpoints", help="Shared reference KPOINTS (default: Gamma-only)")
+    mi_build.add_argument("--force", action="store_true")
+    mi_build.set_defaults(func=cmd_mlff_interfaces)
+    mi_array = mlff_interfaces_commands.add_parser(
+        "array-launch", help="Write one throttled Slurm array job over every prepared leaf"
+    )
+    add_campaign_option(mi_array)
+    mi_array.add_argument("--stage", default="train")
+    mi_array.add_argument("--concurrency", type=int, default=4)
+    mi_array.add_argument("--array-profile-name", default="vasp_train_array")
+    mi_array.add_argument("--output")
+    mi_array.add_argument("--force", action="store_true")
+    mi_array.set_defaults(func=cmd_mlff_interfaces)
+    mi_audit = mlff_interfaces_commands.add_parser(
+        "audit", help="Audit the grid and roll it up by family/term/x instead of a flat run list"
+    )
+    add_campaign_option(mi_audit)
+    mi_audit.add_argument("--readiness-profile", default="general", choices=READINESS_PROFILES)
+    mi_audit.set_defaults(func=cmd_mlff_interfaces)
+
     vasp = commands.add_parser("vasp", help="Safe VASP utilities")
     vasp_commands = vasp.add_subparsers(dest="vasp_command", required=True)
     recover = vasp_commands.add_parser(
         "ml-recover",
         aliases=["recover"],
-        help="Continue/refit/stability/capacity recovery for VASP MLFF",
+        help="Continue/refit/stability/heat/capacity recovery for VASP MLFF",
     )
     recover.add_argument(
-        "operation", choices=("continue", "discard", "expand", "refit", "stability")
+        "operation",
+        choices=("continue", "discard", "expand", "refit", "stability", "heat"),
+        help="'heat' promotes ML_FFN and sets ML_LHEAT=.TRUE. for Green-Kubo heat-flux production",
     )
     recover.add_argument("folder")
     recover.add_argument("--temperature", type=float)

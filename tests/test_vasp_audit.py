@@ -21,6 +21,7 @@ from interfaceforge.vasp import (
     parse_incar,
     prepare_recovery,
     resolve_launcher,
+    stage_tags,
     submit_run,
     update_incar,
 )
@@ -222,6 +223,53 @@ class VaspTests(unittest.TestCase):
             self.assertEqual(output.parent, root)
             self.assertRegex(output.name, r"^MLFF_Models_.+_\d{8}T\d{6}Z\.zip$")
             self.assertTrue(output.is_file())
+
+    def test_heat_recovery_sets_ml_lheat_and_promotes_ml_ffn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text("ML_MODE=refit\nNSW=0\nTEBEG=300\n", encoding="utf-8")
+            (run / "POTCAR").write_text("licensed\n", encoding="utf-8")
+            (run / "KPOINTS").write_text("Automatic\n0\nGamma\n1 1 1\n", encoding="utf-8")
+            (run / "CONTCAR").write_text("validated geometry\n", encoding="utf-8")
+            (run / "ML_FFN").write_text("header ML_LFAST = T stuff\n", encoding="utf-8")
+            (run / "OUTCAR").write_text(
+                "General timing and accounting informations for this job\n", encoding="utf-8"
+            )
+
+            result = prepare_recovery(run, "heat", temperature=450, nsw=200000)
+
+            self.assertEqual(result["operation"], "heat")
+            parsed = parse_incar(run / "INCAR")
+            self.assertEqual(parsed["ML_LHEAT"], ".TRUE.")
+            self.assertEqual(parsed["ML_MODE"], "run")
+            self.assertEqual(parsed["TEBEG"], "450.0")
+            self.assertEqual(parsed["TEEND"], "450.0")
+            self.assertTrue((run / "ML_FF").is_file())
+            self.assertEqual(
+                (run / "ML_FF").read_text(encoding="utf-8"), (run / "ML_FFN").read_text(encoding="utf-8")
+            )
+
+    def test_heat_recovery_still_rejects_ml_ffn_without_lfast(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "INCAR").write_text("ML_MODE=refit\nNSW=0\n", encoding="utf-8")
+            (run / "POTCAR").write_text("licensed\n", encoding="utf-8")
+            (run / "KPOINTS").write_text("Automatic\n0\nGamma\n1 1 1\n", encoding="utf-8")
+            (run / "CONTCAR").write_text("validated geometry\n", encoding="utf-8")
+            (run / "ML_FFN").write_text("no fast flag here\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(SafetyError, "ML_LFAST"):
+                prepare_recovery(run, "heat")
+
+    def test_stage_tags_train_supports_temperature_ramp(self) -> None:
+        changes, _ = stage_tags("train", temperature=300, nsw=100000, potim=1.0, teend=600)
+        self.assertEqual(changes["TEBEG"], 300)
+        self.assertEqual(changes["TEEND"], 600)
+
+    def test_stage_tags_train_without_teend_keeps_single_temperature(self) -> None:
+        changes, _ = stage_tags("train", temperature=300, nsw=100000, potim=1.0)
+        self.assertEqual(changes["TEBEG"], 300)
+        self.assertEqual(changes["TEEND"], 300)
 
     def test_continue_recovery_does_not_self_copy_only_ml_ab(self) -> None:
         # When ML_ABN is absent/empty, _continue_source() falls back to

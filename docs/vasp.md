@@ -79,6 +79,9 @@ aliases.
 - `expand`: continue after a recognized `ML_MB`/`ML_MCONF` capacity stop.
 - `refit`: produce a fast potential from the accumulated database.
 - `stability`: promote a verified `ML_FFN` to `ML_FF` and run prediction MD.
+- `heat`: same as `stability`, plus `ML_LHEAT=.TRUE.` for Green-Kubo
+  thermal-conductivity heat-flux production (writes `ML_HEAT`). See
+  [docs/mlff-interfaces.md](mlff-interfaces.md#5-ml_lheat-production-try-it-out).
 
 Every operation snapshots recoverable run files under
 `.interfaceforge/archive/` before mutation. A stability run rejects an
