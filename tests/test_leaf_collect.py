@@ -12,6 +12,7 @@ from interfaceforge.leaf_collect import (
     LeafSource,
     _write_deepmd_system,
     assign_heritage_groups,
+    assign_random_frame_splits,
     discover_leaf_outcars,
 )
 
@@ -85,6 +86,52 @@ class HeritageSplitTests(unittest.TestCase):
                 seen.setdefault(source.heritage_key, set()).add(assignment[source.outcar])
             self.assertTrue(all(len(splits) == 1 for splits in seen.values()))
             self.assertEqual(set(assignment.values()), {"train", "valid", "test"})
+
+
+
+class RandomFrameSplitTests(unittest.TestCase):
+    def test_every_leaf_is_deterministically_stratified(self) -> None:
+        frames = [
+            LeafFrame(
+                source_index=index,
+                atoms=None,
+                energy=float(index),
+                forces=np.empty((0, 3)),
+                move_mask=np.empty(0, dtype=np.int8),
+                virial=None,
+            )
+            for index in range(10)
+        ]
+
+        first = assign_random_frame_splits(
+            frames, (0.8, 0.1, 0.1), seed=17, leaf_key="interface/A"
+        )
+        second = assign_random_frame_splits(
+            frames, (0.8, 0.1, 0.1), seed=17, leaf_key="interface/A"
+        )
+
+        self.assertEqual(
+            {name: len(items) for name, items in first.items()},
+            {"train": 8, "valid": 1, "test": 1},
+        )
+        self.assertEqual(
+            {
+                name: [frame.source_index for frame in items]
+                for name, items in first.items()
+            },
+            {
+                name: [frame.source_index for frame in items]
+                for name, items in second.items()
+            },
+        )
+        self.assertEqual(
+            sorted(
+                frame.source_index
+                for items in first.values()
+                for frame in items
+            ),
+            list(range(10)),
+        )
 
 
 class _Cell:
