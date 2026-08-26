@@ -26,10 +26,22 @@ token matching against each candidate's path — `real`/`ideal`,
 `n_term`/`nterm`/`n-term` (and the `ti_term` equivalents), and any numeric
 directory token equal to that cell's `x` (so `x1`, `x1.0`, and `x=1.00` all
 match `x=1.0`; `x=0` cannot accidentally match inside `x=0.25` — both were
-real bugs caught while building this). **Never guesses past reporting**:
+real bugs caught while building this). Also handles the real observed
+LONI convention directly: the `x=0` (oxygen-free) baseline carries **no**
+numeric suffix at all (`SiN_TiN_N-term`), unlike the oxygen-substituted
+cells (`SiN_TiN_N-term_O_x0.25`) — a bare leaf under a matching family/term
+is treated as `x=0` only when nothing else there carries any x-like
+numeric token, so it can't accidentally swallow an unrelated file.
+`N_Term`/`Ti_Term` may each use a different separator style in their own
+leaf names (`SiN_TiN_N-term` vs `SiN-TiN-Ti-term`) without needing separate
+configuration — matching keys off the `N_Term`/`Ti_Term` *parent* directory,
+not the leaf's own naming. **Never guesses past reporting**:
 `manifest.csv`'s `match_status` per row is `matched`, `missing`, or
 `ambiguous` (candidates listed) — review and hand-fix `structure_path`
 before the next step, which refuses to proceed on anything not `matched`.
+Point `source_root` at the temperature-specific folder itself (e.g.
+`Step2_300K/`, not its `MD_Period` parent) so a temperature like `300` in
+an ancestor directory name can't be mistaken for an `x` value.
 
 ## 2. Build the campaign
 

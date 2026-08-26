@@ -103,6 +103,51 @@ class DiscoverySourcesTests(unittest.TestCase):
             self.assertEqual(by_x["1"]["match_status"], "matched")
             self.assertNotEqual(by_x["0"]["structure_path"], by_x["1"]["structure_path"])
 
+    def test_matches_real_step2_naming_with_bare_x0_and_mixed_separators(self) -> None:
+        # The actual observed LONI layout: x=0 (oxygen-free) has no numeric
+        # suffix at all ("SiN_TiN_N-term"), oxygen-substituted cells use
+        # "..._O_x<value>", N_Term uses underscores and Ti_Term uses hyphens
+        # in the leaf name, and the trailing-zero style differs (x1.00 vs
+        # x1.0) between the two terms.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Step2_300K"
+            leaves = {
+                "N_Term": [
+                    "SiN_TiN_N-term",
+                    "SiN_TiN_N-term_O_x1.00",
+                    "SiN_TiN_N-term_O_x0.75",
+                    "SiN_TiN_N-term_O_x0.25",
+                    "SiN_TiN_N-term_O_x0.5",
+                ],
+                "Ti_Term": [
+                    "SiN-TiN-Ti-term",
+                    "SiN-TiN-Ti-term_O_x0.25",
+                    "SiN-TiN-Ti-term_O_x1.0",
+                    "SiN-TiN-Ti-term_O_x0.5",
+                    "SiN-TiN-Ti-term_O_x0.75",
+                ],
+            }
+            for term, names in leaves.items():
+                for name in names:
+                    directory = source / "Real" / term / name
+                    directory.mkdir(parents=True)
+                    (directory / "CONTCAR").write_text("dummy\n", encoding="utf-8")
+            (source / "Real" / "Ti_Term" / "runvasp.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+
+            result = discover_mlff_interface_sources(
+                source, root / "manifest.csv", families=("Real",)
+            )
+
+            self.assertEqual(result["status_counts"], {"matched": 10})
+            by_key = {(row["term"], row["x"]): row for row in result["rows"]}
+            self.assertEqual(
+                Path(by_key[("N_Term", "0")]["structure_path"]).parent.name, "SiN_TiN_N-term"
+            )
+            self.assertEqual(
+                Path(by_key[("Ti_Term", "0")]["structure_path"]).parent.name, "SiN-TiN-Ti-term"
+            )
+
     def test_missing_cell_is_reported_not_silently_dropped(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

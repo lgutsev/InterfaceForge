@@ -112,7 +112,15 @@ def discover_mlff_interface_sources(
                     )
                     if not term_hit:
                         continue
-                    if not any(math.isclose(candidate, x, abs_tol=1e-6) for candidate in _path_x_values(text)):
+                    path_x_values = _path_x_values(text)
+                    is_x_match = any(math.isclose(candidate, x, abs_tol=1e-6) for candidate in path_x_values)
+                    # A real observed convention: the x=0 (oxygen-free) baseline
+                    # carries no numeric suffix at all (e.g. "SiN_TiN_N-term"),
+                    # unlike the oxygen-substituted cells ("..._O_x0.25"). When
+                    # x==0 and nothing else under this family/term has *any*
+                    # x-like numeric token, treat the bare leaf as the match.
+                    is_bare_zero = x == 0.0 and not path_x_values
+                    if not (is_x_match or is_bare_zero):
                         continue
                     matches.append(path)
                 if len(matches) == 1:
