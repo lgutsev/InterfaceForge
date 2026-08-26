@@ -21,10 +21,23 @@ from interfaceforge.mapped_collect import (
 class MappedCollectionTests(unittest.TestCase):
     def _fixture(self, root: Path) -> Path:
         source = root / "source"
+        source.mkdir()
+        (source / "KPOINTS").write_text(
+            "Gamma\n0\nGamma\n1 1 1\n0 0 0\n", encoding="utf-8"
+        )
+        (source / "POTCAR").write_text("licensed local fixture\n", encoding="utf-8")
         for leaf in (source / "N_Term" / "x0.0", source / "N_Term" / "x0.5"):
             leaf.mkdir(parents=True)
-            (leaf / "OUTCAR").write_text("vasp output\n", encoding="utf-8")
-            (leaf / "INCAR").write_text("TEBEG = 300\n", encoding="utf-8")
+            (leaf / "OUTCAR").write_text(
+                "vasp.6.5.1\n TITEL = PAW_PBE Si\n NKPTS = 1\n"
+                " ENCUT = 520.000; IVDW = 12; POTIM = 1.000\n"
+                " POSITION                                       TOTAL-FORCE\n",
+                encoding="utf-8",
+            )
+            (leaf / "INCAR").write_text(
+                "ENCUT = 520\nIVDW = 12\nPOTIM = 1.0\nTEBEG = 300\n",
+                encoding="utf-8",
+            )
             # A daughter archive must not be reproduced in the clean staging tree.
             archive = leaf / "restart_archive_1"
             archive.mkdir()
@@ -72,6 +85,44 @@ class MappedCollectionTests(unittest.TestCase):
             self.assertEqual(len(outcars), 2)
             self.assertFalse(any("archive" in str(path) for path in outcars))
             self.assertTrue(os.path.samefile(outcars[0], leaves[0]["source_outcar"]))
+            self.assertEqual(payload["provenance"]["status"], "OK")
+            self.assertEqual(
+                payload["provenance"]["outcar_echo_coverage"],
+                {"ENCUT": 2, "IVDW": 2, "POTIM": 2},
+            )
+            self.assertEqual(payload["balanced_frames_per_leaf"], 1)
+            self.assertEqual(
+                payload["provenance"]["file_hash_coverage"]["KPOINTS"], 2
+            )
+            self.assertEqual(
+                payload["provenance"]["file_hash_coverage"]["POTCAR"], 2
+            )
+            self.assertTrue(
+                (campaign / "reference_runs/reference_provenance.json").is_file()
+            )
+            self.assertEqual(len(list(staged.rglob("KPOINTS"))), 2)
+            self.assertTrue(
+                (campaign / "reference_runs/reference_provenance.csv").is_file()
+            )
+
+    def test_staging_rejects_inconsistent_label_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = root / "campaign"
+            config_path = self._fixture(root)
+            second = root / "source/N_Term/x0.5/INCAR"
+            second.write_text(
+                "ENCUT = 400\nIVDW = 12\nPOTIM = 1.0\nTEBEG = 300\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"TEST_CAMPAIGN_ROOT": str(campaign)}):
+                config = load_mapped_config(config_path)
+                leaves = discover_mapped_leaves(config)
+                with self.assertRaisesRegex(Exception, "inconsistent ENCUT"):
+                    stage_mapped_leaves(config, leaves)
+
+            audit = campaign / "reference_runs/reference_provenance_audit.json"
+            self.assertTrue(audit.is_file())
 
 
 class LeafAuditTests(unittest.TestCase):

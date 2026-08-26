@@ -17,8 +17,14 @@ import yaml
 from .errors import ConfigurationError, SafetyError
 from .leaf_audit import audit_leaf_manifests, write_leaf_audit
 from .leaf_collect import collect_leaf_dataset
+from .vasp_provenance import (
+    DEFAULT_REQUIRED_INCAR_TAGS,
+    audit_vasp_reference_records,
+    build_vasp_reference_record,
+    write_vasp_reference_provenance,
+)
 
-DEFAULT_FILES = ("OUTCAR", "INCAR", "POSCAR", "CONTCAR")
+DEFAULT_FILES = ("OUTCAR", "INCAR", "POSCAR", "CONTCAR", "KPOINTS")
 
 
 @dataclass(frozen=True)
@@ -75,6 +81,25 @@ def load_mapped_config(path: str | Path) -> dict[str, Any]:
     include_files = tuple(str(name) for name in raw.get("include_files", DEFAULT_FILES))
     if "OUTCAR" not in include_files:
         raise ConfigurationError("include_files must contain OUTCAR")
+    provenance = dict(raw.get("provenance") or {})
+    required_incar_tags = [
+        str(tag).upper()
+        for tag in provenance.get("required_incar_tags", DEFAULT_REQUIRED_INCAR_TAGS)
+    ]
+    consistent_incar_tags = [
+        str(tag).upper()
+        for tag in provenance.get("consistent_incar_tags", required_incar_tags)
+    ]
+    if not required_incar_tags:
+        raise ConfigurationError("provenance.required_incar_tags cannot be empty")
+    hash_files = list(
+        dict.fromkeys(
+            str(name)
+            for name in provenance.get(
+                "hash_files", [*include_files, "POTCAR"]
+            )
+        )
+    )
     return {
         "config_path": config_path,
         "campaign_root": campaign_root,
@@ -82,6 +107,11 @@ def load_mapped_config(path: str | Path) -> dict[str, Any]:
         "initialize_campaign": bool(raw.get("initialize_campaign", True)),
         "mappings": mappings,
         "include_files": include_files,
+        "provenance": {
+            "required_incar_tags": required_incar_tags,
+            "consistent_incar_tags": consistent_incar_tags,
+            "hash_files": hash_files,
+        },
         "collection": {
             "ratios": ratios,
             "split_mode": split_mode,
@@ -89,6 +119,9 @@ def load_mapped_config(path: str | Path) -> dict[str, Any]:
             "stride": int(collection.get("stride", 1)),
             "heritage_depth": int(collection.get("heritage_depth", 2)),
             "include_virial": bool(collection.get("include_virial", False)),
+            "balance_frames_per_leaf": bool(
+                collection.get("balance_frames_per_leaf", True)
+            ),
             "type_map": [str(value) for value in collection.get("type_map", [])],
             "mace_output": str(collection.get("mace_output", "datasets/canonical")),
             "deepmd_output": str(collection.get("deepmd_output", "datasets/canonical/deepmd")),
@@ -135,6 +168,7 @@ def discover_mapped_leaves(config: dict[str, Any]) -> list[dict[str, Any]]:
             leaves.append(
                 {
                     "source_leaf": outcar.parent,
+                    "source_root": mapping.source,
                     "source_outcar": outcar,
                     "mapped_prefix": mapping.target,
                     "relative_leaf": relative_leaf,
@@ -148,6 +182,21 @@ def discover_mapped_leaves(config: dict[str, Any]) -> list[dict[str, Any]]:
     if not leaves:
         raise SafetyError("No mapped VASP leaves were discovered")
     return leaves
+
+
+def _resolve_source_file(leaf: dict[str, Any], name: str) -> Path:
+    """Resolve shared VASP inputs without escaping the configured source root."""
+    direct = leaf["source_leaf"] / name
+    if direct.is_file() or name not in {"INCAR", "KPOINTS", "POTCAR"}:
+        return direct
+    source_root: Path = leaf["source_root"]
+    current: Path = leaf["source_leaf"]
+    while current != source_root:
+        current = current.parent
+        candidate = current / name
+        if candidate.is_file():
+            return candidate
+    return direct
 
 
 def _initialize_campaign(root: Path) -> list[str]:
@@ -173,13 +222,20 @@ def _initialize_campaign(root: Path) -> list[str]:
 def stage_mapped_leaves(config: dict[str, Any], leaves: list[dict[str, Any]]) -> dict[str, Any]:
     staging_root: Path = config["staging_root"]
     rows: list[dict[str, Any]] = []
+    provenance_records: list[dict[str, Any]] = []
     linked = skipped = 0
     for leaf in leaves:
         destination: Path = leaf["destination_leaf"]
         destination.mkdir(parents=True, exist_ok=True)
+        resolved_files = {
+            name: _resolve_source_file(leaf, name)
+            for name in dict.fromkeys(
+                [*config["include_files"], *config["provenance"]["hash_files"]]
+            )
+        }
         files = 0
         for name in config["include_files"]:
-            source = leaf["source_leaf"] / name
+            source = resolved_files[name]
             if not source.is_file():
                 continue
             target = destination / name
@@ -211,18 +267,61 @@ def stage_mapped_leaves(config: dict[str, Any], leaves: list[dict[str, Any]]) ->
                 "files_present": files,
             }
         )
+        provenance_records.append(
+            build_vasp_reference_record(
+                source_leaf=leaf["source_leaf"],
+                source_outcar=leaf["source_outcar"],
+                staged_leaf=str(destination.relative_to(staging_root)),
+                included_files=config["provenance"]["hash_files"],
+                file_paths=resolved_files,
+                required_incar_tags=config["provenance"]["required_incar_tags"],
+            )
+        )
     staging_root.mkdir(parents=True, exist_ok=True)
     manifest = staging_root / "mapped_sources.csv"
     with manifest.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+    provenance_audit = audit_vasp_reference_records(
+        provenance_records,
+        consistent_incar_tags=config["provenance"]["consistent_incar_tags"],
+    )
+    provenance_outputs = write_vasp_reference_provenance(
+        provenance_records, provenance_audit, staging_root
+    )
+    if provenance_audit["status"] != "OK":
+        details = "; ".join(
+            issue
+            for problem in provenance_audit["problems"]
+            for issue in problem["issues"]
+        )
+        raise SafetyError(
+            f"VASP reference provenance audit failed: {details}. "
+            f"See {provenance_outputs['audit']}"
+        )
+    stride = config["collection"]["stride"]
+    available_after_stride = [
+        (int(record["ionic_frames_detected"]) + stride - 1) // stride
+        for record in provenance_records
+    ]
+    balanced_frames = min(available_after_stride)
     return {
         "staging_root": str(staging_root),
         "leaves": len(leaves),
         "files_linked": linked,
         "existing_hardlinks": skipped,
         "manifest": str(manifest),
+        "provenance": provenance_audit,
+        "provenance_outputs": provenance_outputs,
+        "available_frames_after_stride": {
+            "minimum": min(available_after_stride),
+            "maximum": max(available_after_stride),
+            "unique": sorted(set(available_after_stride)),
+        },
+        "balanced_frames_per_leaf": (
+            balanced_frames if config["collection"]["balance_frames_per_leaf"] else None
+        ),
     }
 
 
@@ -254,7 +353,9 @@ def run_mapped_collection(
         if not execute:
             raise SafetyError("--audit-only writes reports and therefore requires --execute")
         report = audit_leaf_manifests(
-            mace_output / "leaf_manifest.csv", deepmd_output / "leaf_manifest.csv"
+            mace_output / "leaf_manifest.csv",
+            deepmd_output / "leaf_manifest.csv",
+            reference_audit=config["staging_root"] / "reference_provenance_audit.json",
         )
         report["outputs"] = write_leaf_audit(report, audit_output)
         payload["audit"] = report
@@ -289,6 +390,8 @@ def run_mapped_collection(
         "stride": collection["stride"],
         "include_virial": collection["include_virial"],
         "force": force_datasets,
+        "frames_per_leaf": payload["staging"]["balanced_frames_per_leaf"],
+        "reference_provenance": payload["staging"]["provenance_outputs"]["records"],
     }
     payload["mace"] = collect_leaf_dataset(
         config["staging_root"], mace_output, engine="mace", **common
@@ -301,7 +404,9 @@ def run_mapped_collection(
         **common,
     )
     report = audit_leaf_manifests(
-        mace_output / "leaf_manifest.csv", deepmd_output / "leaf_manifest.csv"
+        mace_output / "leaf_manifest.csv",
+        deepmd_output / "leaf_manifest.csv",
+        reference_audit=payload["staging"]["provenance"],
     )
     report["outputs"] = write_leaf_audit(report, audit_output)
     payload["audit"] = report

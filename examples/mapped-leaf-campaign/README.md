@@ -124,3 +124,31 @@ datasets/canonical/deepmd/{train,valid,test}/...
 The audit writes JSON, CSV, Markdown, and a self-contained SVG dashboard below
 the configured audit directory. A nonzero status means the two formats disagree,
 a leaf failed conversion, or a requested split is empty.
+
+## VASP provenance and balanced sampling
+
+Mapped campaigns are strict by default. Before ASE reads the trajectories, the
+staging pass requires explicit `ENCUT`, `IVDW`, and `POTIM` in every leaf INCAR
+and requires those values to agree across all leaves. It hashes every staged
+source file and records the complete parsed INCAR, VASP version, POTCAR `TITEL`
+identities, `NKPTS`, and detected ionic-frame count. The records and audit are
+written to `reference_runs/reference_provenance.json`, a flattened
+`reference_provenance.csv`, and `reference_provenance_audit.json`, then integrated into the
+Markdown, JSON, and SVG dataset audit.
+
+Because the complete parsed INCAR is retained, the record also covers the
+functional/hybrid tags, DFT+U, spin/SOC, precision and electronic convergence,
+smearing, symmetry, dipole corrections, charge, MD thermostat, temperature,
+and timestep settings. KPOINTS is staged and hashed when present. POTCAR is
+hashed locally when present and its ordered `TITEL` identities are recovered
+from OUTCAR; licensed POTCAR content is not copied into portable datasets.
+
+Exact INCAR hashes are compared and every differing parsed tag is reported.
+Exact identity is informative rather than mandatory because temperature and
+thermostat settings can differ intentionally. Tags under
+`provenance.consistent_incar_tags` are mandatory and fail the run when mixed.
+
+`collection.balance_frames_per_leaf: true` is the default. After stride, the
+shortest usable trajectory defines the common count. Longer leaves are
+deterministically randomly subsampled to that count before the split, so a
+longer trajectory cannot silently dominate training.

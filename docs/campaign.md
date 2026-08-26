@@ -25,6 +25,18 @@ The machine-readable contract is
 
 ## VASP MLFF accuracy profile
 
+VASP-MLFF generation is opt-in and defaults to disabled. Existing DFT-labelled
+datasets should retain:
+
+```yaml
+stages:
+  vasp_mlff:
+    enabled: false
+```
+
+Omitting `enabled` is also treated as false. Set it to true only when
+InterfaceForge should prepare and submit new VASP-MLFF reference runs.
+
 New campaign templates opt into VASP's accuracy-oriented two-stage recipe:
 
 ```yaml

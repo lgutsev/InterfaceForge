@@ -31,6 +31,8 @@ def _read_manifest(path: Path) -> dict[tuple[str, str], dict[str, Any]]:
                 "relative_leaf": leaf,
                 "split": split,
                 "frames": int(raw.get("frames", 0) or 0),
+                "available_frames": int(raw.get("available_frames", 0) or 0),
+                "sampled_frames": int(raw.get("sampled_frames", 0) or 0),
                 "frame_digest": str(raw.get("frame_digest", "")).strip(),
                 "status": str(raw.get("status", "UNKNOWN")).strip(),
                 "detail": str(raw.get("detail", "")).strip(),
@@ -52,6 +54,8 @@ def _branch(leaf: str) -> str:
 def audit_leaf_manifests(
     mace_manifest: str | Path,
     deepmd_manifest: str | Path,
+    *,
+    reference_audit: dict[str, Any] | str | Path | None = None,
 ) -> dict[str, Any]:
     """Require identical leaf/split membership, frame counts, and frame indices."""
     mace = _read_manifest(Path(mace_manifest))
@@ -62,6 +66,18 @@ def audit_leaf_manifests(
     branch_frames: dict[str, Counter[str]] = defaultdict(Counter)
     rows: list[dict[str, Any]] = []
     problems: list[dict[str, Any]] = []
+    if isinstance(reference_audit, (str, Path)):
+        reference = json.loads(Path(reference_audit).read_text(encoding="utf-8"))
+    else:
+        reference = dict(reference_audit or {})
+    if reference and reference.get("status") != "OK":
+        problems.extend(
+            {
+                "relative_leaf": problem.get("staged_leaf", "__reference__"),
+                "issues": list(problem.get("issues", [])),
+            }
+            for problem in reference.get("problems", [])
+        )
 
     for leaf, manifest_split in memberships:
         key = (leaf, manifest_split)
@@ -81,6 +97,10 @@ def audit_leaf_manifests(
                 issues.append(
                     f"frame mismatch: MACE={m['frames']}, DeePMD={d['frames']}"
                 )
+            if m["available_frames"] != d["available_frames"]:
+                issues.append("available source-frame count mismatch")
+            if m["sampled_frames"] != d["sampled_frames"]:
+                issues.append("balanced sampled-frame count mismatch")
             if (
                 m["frame_digest"]
                 and d["frame_digest"]
@@ -114,6 +134,8 @@ def audit_leaf_manifests(
                 "split": manifest_split,
                 "mace_frames": m["frames"] if m else 0,
                 "deepmd_frames": d["frames"] if d else 0,
+                "available_frames": (m or d or {}).get("available_frames", 0),
+                "sampled_frames": (m or d or {}).get("sampled_frames", 0),
                 "mace_frame_digest": m["frame_digest"] if m else "",
                 "deepmd_frame_digest": d["frame_digest"] if d else "",
                 "audit_status": "FAILED" if issues else "OK",
@@ -130,8 +152,24 @@ def audit_leaf_manifests(
             }
         )
     unique_leaves = {leaf for leaf, _ in memberships}
+    per_leaf_available = {
+        leaf: max(row["available_frames"] for row in rows if row["relative_leaf"] == leaf)
+        for leaf in unique_leaves
+    }
+    per_leaf_sampled = {
+        leaf: max(row["sampled_frames"] for row in rows if row["relative_leaf"] == leaf)
+        for leaf in unique_leaves
+    }
+    sampled_counts = sorted(set(per_leaf_sampled.values()))
+    if len(sampled_counts) > 1:
+        problems.append(
+            {
+                "relative_leaf": "__dataset__",
+                "issues": [f"unbalanced sampled frames per leaf: {sampled_counts}"],
+            }
+        )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "FAILED" if problems else "OK",
         "synchronized": not problems,
         "leaves": len(unique_leaves),
@@ -141,6 +179,16 @@ def audit_leaf_manifests(
         "branch_frames": {
             key: dict(value) for key, value in sorted(branch_frames.items())
         },
+        "source_frames_per_leaf": {
+            "minimum": min(per_leaf_available.values(), default=0),
+            "maximum": max(per_leaf_available.values(), default=0),
+            "unique": sorted(set(per_leaf_available.values())),
+        },
+        "sampled_frames_per_leaf": {
+            "balanced": len(sampled_counts) <= 1,
+            "unique": sampled_counts,
+        },
+        "reference_provenance": reference,
         "problems": problems,
         "rows": rows,
     }
@@ -178,6 +226,17 @@ def _write_svg(path: Path, report: dict[str, Any]) -> None:
             f'{report["status"]}</text>'
         ),
     ]
+    reference = report.get("reference_provenance", {})
+    if reference:
+        settings = reference.get("incar_tag_values", {})
+        summary = " · ".join(
+            f"{tag}={','.join(settings.get(tag, []))}"
+            for tag in ("ENCUT", "IVDW", "POTIM")
+        )
+        svg.append(
+            f'<text x="{margin}" y="94" class="small">Reference provenance: '
+            f'{escape(reference.get("status", "UNKNOWN"))} · {escape(summary)}</text>'
+        )
     cards = [
         ("Leaves", report["leaves"], "#0f766e"),
         ("Frames", total_frames, "#4338ca"),
@@ -248,6 +307,33 @@ def write_leaf_audit(report: dict[str, Any], output: str | Path) -> dict[str, st
     ]
     for split in SPLITS:
         lines.append(f"| {split} | {report['split_leaves'][split]} | {report['split_frames'][split]} |")
+    reference = report.get("reference_provenance", {})
+    if reference:
+        lines.extend(["", "## VASP reference provenance", ""])
+        lines.append(f"- Status: **{reference.get('status', 'UNKNOWN')}**")
+        lines.append(
+            f"- Exact INCAR files identical: `{reference.get('exact_incar_files_identical')}`"
+        )
+        for tag in ("ENCUT", "IVDW", "POTIM"):
+            values = reference.get("incar_tag_values", {}).get(tag, [])
+            lines.append(f"- `{tag}`: `{', '.join(values)}`")
+        lines.append(
+            f"- VASP versions: `{', '.join(reference.get('vasp_versions', []))}`"
+        )
+        differing = reference.get("differing_incar_tags", {})
+        if differing:
+            lines.extend(["", "### Differing INCAR tags", ""])
+            for tag, values in differing.items():
+                lines.append(f"- `{tag}`: `{', '.join(values)}`")
+        counts = report.get("source_frames_per_leaf", {})
+        sampled = report.get("sampled_frames_per_leaf", {})
+        lines.append(
+            f"- Source frames per leaf: {counts.get('minimum', 0)}–{counts.get('maximum', 0)}"
+        )
+        lines.append(
+            f"- Balanced sampled frames per leaf: `{sampled.get('balanced')}`; "
+            f"counts `{sampled.get('unique', [])}`"
+        )
     if report["problems"]:
         lines.extend(["", "## Problems", ""])
         for problem in report["problems"]:
@@ -261,9 +347,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mace-manifest", required=True)
     parser.add_argument("--deepmd-manifest", required=True)
+    parser.add_argument("--reference-audit")
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
-    report = audit_leaf_manifests(args.mace_manifest, args.deepmd_manifest)
+    report = audit_leaf_manifests(
+        args.mace_manifest,
+        args.deepmd_manifest,
+        reference_audit=args.reference_audit,
+    )
     report["outputs"] = write_leaf_audit(report, args.output)
     print(json.dumps(report, indent=2))
     return 0 if report["status"] == "OK" else 1

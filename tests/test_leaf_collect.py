@@ -13,6 +13,7 @@ from interfaceforge.leaf_collect import (
     _write_deepmd_system,
     assign_heritage_groups,
     assign_random_frame_splits,
+    balance_leaf_frames,
     discover_leaf_outcars,
 )
 
@@ -132,6 +133,28 @@ class RandomFrameSplitTests(unittest.TestCase):
             ),
             list(range(10)),
         )
+
+    def test_balancing_deterministically_subsamples_longer_leaves(self) -> None:
+        frames = [
+            LeafFrame(
+                source_index=index,
+                atoms=None,
+                energy=float(index),
+                forces=np.empty((0, 3)),
+                move_mask=np.empty(0, dtype=np.int8),
+                virial=None,
+            )
+            for index in range(20)
+        ]
+        first = balance_leaf_frames(frames, 8, seed=17, leaf_key="interface/A")
+        second = balance_leaf_frames(frames, 8, seed=17, leaf_key="interface/A")
+
+        self.assertEqual(len(first), 8)
+        self.assertEqual(
+            [frame.source_index for frame in first],
+            [frame.source_index for frame in second],
+        )
+        self.assertNotEqual([frame.source_index for frame in first], list(range(8)))
 
 
 class _Cell:

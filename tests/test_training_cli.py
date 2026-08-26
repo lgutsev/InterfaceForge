@@ -331,7 +331,15 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(
                 campaign["stages"]["vasp_mlff"]["accuracy_profile"], "accurate"
             )
+            self.assertFalse(campaign["stages"]["vasp_mlff"]["enabled"])
 
+            prepare_campaign(load_campaign(target / "campaign.yaml"))
+            self.assertFalse((target / "runs/vasp/bulk_a_300k/train").exists())
+
+            campaign["stages"]["vasp_mlff"]["enabled"] = True
+            (target / "campaign.yaml").write_text(
+                yaml.safe_dump(campaign, sort_keys=False), encoding="utf-8"
+            )
             prepare_campaign(load_campaign(target / "campaign.yaml"))
             train = parse_incar(target / "runs/vasp/bulk_a_300k/train/INCAR")
             refit = parse_incar(target / "runs/vasp/bulk_a_300k/refit/INCAR")

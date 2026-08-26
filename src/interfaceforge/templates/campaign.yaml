@@ -36,7 +36,9 @@ systems:
 
 stages:
   vasp_mlff:
-    enabled: true
+    # Opt in only when InterfaceForge should generate new VASP-MLFF labels.
+    # Existing DFT OUTCAR campaigns should leave this false.
+    enabled: false
     accuracy_profile: accurate
     train:
       nsw: 3000

@@ -25,6 +25,7 @@ from typing import Any
 import numpy as np
 
 from .errors import DependencyError, SafetyError
+from .vasp_provenance import sha256_file
 
 SPLITS = ("train", "valid", "test")
 DEFAULT_EXCLUDES = (
@@ -256,6 +257,27 @@ def _frame_digest(frames: Sequence[LeafFrame]) -> str:
     return sha256(membership.encode("utf-8")).hexdigest()
 
 
+def balance_leaf_frames(
+    frames: Sequence[LeafFrame],
+    target: int | None,
+    *,
+    seed: int,
+    leaf_key: str,
+) -> list[LeafFrame]:
+    """Return a deterministic, time-unbiased per-leaf sample."""
+    available = len(frames)
+    if target is None or available == target:
+        return list(frames)
+    if target < 1:
+        raise ValueError("frames_per_leaf must be positive")
+    if available < target:
+        raise SafetyError(f"only {available} readable frames; balanced target is {target}")
+    return sorted(
+        random.Random(f"{seed}:balance:{leaf_key}").sample(list(frames), target),
+        key=lambda frame: frame.source_index,
+    )
+
+
 def _ase_io() -> tuple[Any, Any]:
     try:
         from ase.io import iread, write
@@ -468,6 +490,8 @@ def collect_leaf_dataset(
     include_virial: bool = False,
     type_map: Sequence[str] = (),
     split_mode: str = "heritage",
+    frames_per_leaf: int | None = None,
+    reference_provenance: str | Path | None = None,
     force: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -480,6 +504,8 @@ def collect_leaf_dataset(
         raise ValueError("split_mode must be 'heritage' or 'random-frame'")
     if stride < 1:
         raise ValueError("stride must be >= 1")
+    if frames_per_leaf is not None and frames_per_leaf < 1:
+        raise ValueError("frames_per_leaf must be positive")
 
     source_root = Path(root).expanduser().resolve()
     output_root = Path(output).expanduser().resolve()
@@ -543,6 +569,8 @@ def collect_leaf_dataset(
             "heritage_key": source.heritage_key,
             "heritage_parent": source.heritage_parent,
             "heritage_context": "/".join(source.heritage_parts),
+            "available_frames": "",
+            "sampled_frames": "",
         }
         try:
             frames = list(
@@ -550,6 +578,15 @@ def collect_leaf_dataset(
             )
             if not frames:
                 raise SafetyError("no readable labelled frames")
+            available_frames = len(frames)
+            frames = balance_leaf_frames(
+                frames,
+                frames_per_leaf,
+                seed=seed,
+                leaf_key=source.relative_leaf.as_posix(),
+            )
+            base_row["available_frames"] = available_frames
+            base_row["sampled_frames"] = len(frames)
             if split_mode == "heritage":
                 partitions = {
                     assignments[source.outcar]: frames,
@@ -644,8 +681,17 @@ def collect_leaf_dataset(
         "ratios": list(ratios),
         "seed": seed,
         "stride": stride,
+        "frames_per_leaf": frames_per_leaf,
         "include_virial": include_virial,
         "preserve_raw_forces": True,
+        "label_convention": {
+            "energy": "ASE VASP reader atoms.get_potential_energy() in eV",
+            "forces": "raw unconstrained VASP forces in eV/angstrom",
+            "virial": (
+                "-volume*ASE stress tensor in eV" if include_virial else "not exported"
+            ),
+            "positions": "angstrom",
+        },
         "leaves_discovered": len(sources),
         "heritage_groups": len(
             {source.heritage_key for source in sources}
@@ -656,6 +702,14 @@ def collect_leaf_dataset(
         "failed_leaves": len(failed_sources),
         "manifest_csv": str(manifest_csv),
     }
+    if reference_provenance is not None:
+        provenance_path = Path(reference_provenance).expanduser().resolve()
+        if not provenance_path.is_file():
+            raise SafetyError(f"Missing VASP reference provenance: {provenance_path}")
+        payload["reference_provenance"] = {
+            "path": str(provenance_path),
+            "sha256": sha256_file(provenance_path),
+        }
     if engine == "mace":
         payload["extxyz"] = {
             name: (
@@ -717,6 +771,15 @@ def build_parser(default_engine: str | None = None) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument(
+        "--frames-per-leaf",
+        type=int,
+        help="Deterministically subsample every leaf to this many retained frames",
+    )
+    parser.add_argument(
+        "--reference-provenance",
+        help="Reference-provenance JSON to hash into the dataset manifest",
+    )
     parser.add_argument("--include-virial", action="store_true")
     parser.add_argument(
         "--type-map",
@@ -744,6 +807,8 @@ def main(argv: Sequence[str] | None = None, *, default_engine: str | None = None
         include_virial=args.include_virial,
         type_map=args.type_map,
         split_mode=args.split_mode,
+        frames_per_leaf=args.frames_per_leaf,
+        reference_provenance=args.reference_provenance,
         force=args.force,
         dry_run=args.dry_run,
     )

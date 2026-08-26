@@ -8,7 +8,14 @@ initialize_campaign: true
 
 # Only files required by the collectors and constraint provenance are staged.
 # They are hard-linked, so the large OUTCARs are not duplicated.
-include_files: [OUTCAR, INCAR, POSCAR, CONTCAR]
+include_files: [OUTCAR, INCAR, POSCAR, CONTCAR, KPOINTS]
+
+# Fail before collection if the DFT label definition is incomplete or mixed.
+provenance:
+  required_incar_tags: [ENCUT, IVDW, POTIM]
+  consistent_incar_tags: [ENCUT, IVDW, POTIM]
+  # POTCAR is fingerprinted locally but is not copied into portable datasets.
+  hash_files: [OUTCAR, INCAR, POSCAR, CONTCAR, KPOINTS, POTCAR]
 
 sources:
   - source: ${CER_INTERFACE_BASE}/MD_Period/Step2_300K/Real
@@ -45,6 +52,7 @@ collection:
   ratios: [0.8, 0.1, 0.1]
   seed: 20260730
   stride: 5
+  balance_frames_per_leaf: true
   include_virial: true
   type_map: [Si, N, Ti, O]
   mace_output: datasets/canonical

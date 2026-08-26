@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from interfaceforge.campaign import build_plan
 from interfaceforge.config import load_campaign
 from interfaceforge.errors import ConfigurationError, SafetyError
 from interfaceforge.scheduler import render_job
@@ -79,6 +80,18 @@ def write_campaign(
 
 
 class ConfigTests(unittest.TestCase):
+    def test_missing_vasp_mlff_stage_defaults_to_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = write_campaign(root)
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data.pop("stages")
+            path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+            plan = build_plan(load_campaign(path))
+
+            self.assertFalse(any(task["engine"] == "vasp_mlff" for task in plan["tasks"]))
+
     def test_defect_is_a_valid_system_kind(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

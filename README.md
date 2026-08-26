@@ -164,8 +164,11 @@ verified.
 - Generated INCAR presets do not guess ENCUT, k-point density, spin, dispersion,
   convergence thresholds or chemistry-specific settings.
 - New VASP-MLFF campaign templates opt into the documented `accurate` profile
-  (`ML_IALGO_LINREG=1`, `ML_SION1=0.3`, `ML_MRB2=12` during training, followed
-  by SVD refitting); existing campaigns remain unchanged.
+  when `stages.vasp_mlff.enabled: true`; VASP-MLFF generation defaults to false
+  so existing DFT-labelled campaigns cannot create MLFF jobs implicitly.
+- Mapped VASP datasets require and cross-audit explicit `ENCUT`, `IVDW`, and
+  `POTIM`, compare complete INCARs, fingerprint source inputs/OUTCARs, retain
+  VASP/POTCAR/k-point identity, and balance sampled frames per leaf by default.
 - POTCAR is assembled only from an explicit licensed local tree and is excluded
   from portable archives.
 - Submission is a dry-run unless `--execute` is present. Mutating recovery

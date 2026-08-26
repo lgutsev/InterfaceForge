@@ -21,7 +21,10 @@ def build_plan(campaign: Campaign) -> dict[str, Any]:
     """Return a deterministic, serializable campaign plan."""
 
     vasp_settings = dict(campaign.stages.get("vasp_mlff", {}))
-    vasp_enabled = bool(vasp_settings.get("enabled", True))
+    # Generating new VASP-MLFF labels is an explicit opt-in.  Campaigns built
+    # from existing DFT trajectories must never acquire MLFF jobs merely
+    # because the stages block was omitted.
+    vasp_enabled = bool(vasp_settings.get("enabled", False))
     tasks: list[dict[str, Any]] = []
     if vasp_enabled:
         for system in campaign.systems:
@@ -94,6 +97,7 @@ def prepare_campaign(campaign: Campaign, *, force: bool = False) -> dict[str, An
     profile = load_profile(campaign.profile_path)
     plan = build_plan(campaign)
     vasp_settings = dict(campaign.stages.get("vasp_mlff", {}))
+    vasp_enabled = bool(vasp_settings.get("enabled", False))
     accuracy_profile = vasp_settings.get("accuracy_profile")
     base_incar = _resolve_reference_input(campaign, "INCAR")
     kpoints = _resolve_reference_input(campaign, "KPOINTS")
@@ -101,7 +105,7 @@ def prepare_campaign(campaign: Campaign, *, force: bool = False) -> dict[str, An
     prepared: list[dict[str, Any]] = []
     warnings: list[str] = []
 
-    for system in campaign.systems:
+    for system in campaign.systems if vasp_enabled else ():
         system_root = campaign.root / "runs" / "vasp" / system.id
         for stage in _STAGES:
             settings = dict(vasp_settings.get(stage, {}))

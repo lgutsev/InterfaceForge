@@ -3,7 +3,12 @@ schema_version: 1
 campaign_root: ${MLIP_CAMPAIGN_ROOT}
 staging_root: reference_runs
 initialize_campaign: true
-include_files: [OUTCAR, INCAR, POSCAR, CONTCAR]
+include_files: [OUTCAR, INCAR, POSCAR, CONTCAR, KPOINTS]
+
+provenance:
+  required_incar_tags: [ENCUT, IVDW, POTIM]
+  consistent_incar_tags: [ENCUT, IVDW, POTIM]
+  hash_files: [OUTCAR, INCAR, POSCAR, CONTCAR, KPOINTS, POTCAR]
 
 # Each source may be anywhere on the same filesystem. Its target is the logical
 # path retained below reference_runs and in collector provenance.
@@ -21,6 +26,7 @@ collection:
   ratios: [0.8, 0.1, 0.1]
   seed: 20260730
   stride: 5
+  balance_frames_per_leaf: true
   include_virial: false
   type_map: [ELEMENT_A, ELEMENT_B]
   mace_output: datasets/canonical
