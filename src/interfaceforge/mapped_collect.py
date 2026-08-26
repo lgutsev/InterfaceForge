@@ -65,6 +65,11 @@ def load_mapped_config(path: str | Path) -> dict[str, Any]:
         mappings.append(Mapping(source=source, target=target, required=bool(item.get("required", True))))
     collection = dict(raw.get("collection") or {})
     ratios = list(collection.get("ratios", [0.8, 0.1, 0.1]))
+    split_mode = str(collection.get("split_mode", "heritage")).lower()
+    if split_mode not in {"heritage", "random-frame"}:
+        raise ConfigurationError(
+            "collection.split_mode must be 'heritage' or 'random-frame'"
+        )
     if len(ratios) != 3:
         raise ConfigurationError("collection.ratios requires train, valid, test")
     include_files = tuple(str(name) for name in raw.get("include_files", DEFAULT_FILES))
@@ -79,6 +84,7 @@ def load_mapped_config(path: str | Path) -> dict[str, Any]:
         "include_files": include_files,
         "collection": {
             "ratios": ratios,
+            "split_mode": split_mode,
             "seed": int(collection.get("seed", 20260730)),
             "stride": int(collection.get("stride", 1)),
             "heritage_depth": int(collection.get("heritage_depth", 2)),
@@ -278,6 +284,7 @@ def run_mapped_collection(
     common = {
         "heritage_depth": collection["heritage_depth"],
         "ratios": collection["ratios"],
+        "split_mode": collection["split_mode"],
         "seed": collection["seed"],
         "stride": collection["stride"],
         "include_virial": collection["include_virial"],
