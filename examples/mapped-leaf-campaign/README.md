@@ -1,12 +1,12 @@
 # Mapped leaf-dataset campaigns
 
 Use this template when the VASP reference trajectories live in several unrelated
-directory trees but must become one heritage-safe MACE and DeePMD dataset.
+directory trees but must become one synchronized MACE and DeePMD dataset.
 
 The mapper discovers every nonempty `OUTCAR` below each configured source,
 creates a clean logical leaf tree using hard links, invokes both collectors with
-identical split settings, and then cross-audits their membership, split assignment,
-and frame counts. It stages only `OUTCAR`, `INCAR`, `POSCAR`, and `CONTCAR`, so
+identical split settings, and then cross-audits their leaf/split membership, frame
+counts, and source-frame membership digests. It stages only `OUTCAR`, `INCAR`, `POSCAR`, and `CONTCAR`, so
 backup/restart subdirectories cannot make a valid VASP run appear non-terminal.
 
 ## Periodic SiN/TiN/TiO campaign
@@ -39,6 +39,62 @@ To intentionally rebuild existing dataset outputs:
 launch_scripts/prepare_periodic_nitride_mlips.sh \
   --execute --collect --force-datasets
 ```
+
+
+## Choosing the split policy
+
+The split policy is a scientific choice and must be set deliberately in
+`collection.split_mode`.
+
+### Broad, varied training data: `random-frame`
+
+Use this when every chemistry, temperature, termination, composition, or other
+source category must contribute to training:
+
+```yaml
+collection:
+  split_mode: random-frame
+  ratios: [0.8, 0.1, 0.1]
+  seed: 20260730
+```
+
+Frames are deterministically shuffled separately within every leaf trajectory.
+Every sufficiently populated leaf therefore contributes to train, validation,
+and test. MACE and DeePMD receive identical source-frame indices, verified by
+membership digests in the audit manifests.
+
+This is the required policy for the periodic SiN/TiN/TiO campaign. With 48
+OUTCARs containing 600 retained frames each, it produces approximately 480/60/60
+frames per leaf and totals of 23,040 train, 2,880 validation, and 2,880 test
+frames. This avoids the earlier failure mode where complete termination branches
+were absent from training.
+
+A random frame split can place temporally neighboring MD configurations in
+different splits. Validation and test errors may therefore be optimistic. Keep
+one or more independently generated trajectories outside the collected dataset
+as an external generalization test.
+
+### Leakage-resistant trajectory evaluation: `heritage`
+
+Use this when validation/test must measure transfer to unseen trajectories or
+complete campaign branches:
+
+```yaml
+collection:
+  split_mode: heritage
+```
+
+The full parent lineage is indivisible, so related leaves remain in one split.
+This reduces trajectory leakage, but with a small number of branches it can
+assign an entire chemistry, termination, or temperature category away from
+training. Always inspect the SVG/CSV audit before accepting this split.
+
+Rule of thumb:
+
+- Choose `random-frame` when maximizing training-set variety is the priority.
+- Choose `heritage` when leakage-free evaluation is the priority.
+- For production MLIPs, use `random-frame` for the main diverse dataset and a
+  separate independent-trajectory challenge set for rigorous evaluation.
 
 ## Future campaigns
 
