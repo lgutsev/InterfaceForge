@@ -14,20 +14,24 @@ SPLITS = ("train", "valid", "test")
 COLORS = {"train": "#2563eb", "valid": "#f59e0b", "test": "#dc2626"}
 
 
-def _read_manifest(path: Path) -> dict[str, dict[str, Any]]:
+def _read_manifest(path: Path) -> dict[tuple[str, str], dict[str, Any]]:
     if not path.is_file():
         raise FileNotFoundError(f"Missing collector manifest: {path}")
-    rows: dict[str, dict[str, Any]] = {}
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
     with path.open(newline="", encoding="utf-8") as handle:
         for raw in csv.DictReader(handle):
             leaf = str(raw.get("relative_leaf", "")).strip()
+            split = str(raw.get("split", "")).strip()
             if not leaf:
                 continue
-            if leaf in rows:
-                raise ValueError(f"Duplicate leaf in {path}: {leaf}")
-            rows[leaf] = {
-                "split": str(raw.get("split", "")).strip(),
+            key = (leaf, split)
+            if key in rows:
+                raise ValueError(f"Duplicate leaf/split in {path}: {leaf} [{split}]")
+            rows[key] = {
+                "relative_leaf": leaf,
+                "split": split,
                 "frames": int(raw.get("frames", 0) or 0),
+                "frame_digest": str(raw.get("frame_digest", "")).strip(),
                 "status": str(raw.get("status", "UNKNOWN")).strip(),
                 "detail": str(raw.get("detail", "")).strip(),
             }
@@ -45,20 +49,24 @@ def _branch(leaf: str) -> str:
     return "/".join(parts[:-1] or parts) or "unknown"
 
 
-def audit_leaf_manifests(mace_manifest: str | Path, deepmd_manifest: str | Path) -> dict[str, Any]:
-    """Require identical leaf membership, splits, frame counts, and successful conversions."""
+def audit_leaf_manifests(
+    mace_manifest: str | Path,
+    deepmd_manifest: str | Path,
+) -> dict[str, Any]:
+    """Require identical leaf/split membership, frame counts, and frame indices."""
     mace = _read_manifest(Path(mace_manifest))
     deepmd = _read_manifest(Path(deepmd_manifest))
-    leaves = sorted(set(mace) | set(deepmd))
+    memberships = sorted(set(mace) | set(deepmd))
     split_frames = {split: 0 for split in SPLITS}
     split_leaves = {split: 0 for split in SPLITS}
     branch_frames: dict[str, Counter[str]] = defaultdict(Counter)
     rows: list[dict[str, Any]] = []
     problems: list[dict[str, Any]] = []
 
-    for leaf in leaves:
-        m = mace.get(leaf)
-        d = deepmd.get(leaf)
+    for leaf, manifest_split in memberships:
+        key = (leaf, manifest_split)
+        m = mace.get(key)
+        d = deepmd.get(key)
         issues: list[str] = []
         if m is None:
             issues.append("missing from MACE")
@@ -66,29 +74,48 @@ def audit_leaf_manifests(mace_manifest: str | Path, deepmd_manifest: str | Path)
             issues.append("missing from DeePMD")
         if m and d:
             if m["split"] != d["split"]:
-                issues.append(f"split mismatch: MACE={m['split']}, DeePMD={d['split']}")
+                issues.append(
+                    f"split mismatch: MACE={m['split']}, DeePMD={d['split']}"
+                )
             if m["frames"] != d["frames"]:
-                issues.append(f"frame mismatch: MACE={m['frames']}, DeePMD={d['frames']}")
+                issues.append(
+                    f"frame mismatch: MACE={m['frames']}, DeePMD={d['frames']}"
+                )
+            if (
+                m["frame_digest"]
+                and d["frame_digest"]
+                and m["frame_digest"] != d["frame_digest"]
+            ):
+                issues.append("source-frame membership digest mismatch")
             for engine, row in (("MACE", m), ("DeePMD", d)):
                 if row["status"] != "OK":
-                    issues.append(f"{engine} status={row['status']}: {row['detail']}")
+                    issues.append(
+                        f"{engine} status={row['status']}: {row['detail']}"
+                    )
 
-        split = (m or d or {}).get("split", "unknown")
+        split = (m or d or {}).get("split", manifest_split)
         frames = int((m or d or {}).get("frames", 0))
         if not issues and split in split_frames:
             split_frames[split] += frames
             split_leaves[split] += 1
             branch_frames[_branch(leaf)][split] += frames
         if issues:
-            problems.append({"relative_leaf": leaf, "issues": issues})
+            problems.append(
+                {
+                    "relative_leaf": leaf,
+                    "split": manifest_split,
+                    "issues": issues,
+                }
+            )
         rows.append(
             {
                 "relative_leaf": leaf,
                 "branch": _branch(leaf),
-                "mace_split": m["split"] if m else "MISSING",
-                "deepmd_split": d["split"] if d else "MISSING",
+                "split": manifest_split,
                 "mace_frames": m["frames"] if m else 0,
                 "deepmd_frames": d["frames"] if d else 0,
+                "mace_frame_digest": m["frame_digest"] if m else "",
+                "deepmd_frame_digest": d["frame_digest"] if d else "",
                 "audit_status": "FAILED" if issues else "OK",
                 "detail": "; ".join(issues),
             }
@@ -96,15 +123,24 @@ def audit_leaf_manifests(mace_manifest: str | Path, deepmd_manifest: str | Path)
 
     empty = [split for split, count in split_frames.items() if count == 0]
     if empty:
-        problems.append({"relative_leaf": "__dataset__", "issues": [f"empty splits: {', '.join(empty)}"]})
+        problems.append(
+            {
+                "relative_leaf": "__dataset__",
+                "issues": [f"empty splits: {', '.join(empty)}"],
+            }
+        )
+    unique_leaves = {leaf for leaf, _ in memberships}
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "FAILED" if problems else "OK",
         "synchronized": not problems,
-        "leaves": len(leaves),
+        "leaves": len(unique_leaves),
+        "leaf_split_memberships": len(memberships),
         "split_frames": split_frames,
         "split_leaves": split_leaves,
-        "branch_frames": {key: dict(value) for key, value in sorted(branch_frames.items())},
+        "branch_frames": {
+            key: dict(value) for key, value in sorted(branch_frames.items())
+        },
         "problems": problems,
         "rows": rows,
     }
