@@ -48,6 +48,9 @@ MLFF_ACCURACY_PROFILES = ("accurate",)
 STEP2_HUBBARD_TAG_PREFIX = "LDAU"
 STEP2_HUBBARD_TAGS = ("LMAXMIX",)
 STEP2_INHERITED_FILES = ("KPOINTS", "POTCAR", "runvasp.sh", "run.slurm")
+STEP2_NSW = 3000
+STEP2_NBLOCK = 4
+STEP2_TRAINING_FRAMES = STEP2_NSW // STEP2_NBLOCK
 
 
 def parse_incar(path: str | Path) -> dict[str, str]:
@@ -119,6 +122,8 @@ def _render_step2_incar(source_text: str, template_text: str, temperature: float
         "SYSTEM": f"Step2_DFT_MD_{_temperature_label(float(temperature))}K",
         "TEBEG": temperature_text,
         "TEEND": temperature_text,
+        "NSW": str(STEP2_NSW),
+        "NBLOCK": str(STEP2_NBLOCK),
     }
     found: set[str] = set()
     output: list[str] = []
@@ -366,6 +371,10 @@ def prepare_step2_series(
                         "ordinary_incar_tags": "Step2 template",
                         "hubbard_tags": "exact active LDAU* and LMAXMIX lines from each Step1 INCAR",
                         "temperature_tags": "requested temperature overrides SYSTEM, TEBEG, and TEEND",
+                        "sampling_tags": (
+                            f"Step2 standard fixes NSW={STEP2_NSW} and NBLOCK={STEP2_NBLOCK} "
+                            f"for {STEP2_TRAINING_FRAMES} labeled frames"
+                        ),
                     },
                     "runs": rows,
                 }
@@ -408,6 +417,11 @@ def prepare_step2_series(
         "prepared_runs": len(plans),
         "source_structure": source_structure,
         "hubbard_rule": "preserve exact active LDAU* and LMAXMIX assignments per source run",
+        "sampling": {
+            "nsw": STEP2_NSW,
+            "nblock": STEP2_NBLOCK,
+            "training_frames_per_run": STEP2_TRAINING_FRAMES,
+        },
         "planned": [
             {
                 "source": str(plan["source"]),
@@ -652,6 +666,8 @@ def _audit_step2_plans(
             ("SYSTEM", expected_system),
             ("TEBEG", expected_temperature),
             ("TEEND", expected_temperature),
+            ("NSW", str(STEP2_NSW)),
+            ("NBLOCK", str(STEP2_NBLOCK)),
         ):
             if parsed.get(tag) != expected:
                 issues.append(f"{tag}={parsed.get(tag)!r}, expected {expected!r}")
@@ -690,6 +706,9 @@ def _audit_step2_plans(
                 "relative_path": plan["relative"].as_posix() or ".",
                 "destination": str(destination),
                 "temperature_k": plan["temperature_k"],
+                "nsw": STEP2_NSW,
+                "nblock": STEP2_NBLOCK,
+                "training_frames": STEP2_TRAINING_FRAMES,
                 "elements": plan["elements"],
                 "hubbard_tags": plan["hubbard_tags"],
                 "inherited_files": sorted(plan["inputs"]),
@@ -710,6 +729,11 @@ def _audit_step2_plans(
             "output_root": str(output),
             "template": template_label,
             "template_sha256": hashlib.sha256(template_text.encode()).hexdigest(),
+            "sampling": {
+                "nsw": STEP2_NSW,
+                "nblock": STEP2_NBLOCK,
+                "training_frames_per_run": STEP2_TRAINING_FRAMES,
+            },
             "runs": output_rows,
         }
         json_path = output / "step2_audit.json"
@@ -722,6 +746,9 @@ def _audit_step2_plans(
                 fieldnames=(
                     "status",
                     "temperature_k",
+                    "nsw",
+                    "nblock",
+                    "training_frames",
                     "relative_path",
                     "elements",
                     "LDAUL",
@@ -738,6 +765,9 @@ def _audit_step2_plans(
                     {
                         "status": row["status"],
                         "temperature_k": row["temperature_k"],
+                        "nsw": row["nsw"],
+                        "nblock": row["nblock"],
+                        "training_frames": row["training_frames"],
                         "relative_path": row["relative_path"],
                         "elements": " ".join(row["elements"]),
                         "LDAUL": row["hubbard_tags"].get("LDAUL", ""),
@@ -756,6 +786,10 @@ def _audit_step2_plans(
             f"- Output: `{output}`",
             f"- Template: `{template_label}`",
             f"- Runs: {len(output_rows)}",
+            (
+                f"- Standard sampling: `NSW={STEP2_NSW}`, `NBLOCK={STEP2_NBLOCK}` "
+                f"→ **{STEP2_TRAINING_FRAMES} labeled frames per run**"
+            ),
             "- Submission: **not performed**",
             "",
             "| Status | Run | Species | LDAUU | Inherited inputs | Issues |",
