@@ -7,6 +7,81 @@
 InterfaceForge separates three concerns: generating new stages, auditing
 existing runs, and mutating a failed/finished run for recovery.
 
+## Promote Step1 into a Step2 temperature series
+
+`iface vasp step2-prepare` recursively discovers finished Step1 runs (a local
+`INCAR` plus nonempty `CONTCAR`) and creates sibling `Step2_300K`,
+`Step2_450K`, and `Step2_600K` trees by default. Preview the complete mapping
+and all inherited Hubbard values before writing anything:
+
+```bash
+iface vasp step2-prepare Step1 --dry-run
+```
+
+Then prepare the three trees:
+
+```bash
+iface vasp step2-prepare Step1 --temperatures 300 450 600
+```
+
+The precedence rule is intentionally narrow and deterministic:
+
+1. The packaged `INCAR.step2_dft_md` (or `--template INCAR_FINAL`) supplies
+   every ordinary INCAR tag.
+2. Every active `LDAU*` assignment and `LMAXMIX` is copied verbatim from that
+   individual Step1 run. Template Hubbard values are ignored.
+3. The requested temperature overrides only `SYSTEM`, `TEBEG`, and `TEEND`.
+
+Before creating any output tree, the command verifies that `LDAUL`, `LDAUU`,
+and `LDAUJ` each contain one value per species in that run's `CONTCAR`. This is
+what makes mixed atom-type orders safe: InterfaceForge never reconstructs or
+reorders a Hubbard array. `CONTCAR` becomes the new `POSCAR`; the nearest
+run-specific or shared ancestor `KPOINTS`, `POTCAR`, `runvasp.sh`, and
+`run.slurm` files are copied. Runtime outputs such as `OUTCAR`, `WAVECAR`, and
+`CHGCAR` are not inherited.
+
+Each temperature root receives `step2_manifest.json` plus
+`step2_audit.json`, `step2_audit.tsv`, and `step2_audit.md`. The audit reopens
+every generated file, verifies exact INCAR/structure/input hashes, checks
+temperature and Hubbard values, rejects inherited runtime outputs, and clearly
+states that submission was not performed. Existing `Step2_<T>K` roots are
+never overwritten. To use another parent or the attached template explicitly:
+
+```bash
+iface vasp step2-prepare Step1 \
+  --output-root /path/to/MD_Period \
+  --template INCAR_FINAL \
+  --temperatures 300 450 600
+```
+
+Re-audit the existing trees at any point without preparing or submitting:
+
+```bash
+iface vasp step2-prepare Step1 --temperatures 300 450 600 --audit-only
+```
+
+Preparation never submits. After reviewing the Markdown/TSV audits, preview a
+full launch of every manifest-listed daughter run. One command may cover all
+three temperature roots:
+
+```bash
+iface vasp step2-launch Step2_300K Step2_450K Step2_600K
+```
+
+Only after that preview is correct, submit them:
+
+```bash
+iface vasp step2-launch Step2_300K Step2_450K Step2_600K --execute
+```
+
+`step2-launch` requires a PASS audit, rechecks the current INCAR/POSCAR/input
+hashes, rejects folders with existing runtime outputs, and preflights every
+root before submitting the first job. It writes `step2_launch.json` and
+`step2_launch.tsv` with the Slurm job IDs and refuses a duplicate launch when
+submitted jobs are already recorded. The audited `runvasp.sh` is preferred
+over `run.slurm`; use `--launcher NAME` only to select another already-audited
+launcher.
+
 ## Preparation
 
 `iface prepare` creates `train`, `refit` and `stability` directories for every
