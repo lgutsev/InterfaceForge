@@ -17,7 +17,13 @@ from .errors import ConfigurationError, SafetyError
 
 SYSTEM_KINDS = {"bulk", "surface", "interface", "molecule", "adsorbate", "defect", "other"}
 SPLITS = ("train", "valid", "test")
-_SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+# A system id may be a single segment or several "/"-separated segments (so
+# generated run directories can mirror a source tree's own nesting, e.g.
+# "Real/N_Term/SiN_TiN_N-term"). Every segment must independently start with
+# a letter/digit, which blocks ".." (and "." alone) as a segment -- system.id
+# is joined directly onto campaign.root elsewhere, so this is what keeps a
+# nested id from being able to escape the campaign root.
+_SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)*$")
 
 
 @dataclass(frozen=True)

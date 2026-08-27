@@ -23,12 +23,25 @@ review-gated:
 export CER_INTERFACE_BASE=/ddnB/work/lgutsev/LATech_PROJS/Cer_Interface
 
 launch_scripts/periodic_interface_mlff.sh discover
-# Review MD_Period/VASP_MLFF_Interfaces_source_manifest.csv.
+# Review MD_Period/Step2_VASP_MLIP_source_manifest.csv.
 launch_scripts/periodic_interface_mlff.sh build
 launch_scripts/periodic_interface_mlff.sh prepare
 # Review, then submit runs/vasp/_arrays/train_array.slurm with sbatch.
 launch_scripts/periodic_interface_mlff.sh audit
 ```
+
+`build` writes `MD_Period/Step2_VASP_MLIP/` — Step2 "inherited" for MLFF
+training: `iface prepare` mirrors `source_root`'s own family/term/leaf-name
+nesting under `runs/vasp/` (e.g.
+`runs/vasp/Real/N_Term/SiN_TiN_N-term_O_x0.25/train/`) rather than
+flattening it into a synthesized id, so the generated tree reads as the
+same daughter-folder structure as `Step2_300K/` itself, just carrying MLFF
+training inputs instead of the source AIMD/DFT run. This falls directly out
+of `system.id` itself being allowed to contain `/` (validated to still
+block `..`/absolute paths — see `config.py`'s `_SAFE_ID`) and set from each
+matched leaf's own directory name during discovery, so nothing downstream —
+`prepare_campaign`, `submit_campaign`, `iface audit`, `iface vasp submit`'s
+POTCAR auto-generation — needed to change to support it.
 
 `prepare` writes the throttled `%2` training array but does not submit it.
 This prevents an unresolved manifest or unreviewed launcher from starting 20
@@ -68,7 +81,7 @@ an ancestor directory name can't be mistaken for an `x` value.
 ## 2. Build the campaign
 
 ```bash
-iface mlff-interfaces build manifest.csv VASP_MLFF_Interfaces \
+iface mlff-interfaces build manifest.csv Step2_VASP_MLIP \
   --profile examples/mlff-interfaces/profile_loni.yaml --tebeg 300 --teend 600
 ```
 
@@ -78,10 +91,11 @@ production `runvasp.sh` exactly (`workq`, 2 nodes / 128 MPI tasks,
 `vasp6/6.5.1-cpu`, `vasp_std`, 72h). Copy and adjust it for a different
 account/partition/binary rather than editing it as the source of truth.
 
-Writes `VASP_MLFF_Interfaces/campaign.yaml` with one system per grid cell
+Writes `Step2_VASP_MLIP/campaign.yaml` with one system per grid cell
 (`kind: interface`, `tags: {family, term, x}`). For maximum reproducibility,
 it snapshots each reviewed leaf's exact `CONTCAR`, `INCAR`, `KPOINTS`, and
-chemistry-specific `POTCAR` below `inputs/systems/<system-id>/` and writes
+chemistry-specific `POTCAR` below `inputs/systems/<system-id>/` (nested the
+same way, e.g. `inputs/systems/Real/N_Term/SiN_TiN_N-term_O_x0.25/`) and writes
 `inputs/source_provenance.json` with source/snapshot paths and SHA-256 hashes.
 It does not invent a Gamma mesh, replace a POTCAR, or discard other converged
 INCAR settings. The build refuses a source INCAR unless `ENCUT`, `IVDW`, and
@@ -97,8 +111,8 @@ across that range, rather than separate fixed-temperature models, is what
 Then the existing pipeline takes over unchanged:
 
 ```bash
-iface prepare -c VASP_MLFF_Interfaces/campaign.yaml
-iface submit -c VASP_MLFF_Interfaces/campaign.yaml --stage train --execute
+iface prepare -c Step2_VASP_MLIP/campaign.yaml
+iface submit -c Step2_VASP_MLIP/campaign.yaml --stage train --execute
 ```
 
 ## 3. Throttled mass launch
@@ -108,7 +122,7 @@ immediately with no concurrency limit — fine for a handful of jobs, not for
 20 competing for LONI's fairshare queue at once. Instead:
 
 ```bash
-iface mlff-interfaces array-launch -c VASP_MLFF_Interfaces/campaign.yaml \
+iface mlff-interfaces array-launch -c Step2_VASP_MLIP/campaign.yaml \
   --stage train --concurrency 4
 ```
 
@@ -126,7 +140,7 @@ set memory manually. This command only writes the launcher; review it and
 ## 4. Grid-aware audit
 
 ```bash
-iface mlff-interfaces audit -c VASP_MLFF_Interfaces/campaign.yaml
+iface mlff-interfaces audit -c Step2_VASP_MLIP/campaign.yaml
 ```
 
 Runs the existing `iface audit` engine, then rolls its flat per-run table

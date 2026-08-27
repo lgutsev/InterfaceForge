@@ -133,6 +133,29 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigurationError):
                 load_campaign(path)
 
+    def test_system_id_may_be_nested_to_mirror_a_source_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = write_campaign(root)
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data["systems"][0]["id"] = "Real/N_Term/SiN_TiN_N-term_O_x0.25"
+            path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+            campaign = load_campaign(path)
+
+            self.assertEqual(campaign.systems[0].id, "Real/N_Term/SiN_TiN_N-term_O_x0.25")
+
+    def test_system_id_rejects_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = write_campaign(root)
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data["systems"][0]["id"] = "Real/../../etc"
+            path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+            with self.assertRaises(ConfigurationError):
+                load_campaign(path)
+
     def test_rejects_zeroing_reference_forces(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaises(SafetyError):

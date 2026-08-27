@@ -74,15 +74,6 @@ def _mlff_is_fast(path: Path) -> bool:
     return bool(re.search(r"ML_LFAST.{0,20}(true|T)", header, re.I))
 
 
-def _slug(value: Any) -> str:
-    # Underscores are preserved (not folded into the "-" separator) so a
-    # generated system id like "real-n_term-x0" stays visually split into
-    # family/term/x for a human browsing runs/vasp/, even though nothing in
-    # this module parses that id back apart -- mass_audit_mlff_interfaces
-    # reads family/term/x from campaign.systems[i].tags instead.
-    return re.sub(r"[^A-Za-z0-9_]+", "-", str(value).strip()).strip("-").lower()
-
-
 def _x_label(value: float) -> str:
     return f"{value:g}"
 
@@ -160,12 +151,21 @@ def discover_mlff_interface_sources(
                     matches.append(path)
                 if len(matches) == 1:
                     status = "matched"
+                    # Reuse the source tree's own leaf directory name so the
+                    # generated run tree ("runs/vasp/<system_id>/<stage>") is
+                    # literally family/term/<the same leaf name Step2 uses>,
+                    # not a synthesized id -- this is what lets the generated
+                    # tree read as "Step2, but for MLFF training" rather than
+                    # a flattened restructuring of it.
+                    system_id = f"{family}/{term}/{matches[0].parent.name}"
                 elif not matches:
                     status = "missing"
+                    system_id = f"{family}/{term}/x{_x_label(x)}"
                 else:
                     status = "ambiguous"
+                    system_id = f"{family}/{term}/x{_x_label(x)}"
                 row = {
-                        "system_id": f"{_slug(family)}-{_slug(term)}-x{_x_label(x)}",
+                        "system_id": system_id,
                         "family": family,
                         "term": term,
                         "x": _x_label(x),
@@ -455,11 +455,11 @@ def mass_audit_mlff_interfaces(
     and per term.
 
     Family/term/x for each run come from ``campaign.systems[i].tags`` (set
-    by ``generate_mlff_interfaces_campaign``) looked up by the first path
-    component of each run's ``relative_path`` (its system id), rather than
-    re-parsing that id textually -- slugified family/term names can contain
-    the same separator characters used between id components, which makes
-    reconstructing them from the string alone ambiguous.
+    by ``generate_mlff_interfaces_campaign``), looked up by system id -- the
+    run's ``relative_path`` with its last path component (the stage) split
+    off, since a system id can itself be "/"-nested (e.g.
+    "Real/N_Term/SiN_TiN_N-term") to mirror a source tree's own directory
+    structure, rather than by re-deriving family/term/x from the id text.
     """
 
     runs_root = campaign.root / "runs" / "vasp"
@@ -518,7 +518,10 @@ def mass_audit_mlff_interfaces(
         if "/" not in relative:
             unparsed.append(row["relative_path"])
             continue
-        system_id, stage = relative.split("/", 1)
+        # stage is always the last path component; system_id is everything
+        # before it and may itself be "/"-nested (e.g. "Real/N_Term/leaf"),
+        # so this must split off the *last* segment, not the first.
+        system_id, stage = relative.rsplit("/", 1)
         tags = tags_by_system.get(system_id)
         if tags is None:
             unparsed.append(row["relative_path"])

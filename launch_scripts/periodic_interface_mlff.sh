@@ -11,8 +11,12 @@ shift
 base=${CER_INTERFACE_BASE:-/ddnB/work/lgutsev/LATech_PROJS/Cer_Interface}
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source_root=${IFACE_MLFF_SOURCE:-$base/MD_Period/Step2_450K}
-campaign_root=${IFACE_MLFF_OUTPUT:-$base/MD_Period/VASP_MLFF_Interfaces}
-manifest=${IFACE_MLFF_MANIFEST:-$base/MD_Period/VASP_MLFF_Interfaces_source_manifest.csv}
+# Step2_VASP_MLIP is Step2 "inherited" for MLFF training: iface prepare
+# mirrors source_root's own family/term/leaf-name nesting under
+# runs/vasp/ rather than flattening it, so this tree reads as the same
+# daughter-folder structure as source_root, just with training inputs.
+campaign_root=${IFACE_MLFF_OUTPUT:-$base/MD_Period/Step2_VASP_MLIP}
+manifest=${IFACE_MLFF_MANIFEST:-$base/MD_Period/Step2_VASP_MLIP_source_manifest.csv}
 profile=${IFACE_MLFF_PROFILE:-$script_dir/../examples/mlff-interfaces/profile_loni.yaml}
 iface_bin=${IFACE_BIN:-iface}
 

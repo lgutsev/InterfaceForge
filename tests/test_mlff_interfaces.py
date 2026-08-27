@@ -240,7 +240,9 @@ class GenerateCampaignTests(unittest.TestCase):
             train_settings = campaign_yaml["stages"]["vasp_mlff"]["train"]
             self.assertEqual(train_settings["temperature"], 300.0)
             self.assertEqual(train_settings["teend"], 600.0)
-            snapshot = Path(result["campaign_root"]) / "inputs" / "systems" / "real-n_term-x0"
+            # System ids now mirror the source tree's own nesting and leaf
+            # names (here, _write_grid's "x0" directory), not a flat slug.
+            snapshot = Path(result["campaign_root"]) / "inputs" / "systems" / "Real" / "N_Term" / "x0"
             incar_text = (snapshot / "INCAR").read_text(encoding="utf-8")
             self.assertIn("ENCUT = 520", incar_text)
             self.assertIn("IVDW = 11", incar_text)
@@ -291,6 +293,63 @@ class EndToEndPipelineTests(unittest.TestCase):
             self.assertEqual(sum(family_counts.values()), 10)
             self.assertTrue(audit["provenance"]["passed"])
             self.assertTrue(Path(audit["outputs"]["json"]).is_file())
+
+    def test_generated_tree_mirrors_the_real_source_daughter_folder_structure(self) -> None:
+        # The actual ask: runs/vasp/ should read as "Step2, but for MLFF
+        # training" -- literally Real|Ideal / N_Term|Ti_Term / <the same
+        # leaf name Step2 uses> -- not a flattened/slugified restructuring.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Step2_300K"
+            leaves = {
+                "N_Term": ["SiN_TiN_N-term", "SiN_TiN_N-term_O_x0.25"],
+                "Ti_Term": ["SiN-TiN-Ti-term", "SiN-TiN-Ti-term_O_x0.25"],
+            }
+            for family in ("Real", "Ideal"):
+                for term, names in leaves.items():
+                    for name in names:
+                        directory = source / family / term / name
+                        directory.mkdir(parents=True)
+                        (directory / "CONTCAR").write_text("dummy\n", encoding="utf-8")
+                        (directory / "INCAR").write_text(
+                            "ENCUT=520\nIVDW=11\nPOTIM=1.0\n", encoding="utf-8"
+                        )
+                        (directory / "KPOINTS").write_text(
+                            "Automatic\n0\nGamma\n1 1 1\n", encoding="utf-8"
+                        )
+                        (directory / "POTCAR").write_text(f"POTCAR {name}\n", encoding="utf-8")
+
+            manifest = root / "manifest.csv"
+            discovery = discover_mlff_interface_sources(
+                source, manifest, x_values=(0.0, 0.25)
+            )
+            self.assertEqual(discovery["status_counts"], {"matched": 8})
+
+            _write_profile(root / "profile.yaml")
+            build = generate_mlff_interfaces_campaign(
+                manifest, root / "Step2_VASP_MLIP", profile_path=root / "profile.yaml"
+            )
+            campaign = load_campaign(Path(build["campaign"]))
+            prepare_campaign(campaign)
+
+            for family in ("Real", "Ideal"):
+                for term, names in leaves.items():
+                    for name in names:
+                        leaf_dir = campaign.root / "runs" / "vasp" / family / term / name / "train"
+                        self.assertTrue(leaf_dir.is_dir(), leaf_dir)
+                        self.assertTrue((leaf_dir / "INCAR").is_file())
+                        self.assertTrue((leaf_dir / "run.slurm").is_file())
+                        snapshot_dir = (
+                            Path(build["campaign_root"]) / "inputs" / "systems" / family / term / name
+                        )
+                        self.assertTrue((snapshot_dir / "CONTCAR").is_file())
+
+            # And the rest of the pipeline still works unchanged against the
+            # nested ids.
+            write_throttled_array_launcher(campaign, stage="train", concurrency=2)
+            audit = mass_audit_mlff_interfaces(campaign)
+            self.assertEqual(audit["grid_cells"], 8)
+            self.assertEqual(audit["unparsed_runs"], [])
 
     def test_array_launch_requires_prepare_first(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
