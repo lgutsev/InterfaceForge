@@ -30,7 +30,9 @@ The precedence rule is intentionally narrow and deterministic:
    every ordinary INCAR tag.
 2. Every active `LDAU*` assignment and `LMAXMIX` is copied verbatim from that
    individual Step1 run. Template Hubbard values are ignored.
-3. The requested temperature overrides only `SYSTEM`, `TEBEG`, and `TEEND`.
+3. The requested temperature overrides `SYSTEM`, `TEBEG`, and `TEEND`.
+4. Step2 sampling is fixed at `NSW=3000` and `NBLOCK=4`, yielding 750
+   force-labeled configurations per run for downstream training.
 
 Before creating any output tree, the command verifies that `LDAUL`, `LDAUU`,
 and `LDAUJ` each contain one value per species in that run's `CONTCAR`. This is
@@ -43,9 +45,10 @@ run-specific or shared ancestor `KPOINTS`, `POTCAR`, `runvasp.sh`, and
 Each temperature root receives `step2_manifest.json` plus
 `step2_audit.json`, `step2_audit.tsv`, and `step2_audit.md`. The audit reopens
 every generated file, verifies exact INCAR/structure/input hashes, checks
-temperature and Hubbard values, rejects inherited runtime outputs, and clearly
-states that submission was not performed. Existing `Step2_<T>K` roots are
-never overwritten. To use another parent or the attached template explicitly:
+temperature, Hubbard values, `NSW=3000`, `NBLOCK=4`, and the expected 750-frame
+count, rejects inherited runtime outputs, and clearly states that submission
+was not performed. Existing `Step2_<T>K` roots are never overwritten. To use
+another parent or the attached template explicitly:
 
 ```bash
 iface vasp step2-prepare Step1 \
