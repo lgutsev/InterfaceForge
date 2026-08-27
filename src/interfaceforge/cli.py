@@ -63,9 +63,11 @@ from .vasp import (
     archive_mlff_models,
     assemble_potcar,
     ensure_run_potcar,
+    launch_step2_runs,
     package_outputs,
     prepare_band_run,
     prepare_recovery,
+    prepare_step2_series,
     prepare_standard_restart,
     resolve_potcar_root,
     submit_run,
@@ -357,6 +359,32 @@ def cmd_vasp_restart(args: argparse.Namespace) -> int:
             args.folder,
             from_contcar=not args.keep_poscar,
             clean_electronic=args.clean_electronic,
+        )
+    )
+    return 0
+
+
+def cmd_vasp_step2_series(args: argparse.Namespace) -> int:
+    _json(
+        prepare_step2_series(
+            args.source,
+            temperatures=args.temperatures,
+            output_root=args.output_root,
+            template=args.template,
+            source_structure=args.source_structure,
+            dry_run=args.dry_run,
+            audit_only=args.audit_only,
+        )
+    )
+    return 0
+
+
+def cmd_vasp_step2_launch(args: argparse.Namespace) -> int:
+    _json(
+        launch_step2_runs(
+            args.roots,
+            execute=args.execute,
+            launcher=args.launcher,
         )
     )
     return 0
@@ -1122,6 +1150,54 @@ def build_parser() -> argparse.ArgumentParser:
     restart.add_argument("--keep-poscar", action="store_true")
     restart.add_argument("--clean-electronic", action="store_true")
     restart.set_defaults(func=cmd_vasp_restart)
+    step2 = vasp_commands.add_parser(
+        "step2-prepare",
+        aliases=["step2-series"],
+        help="Prepare and audit fixed-temperature Step2 DFT-MD trees from Step1",
+    )
+    step2.add_argument("source", help="Step1 root containing per-run INCAR and CONTCAR files")
+    step2.add_argument(
+        "--temperatures",
+        nargs="+",
+        type=float,
+        default=[300.0, 450.0, 600.0],
+        help="Fixed-temperature output series (default: 300 450 600)",
+    )
+    step2.add_argument(
+        "--output-root",
+        help="Parent for Step2_<T>K trees (default: parent of the Step1 root)",
+    )
+    step2.add_argument(
+        "--template",
+        help="Step2 INCAR template (default: packaged INCAR.step2_dft_md)",
+    )
+    step2.add_argument(
+        "--source-structure",
+        default="CONTCAR",
+        help="Finished Step1 structure promoted to POSCAR (default: CONTCAR)",
+    )
+    step2.add_argument("--dry-run", action="store_true", help="Validate and print the exact plan only")
+    step2.add_argument(
+        "--audit-only",
+        action="store_true",
+        help="Re-audit existing Step2_<T>K trees without preparing or submitting anything",
+    )
+    step2.set_defaults(func=cmd_vasp_step2_series)
+    step2_launch = vasp_commands.add_parser(
+        "step2-launch",
+        help="Launch all unchanged PASS-audited daughter runs in one or more Step2 roots",
+    )
+    step2_launch.add_argument("roots", nargs="+", help="Step2_<T>K root(s) to launch")
+    step2_launch.add_argument(
+        "--launcher",
+        help="Audited launcher name (default: prefer runvasp.sh, then run.slurm)",
+    )
+    step2_launch.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually call sbatch; without this flag only print the verified launch plan",
+    )
+    step2_launch.set_defaults(func=cmd_vasp_step2_launch)
     band = vasp_commands.add_parser("band", help="Prepare a line-mode band run")
     band.add_argument("source")
     band.add_argument("destination")
