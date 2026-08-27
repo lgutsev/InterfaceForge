@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
@@ -44,6 +45,9 @@ _ARCHIVE_FILES = (
 
 INCAR_PRESETS = ("static", "relax", "md", "dos")
 MLFF_ACCURACY_PROFILES = ("accurate",)
+STEP2_HUBBARD_TAG_PREFIX = "LDAU"
+STEP2_HUBBARD_TAGS = ("LMAXMIX",)
+STEP2_INHERITED_FILES = ("KPOINTS", "POTCAR", "runvasp.sh", "run.slurm")
 
 
 def parse_incar(path: str | Path) -> dict[str, str]:
@@ -59,6 +63,736 @@ def parse_incar(path: str | Path) -> dict[str, str]:
         if match:
             parsed[match.group(1).upper()] = match.group(2).strip()
     return parsed
+
+
+def _incar_assignment(line: str) -> tuple[str, str] | None:
+    """Return an active INCAR assignment without interpreting its value."""
+
+    active = re.split(r"[!#]", line, maxsplit=1)[0]
+    match = re.match(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$", active)
+    if not match:
+        return None
+    return match.group(1).upper(), match.group(2).strip()
+
+
+def _is_step2_hubbard_tag(tag: str) -> bool:
+    normalized = tag.upper()
+    return normalized.startswith(STEP2_HUBBARD_TAG_PREFIX) or normalized in STEP2_HUBBARD_TAGS
+
+
+def _temperature_label(temperature: float) -> str:
+    value = float(temperature)
+    if not value > 0:
+        raise SafetyError(f"Temperature must be positive, got {temperature}")
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:g}".replace(".", "p")
+
+
+def _render_step2_incar(source_text: str, template_text: str, temperature: float) -> dict[str, Any]:
+    """Render a Step2 INCAR with a deliberately narrow precedence rule.
+
+    The Step2 template is authoritative for every ordinary setting. Every
+    active source tag beginning with ``LDAU`` plus ``LMAXMIX`` is instead
+    copied byte-for-byte from that source INCAR. This avoids rebuilding
+    species-length DFT+U arrays when different runs use different element
+    orders.
+    """
+
+    inherited_lines: list[str] = []
+    inherited_values: dict[str, str] = {}
+    for line in source_text.splitlines():
+        assignment = _incar_assignment(line)
+        if assignment is None or not _is_step2_hubbard_tag(assignment[0]):
+            continue
+        tag, value = assignment
+        if tag in inherited_values:
+            raise SafetyError(
+                f"Source INCAR contains duplicate active Hubbard tag {tag}; "
+                "refusing an ambiguous Step2 inheritance"
+            )
+        inherited_values[tag] = value
+        inherited_lines.append(line)
+
+    temperature_text = _temperature_label(float(temperature)).replace("p", ".")
+    replacements = {
+        "SYSTEM": f"Step2_DFT_MD_{_temperature_label(float(temperature))}K",
+        "TEBEG": temperature_text,
+        "TEEND": temperature_text,
+    }
+    found: set[str] = set()
+    output: list[str] = []
+    template_active: set[str] = set()
+    for line in template_text.splitlines():
+        assignment = _incar_assignment(line)
+        if assignment is None:
+            output.append(line)
+            continue
+        tag, _ = assignment
+        if tag in template_active:
+            raise SafetyError(
+                f"Step2 template contains duplicate active INCAR tag {tag}; "
+                "refusing ambiguous template precedence"
+            )
+        template_active.add(tag)
+        if _is_step2_hubbard_tag(tag):
+            # The source run is the only authority for Hubbard settings.
+            continue
+        if tag in replacements:
+            prefix = line[: len(line) - len(line.lstrip())]
+            output.append(f"{prefix}{tag} = {replacements[tag]}")
+            found.add(tag)
+        else:
+            output.append(line)
+
+    for tag, value in replacements.items():
+        if tag not in found:
+            output.extend(("", f"{tag} = {value}"))
+
+    if inherited_lines:
+        output.extend(
+            (
+                "",
+                "# DFT+U settings inherited verbatim from this run's Step1 INCAR",
+                *inherited_lines,
+            )
+        )
+    text = "\n".join(output).rstrip() + "\n"
+    rendered_values: dict[str, str] = {}
+    for line in text.splitlines():
+        assignment = _incar_assignment(line)
+        if assignment is not None:
+            rendered_values[assignment[0]] = assignment[1]
+    for tag, value in inherited_values.items():
+        if rendered_values.get(tag) != value:
+            raise SafetyError(f"Internal error: Step2 did not preserve source {tag} exactly")
+    return {
+        "text": text,
+        "hubbard_tags": inherited_values,
+        "template_tags": sorted(tag for tag in rendered_values if not _is_step2_hubbard_tag(tag)),
+    }
+
+
+def _step2_excluded(path: Path) -> bool:
+    for part in path.parts:
+        lowered = part.lower()
+        if (
+            part.startswith("X")
+            or "backup" in lowered
+            or lowered in {".interfaceforge", "archive"}
+            or lowered.startswith(("restart_archive_", "refit_archive_", "stability_archive_"))
+        ):
+            return True
+    return False
+
+
+def _resolve_step2_input(run: Path, source_root: Path, name: str) -> Path | None:
+    """Resolve a run-specific input first, then a shared ancestor input."""
+
+    current = run
+    while True:
+        candidate = current / name
+        if candidate.is_file() and candidate.stat().st_size:
+            return candidate
+        if current == source_root:
+            return None
+        current = current.parent
+
+
+def _vasp_list_length(value: str) -> int:
+    count = 0
+    for token in value.split():
+        repeat = re.fullmatch(r"(\d+)\*.+", token)
+        count += int(repeat.group(1)) if repeat else 1
+    return count
+
+
+def prepare_step2_series(
+    source: str | Path,
+    *,
+    temperatures: Iterable[float] = (300.0, 450.0, 600.0),
+    output_root: str | Path | None = None,
+    template: str | Path | None = None,
+    source_structure: str = "CONTCAR",
+    dry_run: bool = False,
+    audit_only: bool = False,
+) -> dict[str, Any]:
+    """Promote a recursive Step1 tree into fixed-temperature Step2 DFT-MD runs.
+
+    Common INCAR controls come from the Step2 template. The complete active
+    ``LDAU*``/``LMAXMIX`` set comes only from each source run. ``CONTCAR`` is
+    promoted to ``POSCAR`` and run-specific/shared VASP inputs are copied into
+    a sibling ``Step2_<temperature>K`` tree. Existing destination roots are
+    never overwritten.
+    """
+
+    source_root = Path(source).expanduser().resolve()
+    if not source_root.is_dir():
+        raise FileNotFoundError(source_root)
+    destination_parent = (
+        Path(output_root).expanduser().resolve() if output_root is not None else source_root.parent
+    )
+    if template is None:
+        template_label = "packaged INCAR.step2_dft_md"
+        template_text = resources.files("interfaceforge").joinpath(
+            "templates/INCAR.step2_dft_md"
+        ).read_text(encoding="utf-8")
+    else:
+        template_path = Path(template).expanduser().resolve()
+        if not template_path.is_file() or not template_path.stat().st_size:
+            raise FileNotFoundError(template_path)
+        template_label = str(template_path)
+        template_text = template_path.read_text(encoding="utf-8", errors="ignore")
+
+    normalized_temperatures = [float(value) for value in temperatures]
+    labels = [_temperature_label(value) for value in normalized_temperatures]
+    if len(set(labels)) != len(labels):
+        raise SafetyError("Temperatures must be unique")
+    if audit_only and dry_run:
+        raise SafetyError("--audit-only and --dry-run cannot be combined")
+
+    runs: list[Path] = []
+    for incar in sorted(source_root.rglob("INCAR")):
+        relative = incar.parent.relative_to(source_root)
+        if _step2_excluded(relative):
+            continue
+        structure = incar.parent / source_structure
+        if structure.is_file() and structure.stat().st_size:
+            runs.append(incar.parent)
+    if not runs:
+        raise SafetyError(
+            f"No Step1 runs with nonempty INCAR and {source_structure} found below {source_root}"
+        )
+
+    output_roots = [destination_parent / f"Step2_{label}K" for label in labels]
+    existing = [path for path in output_roots if path.exists()]
+    if audit_only:
+        missing_outputs = [path for path in output_roots if not path.is_dir()]
+        if missing_outputs:
+            raise SafetyError(
+                "Cannot audit missing Step2 destination(s): "
+                + ", ".join(str(path) for path in missing_outputs)
+            )
+    elif existing:
+        raise SafetyError(
+            "Refusing to overwrite existing Step2 destination(s): "
+            + ", ".join(str(path) for path in existing)
+        )
+
+    plans: list[dict[str, Any]] = []
+    for run in runs:
+        relative = run.relative_to(source_root)
+        source_incar = run / "INCAR"
+        structure = run / source_structure
+        elements = _poscar_elements(structure)
+        resolved_inputs = {
+            name: path
+            for name in STEP2_INHERITED_FILES
+            if (path := _resolve_step2_input(run, source_root, name)) is not None
+        }
+        if "KPOINTS" not in resolved_inputs:
+            raise SafetyError(f"No nonempty KPOINTS found for Step1 run {run}")
+        if "POTCAR" not in resolved_inputs:
+            raise SafetyError(f"No nonempty POTCAR found for Step1 run {run}")
+        if not ({"runvasp.sh", "run.slurm"} & resolved_inputs.keys()):
+            raise SafetyError(f"No runvasp.sh or run.slurm found for Step1 run {run}")
+        source_text = source_incar.read_text(encoding="utf-8", errors="ignore")
+        for temperature, label, output in zip(
+            normalized_temperatures, labels, output_roots, strict=True
+        ):
+            rendered = _render_step2_incar(source_text, template_text, temperature)
+            for tag in ("LDAUL", "LDAUU", "LDAUJ"):
+                value = rendered["hubbard_tags"].get(tag)
+                if value is not None and _vasp_list_length(value) != len(elements):
+                    raise SafetyError(
+                        f"{source_incar}: {tag} has {_vasp_list_length(value)} entries but "
+                        f"{source_structure} has {len(elements)} species ({' '.join(elements)})"
+                    )
+            plans.append(
+                {
+                    "source": run,
+                    "relative": relative,
+                    "destination": output / relative,
+                    "temperature_k": temperature,
+                    "temperature_label": label,
+                    "structure": structure,
+                    "elements": elements,
+                    "inputs": resolved_inputs,
+                    "incar_text": rendered["text"],
+                    "hubbard_tags": rendered["hubbard_tags"],
+                }
+            )
+
+    manifest_rows: list[dict[str, Any]] = []
+    if not dry_run and not audit_only:
+        created_roots: list[Path] = []
+        try:
+            for output in output_roots:
+                output.mkdir(parents=True, exist_ok=False)
+                created_roots.append(output)
+            for plan in plans:
+                destination: Path = plan["destination"]
+                if destination not in output_roots:
+                    destination.mkdir(parents=True, exist_ok=False)
+                shutil.copy2(plan["structure"], destination / "POSCAR")
+                for name, source_path in plan["inputs"].items():
+                    shutil.copy2(source_path, destination / name)
+                (destination / "INCAR").write_text(plan["incar_text"], encoding="utf-8")
+                manifest_rows.append(
+                    {
+                        "source": str(plan["source"]),
+                        "relative_path": plan["relative"].as_posix() or ".",
+                        "destination": str(destination),
+                        "temperature_k": plan["temperature_k"],
+                        "elements": plan["elements"],
+                        "source_structure": source_structure,
+                        "hubbard_tags": plan["hubbard_tags"],
+                        "inherited_files": sorted(plan["inputs"]),
+                        "source_incar_sha256": _sha256_file(plan["source"] / "INCAR"),
+                        "step2_incar_sha256": _sha256_file(destination / "INCAR"),
+                        "source_structure_sha256": _sha256_file(plan["structure"]),
+                        "step2_poscar_sha256": _sha256_file(destination / "POSCAR"),
+                    }
+                )
+            for output in output_roots:
+                rows = [row for row in manifest_rows if Path(row["destination"]).is_relative_to(output)]
+                manifest = {
+                    "format": "interfaceforge-step2-series",
+                    "schema_version": 1,
+                    "source_root": str(source_root),
+                    "template": template_label,
+                    "template_sha256": hashlib.sha256(template_text.encode()).hexdigest(),
+                    "precedence": {
+                        "ordinary_incar_tags": "Step2 template",
+                        "hubbard_tags": "exact active LDAU* and LMAXMIX lines from each Step1 INCAR",
+                        "temperature_tags": "requested temperature overrides SYSTEM, TEBEG, and TEEND",
+                    },
+                    "runs": rows,
+                }
+                (output / "step2_manifest.json").write_text(
+                    json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )
+        except Exception:
+            for output in reversed(created_roots):
+                shutil.rmtree(output, ignore_errors=True)
+            raise
+
+    audit_payload: dict[str, Any] | None = None
+    if not dry_run:
+        audit_payload = _audit_step2_plans(
+            plans,
+            output_roots=output_roots,
+            source_root=source_root,
+            template_label=template_label,
+            template_text=template_text,
+            source_structure=source_structure,
+        )
+        failed_reports = [
+            report["markdown"]
+            for report in audit_payload["reports"]
+            if report["status"] != "PASS"
+        ]
+        if failed_reports:
+            raise SafetyError(
+                "Step2 preparation audit FAILED; no jobs were submitted. Review: "
+                + ", ".join(failed_reports)
+            )
+
+    return {
+        "mode": "dry-run" if dry_run else "audited" if audit_only else "prepared-and-audited",
+        "source_root": str(source_root),
+        "template": template_label,
+        "temperatures_k": normalized_temperatures,
+        "output_roots": [str(path) for path in output_roots],
+        "source_runs": len(runs),
+        "prepared_runs": len(plans),
+        "source_structure": source_structure,
+        "hubbard_rule": "preserve exact active LDAU* and LMAXMIX assignments per source run",
+        "planned": [
+            {
+                "source": str(plan["source"]),
+                "destination": str(plan["destination"]),
+                "temperature_k": plan["temperature_k"],
+                "elements": plan["elements"],
+                "hubbard_tags": plan["hubbard_tags"],
+                "inherited_files": sorted(plan["inputs"]),
+            }
+            for plan in plans
+        ],
+        "audit": audit_payload,
+    }
+
+
+def _load_step2_launch_root(root: Path, launcher: str | None) -> list[dict[str, Any]]:
+    audit_path = root / "step2_audit.json"
+    manifest_path = root / "step2_manifest.json"
+    if not audit_path.is_file() or not manifest_path.is_file():
+        raise SafetyError(
+            f"{root} is missing step2_audit.json or step2_manifest.json; "
+            "run step2-prepare (or step2-prepare --audit-only) first"
+        )
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if audit.get("status") != "PASS":
+        raise SafetyError(f"{audit_path} is not PASS; refusing to launch")
+    previous_launch = root / "step2_launch.json"
+    if previous_launch.is_file():
+        previous = json.loads(previous_launch.read_text(encoding="utf-8"))
+        submitted = [
+            row for row in previous.get("runs", []) if row.get("status") == "SUBMITTED"
+        ]
+        if submitted:
+            raise SafetyError(
+                f"{root} already records {len(submitted)} submitted Step2 job(s) in "
+                f"{previous_launch}; refusing a possible duplicate launch"
+            )
+    manifest_rows = {
+        str(row.get("relative_path")): row for row in manifest.get("runs", [])
+    }
+    audit_rows = {
+        str(row.get("relative_path")): row for row in audit.get("runs", [])
+    }
+    if not manifest_rows or set(manifest_rows) != set(audit_rows):
+        raise SafetyError(f"Manifest/audit run sets do not match in {root}")
+
+    planned: list[dict[str, Any]] = []
+    for relative in sorted(manifest_rows):
+        manifest_row = manifest_rows[relative]
+        audit_row = audit_rows[relative]
+        if audit_row.get("status") != "PASS":
+            raise SafetyError(f"Audit row is not PASS: {root / relative}")
+        run = (root / relative).resolve() if relative != "." else root
+        if not run.is_relative_to(root):
+            raise SafetyError(f"Unsafe destination outside launch root: {run}")
+        for name, hash_key in (
+            ("INCAR", "step2_incar_sha256"),
+            ("POSCAR", "step2_poscar_sha256"),
+        ):
+            path = run / name
+            expected = manifest_row.get(hash_key)
+            if not path.is_file() or not expected or _sha256_file(path) != expected:
+                raise SafetyError(
+                    f"{path} changed after preparation; rerun step2-prepare --audit-only "
+                    "and inspect the audit before launching"
+                )
+        inherited_hashes = dict(audit_row.get("inherited_sha256") or {})
+        for name, expected in inherited_hashes.items():
+            path = run / name
+            if not path.is_file() or _sha256_file(path) != expected:
+                raise SafetyError(
+                    f"{path} changed after audit; refusing to launch the folder"
+                )
+        forbidden = [
+            name
+            for name in ("OUTCAR", "OSZICAR", "WAVECAR", "CHGCAR", "vasprun.xml")
+            if (run / name).exists()
+        ]
+        if forbidden:
+            raise SafetyError(
+                f"{run} already contains runtime outputs ({', '.join(forbidden)}); "
+                "refusing a possible duplicate launch"
+            )
+        script = resolve_launcher(run, launcher)
+        if script.name not in inherited_hashes:
+            raise SafetyError(
+                f"Launcher {script.name} was not part of the PASS audit for {run}"
+            )
+        planned.append(
+            {
+                "root": str(root),
+                "relative_path": relative,
+                "directory": str(run),
+                "launcher": script.name,
+                "temperature_k": audit_row.get("temperature_k"),
+            }
+        )
+    return planned
+
+
+def launch_step2_runs(
+    roots: Iterable[str | Path],
+    *,
+    execute: bool = False,
+    launcher: str | None = None,
+) -> dict[str, Any]:
+    """Launch only unchanged, PASS-audited Step2 daughter runs.
+
+    The default is a non-mutating launch plan. ``execute=True`` is the sole
+    path that calls ``sbatch``. All roots are fully preflighted before the
+    first job is submitted.
+    """
+
+    resolved_roots = [Path(value).expanduser().resolve() for value in roots]
+    if not resolved_roots:
+        raise SafetyError("At least one Step2 root is required")
+    planned: list[dict[str, Any]] = []
+    for root in resolved_roots:
+        if not root.is_dir():
+            raise FileNotFoundError(root)
+        planned.extend(_load_step2_launch_root(root, launcher))
+    if not planned:
+        raise SafetyError("No PASS-audited Step2 daughter runs were found")
+
+    if not execute:
+        return {
+            "mode": "dry-run",
+            "roots": [str(root) for root in resolved_roots],
+            "runs": len(planned),
+            "preflight": "PASS",
+            "submission": "not performed; pass --execute after review",
+            "planned": planned,
+        }
+
+    rows: list[dict[str, Any]] = []
+    failure: str | None = None
+    for item in planned:
+        try:
+            job_id = submit_run(item["directory"], item["launcher"])
+            rows.append({**item, "status": "SUBMITTED", "job_id": job_id, "detail": ""})
+        except Exception as exc:
+            failure = f"{item['directory']}: {exc}"
+            rows.append(
+                {**item, "status": "FAILED", "job_id": "", "detail": str(exc)}
+            )
+            break
+
+    report_paths: list[str] = []
+    for root in resolved_roots:
+        root_rows = [row for row in rows if row["root"] == str(root)]
+        if any(row["status"] == "FAILED" for row in root_rows):
+            root_status = "FAILED"
+        elif root_rows:
+            root_status = "SUBMITTED"
+        else:
+            root_status = "NOT_SUBMITTED"
+        payload = {
+            "format": "interfaceforge-step2-launch",
+            "schema_version": 1,
+            "status": root_status,
+            "root": str(root),
+            "preflight": "PASS",
+            "runs": root_rows,
+        }
+        json_path = root / "step2_launch.json"
+        tsv_path = root / "step2_launch.tsv"
+        json_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with tsv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=(
+                    "status",
+                    "job_id",
+                    "temperature_k",
+                    "relative_path",
+                    "directory",
+                    "launcher",
+                    "detail",
+                ),
+                delimiter="\t",
+            )
+            writer.writeheader()
+            writer.writerows(
+                {key: row.get(key, "") for key in writer.fieldnames} for row in root_rows
+            )
+        report_paths.extend((str(json_path), str(tsv_path)))
+    if failure is not None:
+        raise SafetyError(
+            f"Step2 launch stopped after a submission failure ({failure}). "
+            f"Review partial launch records: {', '.join(report_paths)}"
+        )
+    return {
+        "mode": "submitted",
+        "roots": [str(root) for root in resolved_roots],
+        "runs": len(rows),
+        "preflight": "PASS",
+        "submitted": len(rows),
+        "reports": report_paths,
+        "jobs": rows,
+    }
+
+
+def _audit_step2_plans(
+    plans: list[dict[str, Any]],
+    *,
+    output_roots: list[Path],
+    source_root: Path,
+    template_label: str,
+    template_text: str,
+    source_structure: str,
+) -> dict[str, Any]:
+    """Independently verify prepared Step2 inputs and write human-readable audits."""
+
+    forbidden_runtime_files = (
+        "OUTCAR",
+        "OSZICAR",
+        "WAVECAR",
+        "CHGCAR",
+        "CHG",
+        "XDATCAR",
+        "vasprun.xml",
+        "REPORT",
+    )
+    rows: list[dict[str, Any]] = []
+    for plan in plans:
+        destination: Path = plan["destination"]
+        issues: list[str] = []
+        incar_path = destination / "INCAR"
+        poscar_path = destination / "POSCAR"
+        if not incar_path.is_file():
+            issues.append("missing INCAR")
+            parsed: dict[str, str] = {}
+        else:
+            actual_text = incar_path.read_text(encoding="utf-8", errors="ignore")
+            if actual_text != plan["incar_text"]:
+                issues.append("INCAR differs from deterministic rendered template")
+            parsed = parse_incar(incar_path)
+        expected_temperature = plan["temperature_label"].replace("p", ".")
+        expected_system = f"Step2_DFT_MD_{plan['temperature_label']}K"
+        for tag, expected in (
+            ("SYSTEM", expected_system),
+            ("TEBEG", expected_temperature),
+            ("TEEND", expected_temperature),
+        ):
+            if parsed.get(tag) != expected:
+                issues.append(f"{tag}={parsed.get(tag)!r}, expected {expected!r}")
+        for tag, expected in plan["hubbard_tags"].items():
+            if parsed.get(tag) != expected:
+                issues.append(f"{tag} changed from Step1")
+        for tag in ("LDAUL", "LDAUU", "LDAUJ"):
+            value = parsed.get(tag)
+            if value is not None and _vasp_list_length(value) != len(plan["elements"]):
+                issues.append(
+                    f"{tag} has {_vasp_list_length(value)} values for {len(plan['elements'])} species"
+                )
+        if not poscar_path.is_file():
+            issues.append("missing POSCAR")
+        elif _sha256_file(poscar_path) != _sha256_file(plan["structure"]):
+            issues.append(f"POSCAR does not match Step1 {source_structure}")
+        inherited_hashes: dict[str, str] = {}
+        for name, source_path in plan["inputs"].items():
+            target = destination / name
+            if not target.is_file():
+                issues.append(f"missing inherited {name}")
+                continue
+            source_hash = _sha256_file(source_path)
+            inherited_hashes[name] = source_hash
+            if _sha256_file(target) != source_hash:
+                issues.append(f"inherited {name} differs from source")
+            if name in {"runvasp.sh", "run.slurm"} and not os.access(target, os.X_OK):
+                issues.append(f"inherited launcher {name} is not executable")
+        unexpected_runtime = [name for name in forbidden_runtime_files if (destination / name).exists()]
+        if unexpected_runtime:
+            issues.append("runtime outputs present: " + ", ".join(unexpected_runtime))
+        rows.append(
+            {
+                "status": "PASS" if not issues else "FAIL",
+                "source": str(plan["source"]),
+                "relative_path": plan["relative"].as_posix() or ".",
+                "destination": str(destination),
+                "temperature_k": plan["temperature_k"],
+                "elements": plan["elements"],
+                "hubbard_tags": plan["hubbard_tags"],
+                "inherited_files": sorted(plan["inputs"]),
+                "inherited_sha256": inherited_hashes,
+                "issues": issues,
+            }
+        )
+
+    reports: list[dict[str, Any]] = []
+    for output in output_roots:
+        output_rows = [row for row in rows if Path(row["destination"]).is_relative_to(output)]
+        status = "PASS" if output_rows and all(row["status"] == "PASS" for row in output_rows) else "FAIL"
+        payload = {
+            "format": "interfaceforge-step2-preparation-audit",
+            "schema_version": 1,
+            "status": status,
+            "source_root": str(source_root),
+            "output_root": str(output),
+            "template": template_label,
+            "template_sha256": hashlib.sha256(template_text.encode()).hexdigest(),
+            "runs": output_rows,
+        }
+        json_path = output / "step2_audit.json"
+        tsv_path = output / "step2_audit.tsv"
+        markdown_path = output / "step2_audit.md"
+        json_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with tsv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=(
+                    "status",
+                    "temperature_k",
+                    "relative_path",
+                    "elements",
+                    "LDAUL",
+                    "LDAUU",
+                    "LDAUJ",
+                    "inherited_files",
+                    "issues",
+                ),
+                delimiter="\t",
+            )
+            writer.writeheader()
+            for row in output_rows:
+                writer.writerow(
+                    {
+                        "status": row["status"],
+                        "temperature_k": row["temperature_k"],
+                        "relative_path": row["relative_path"],
+                        "elements": " ".join(row["elements"]),
+                        "LDAUL": row["hubbard_tags"].get("LDAUL", ""),
+                        "LDAUU": row["hubbard_tags"].get("LDAUU", ""),
+                        "LDAUJ": row["hubbard_tags"].get("LDAUJ", ""),
+                        "inherited_files": ",".join(row["inherited_files"]),
+                        "issues": "; ".join(row["issues"]),
+                    }
+                )
+        markdown_lines = [
+            "# Step2 preparation audit",
+            "",
+            f"**Status:** {status}",
+            "",
+            f"- Source: `{source_root}`",
+            f"- Output: `{output}`",
+            f"- Template: `{template_label}`",
+            f"- Runs: {len(output_rows)}",
+            "- Submission: **not performed**",
+            "",
+            "| Status | Run | Species | LDAUU | Inherited inputs | Issues |",
+            "|---|---|---|---|---|---|",
+        ]
+        for row in output_rows:
+            markdown_lines.append(
+                "| "
+                + " | ".join(
+                    (
+                        row["status"],
+                        row["relative_path"],
+                        " ".join(row["elements"]),
+                        row["hubbard_tags"].get("LDAUU", "—"),
+                        ", ".join(row["inherited_files"]),
+                        "; ".join(row["issues"]) or "—",
+                    )
+                )
+                + " |"
+            )
+        markdown_path.write_text("\n".join(markdown_lines) + "\n", encoding="utf-8")
+        reports.append(
+            {
+                "status": status,
+                "output_root": str(output),
+                "json": str(json_path),
+                "tsv": str(tsv_path),
+                "markdown": str(markdown_path),
+            }
+        )
+    return {
+        "status": "PASS" if reports and all(report["status"] == "PASS" for report in reports) else "FAIL",
+        "runs": len(rows),
+        "passed": sum(row["status"] == "PASS" for row in rows),
+        "failed": sum(row["status"] == "FAIL" for row in rows),
+        "reports": reports,
+    }
 
 
 def update_incar(
