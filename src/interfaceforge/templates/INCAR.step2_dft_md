@@ -1,0 +1,52 @@
+# ============================================================
+# Step 2: Direct DFT-MD for bulk/simple surface MACE data
+# Purpose: generate DFT-labeled thermal frames for extxyz/MACE
+# ============================================================
+
+SYSTEM = Step2_DFT_MD_300K
+
+# ----------------------------
+# Electronic settings
+# ----------------------------
+ENCUT  = 520
+PREC   = Med
+ALGO   = Fast
+LREAL  = Auto
+
+ISMEAR = 0
+#SIGMA  = 0.05
+
+# For TiN, if SCF convergence is annoying, use:
+ SIGMA = 0.10
+
+IVDW   = 11
+ISYM   = 0
+
+# ----------------------------
+# MD settings
+# ----------------------------
+IBRION = 0
+NSW    = 3000
+POTIM  = 1.0
+
+MDALGO = 2
+SMASS  = 1.0
+
+TEBEG  = 300
+TEEND  = 300
+
+ISIF   = 2
+
+# ----------------------------
+# Output / trajectory stride
+# ----------------------------
+NWRITE = 1
+NBLOCK = 4 #750 frames per run, likely sufficient given the diversity
+
+LWAVE  = .FALSE.
+LCHARG = .FALSE.
+
+# ----------------------------
+# Parallel settings
+# ----------------------------
+NCORE  = 1
