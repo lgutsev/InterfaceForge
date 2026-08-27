@@ -216,7 +216,7 @@ def _switch_one(
 
 def switch_step1_protocol(
     target: str | Path,
-    protocol: str,
+    protocol: str = DEFAULT_PROTOCOL,
     *,
     nsw: int | None = None,
     audit_only: bool = False,

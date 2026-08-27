@@ -1225,14 +1225,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     step1_protocol.add_argument(
         "--protocol",
-        required=True,
         choices=sorted(AIMD_PROTOCOLS),
-        help="academic (~2 ps preheat) or training (~0.25 ps preheat)",
+        default="academic",
+        help=(
+            "academic (~2 ps preheat, default, matches step2-prepare) or "
+            "training (~0.25 ps preheat)"
+        ),
     )
     step1_protocol.add_argument(
         "--nsw",
         type=int,
-        help="Override the profile preheat length (steps) instead of the profile default",
+        help=(
+            "Override the profile preheat length in steps; by default the "
+            "protocol's own value is used (academic 2000, training 250)"
+        ),
     )
     step1_protocol.add_argument(
         "--audit-only",
