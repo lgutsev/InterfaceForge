@@ -22,6 +22,7 @@ from .ai2kit import (
     run_adapter,
     stage_import,
 )
+from .aimd import AIMD_PROTOCOLS, sample_step2_runs, switch_step1_protocol
 from .audit import READINESS_PROFILES, run_audit
 from .beef import plot_beef_campaign
 from .campaign import build_plan, prepare_campaign, submit_campaign
@@ -372,10 +373,29 @@ def cmd_vasp_step2_series(args: argparse.Namespace) -> int:
             output_root=args.output_root,
             template=args.template,
             source_structure=args.source_structure,
+            protocol=args.protocol,
             dry_run=args.dry_run,
             audit_only=args.audit_only,
         )
     )
+    return 0
+
+
+def cmd_vasp_step1_protocol(args: argparse.Namespace) -> int:
+    _json(
+        switch_step1_protocol(
+            args.target,
+            args.protocol,
+            nsw=args.nsw,
+            audit_only=args.audit_only,
+            create=args.create,
+        )
+    )
+    return 0
+
+
+def cmd_vasp_step2_sample(args: argparse.Namespace) -> int:
+    _json(sample_step2_runs(args.roots, dry_run=args.dry_run))
     return 0
 
 
@@ -1177,6 +1197,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="CONTCAR",
         help="Finished Step1 structure promoted to POSCAR (default: CONTCAR)",
     )
+    step2.add_argument(
+        "--protocol",
+        choices=sorted(AIMD_PROTOCOLS),
+        default="academic",
+        help=(
+            "AIMD retention profile recorded in the manifest/audit. 'academic' "
+            "keeps the dense NBLOCK stride (unchanged default); 'training' defers "
+            "frame selection to 'iface vasp step2-sample' at the energy "
+            "decorrelation time"
+        ),
+    )
     step2.add_argument("--dry-run", action="store_true", help="Validate and print the exact plan only")
     step2.add_argument(
         "--audit-only",
@@ -1184,6 +1215,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-audit existing Step2_<T>K trees without preparing or submitting anything",
     )
     step2.set_defaults(func=cmd_vasp_step2_series)
+
+    step1_protocol = vasp_commands.add_parser(
+        "step1-protocol",
+        help="Switch a Step1 preheat INCAR between academic/training length and audit it",
+    )
+    step1_protocol.add_argument(
+        "target", help="A Step1 INCAR, a run directory, or a Step1 tree root"
+    )
+    step1_protocol.add_argument(
+        "--protocol",
+        required=True,
+        choices=sorted(AIMD_PROTOCOLS),
+        help="academic (~2 ps preheat) or training (~0.25 ps preheat)",
+    )
+    step1_protocol.add_argument(
+        "--nsw",
+        type=int,
+        help="Override the profile preheat length (steps) instead of the profile default",
+    )
+    step1_protocol.add_argument(
+        "--audit-only",
+        action="store_true",
+        help="Audit against the protocol without rewriting NSW",
+    )
+    step1_protocol.add_argument(
+        "--create",
+        action="store_true",
+        help="Create the INCAR if the target file does not exist",
+    )
+    step1_protocol.set_defaults(func=cmd_vasp_step1_protocol)
+
+    step2_sample = vasp_commands.add_parser(
+        "step2-sample",
+        help="Select Step2 training frames at the measured energy decorrelation time",
+    )
+    step2_sample.add_argument("roots", nargs="+", help="Prepared Step2_<T>K root(s)")
+    step2_sample.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute and print the per-run frame plan without writing step2_sample.*",
+    )
+    step2_sample.set_defaults(func=cmd_vasp_step2_sample)
+
     step2_launch = vasp_commands.add_parser(
         "step2-launch",
         help="Launch all unchanged PASS-audited daughter runs in one or more Step2 roots",

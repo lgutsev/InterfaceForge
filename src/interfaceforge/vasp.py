@@ -53,6 +53,49 @@ STEP2_NBLOCK = 4
 STEP2_TRAINING_FRAMES = STEP2_NSW // STEP2_NBLOCK
 
 
+def _step2_sampling_block(protocol: str) -> dict[str, Any]:
+    """Sampling summary recorded in the Step2 manifest and audit.
+
+    The generated INCAR is identical for every protocol (``NSW``/``NBLOCK``
+    always come from the template). Only the *retention policy* differs:
+    ``academic`` keeps the dense NBLOCK stride; ``training`` defers frame
+    selection to ``iface vasp step2-sample``, which spaces frames at the
+    measured energy decorrelation time.
+    """
+
+    from .aimd import resolve_protocol
+
+    block: dict[str, Any] = {"protocol": protocol, "nsw": STEP2_NSW, "nblock": STEP2_NBLOCK}
+    if protocol == "academic":
+        block["training_frames_per_run"] = STEP2_TRAINING_FRAMES
+        block["retention"] = "fixed NBLOCK stride (dense)"
+    else:
+        step2 = resolve_protocol(protocol)["step2"]
+        block["training_frames_per_run"] = None
+        block["retention"] = {
+            "method": step2["retention_method"],
+            "target_frames": step2["target_frames"],
+            "burn_in_ps": step2["burn_in_ps"],
+            "applied_by": "iface vasp step2-sample",
+        }
+    return block
+
+
+def _step2_sampling_markdown(block: dict[str, Any]) -> str:
+    if isinstance(block.get("retention"), dict):
+        retention = block["retention"]
+        lo, hi = retention["target_frames"]
+        return (
+            f"- Sampling: `NSW={block['nsw']}`, `NBLOCK={block['nblock']}`; retention by "
+            f"**{retention['method']}** ({retention['burn_in_ps']} ps burn-in, target "
+            f"**{lo}-{hi} frames/run**, applied by `{retention['applied_by']}`)"
+        )
+    return (
+        f"- Sampling: `NSW={block['nsw']}`, `NBLOCK={block['nblock']}` "
+        f"→ **{block['training_frames_per_run']} labeled frames per run** ({block['retention']})"
+    )
+
+
 def parse_incar(path: str | Path) -> dict[str, str]:
     """Parse the last active value of each INCAR tag."""
 
@@ -219,6 +262,7 @@ def prepare_step2_series(
     output_root: str | Path | None = None,
     template: str | Path | None = None,
     source_structure: str = "CONTCAR",
+    protocol: str = "academic",
     dry_run: bool = False,
     audit_only: bool = False,
 ) -> dict[str, Any]:
@@ -231,6 +275,9 @@ def prepare_step2_series(
     never overwritten.
     """
 
+    from .aimd import resolve_protocol
+
+    resolve_protocol(protocol)
     source_root = Path(source).expanduser().resolve()
     if not source_root.is_dir():
         raise FileNotFoundError(source_root)
@@ -378,10 +425,11 @@ def prepare_step2_series(
                         "hubbard_tags": "exact active LDAU* and LMAXMIX lines from each Step1 INCAR",
                         "temperature_tags": "requested temperature overrides SYSTEM, TEBEG, and TEEND",
                         "sampling_tags": (
-                            f"Step2 standard fixes NSW={STEP2_NSW} and NBLOCK={STEP2_NBLOCK} "
-                            f"for {STEP2_TRAINING_FRAMES} labeled frames"
+                            f"Step2 fixes NSW={STEP2_NSW} and NBLOCK={STEP2_NBLOCK}; "
+                            f"the {protocol} retention policy governs which frames are kept"
                         ),
                     },
+                    "sampling": _step2_sampling_block(protocol),
                     "runs": rows,
                 }
                 (output / "step2_manifest.json").write_text(
@@ -401,6 +449,7 @@ def prepare_step2_series(
             template_label=template_label,
             template_text=template_text,
             source_structure=source_structure,
+            protocol=protocol,
         )
         failed_reports = [
             report["markdown"]
@@ -423,11 +472,8 @@ def prepare_step2_series(
         "prepared_runs": len(plans),
         "source_structure": source_structure,
         "hubbard_rule": "preserve exact active LDAU* and LMAXMIX assignments per source run",
-        "sampling": {
-            "nsw": STEP2_NSW,
-            "nblock": STEP2_NBLOCK,
-            "training_frames_per_run": STEP2_TRAINING_FRAMES,
-        },
+        "protocol": protocol,
+        "sampling": _step2_sampling_block(protocol),
         "planned": [
             {
                 "source": str(plan["source"]),
@@ -446,7 +492,7 @@ def prepare_step2_series(
 def _load_step2_launch_root(
     root: Path,
     launcher: str | None,
-    emit: "Callable[[str], None]" = lambda _message: None,
+    emit: Callable[[str], None] = lambda _message: None,
 ) -> list[dict[str, Any]]:
     emit(f"[{root.name}] reading step2_audit.json + step2_manifest.json")
     audit_path = root / "step2_audit.json"
@@ -664,8 +710,20 @@ def _audit_step2_plans(
     template_label: str,
     template_text: str,
     source_structure: str,
+    protocol: str = "academic",
 ) -> dict[str, Any]:
     """Independently verify prepared Step2 inputs and write human-readable audits."""
+
+    from .aimd import preheat_ps, resolve_protocol
+
+    def _num(value: str | None) -> float | None:
+        try:
+            return float(str(value).split()[0])
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    preheat_lo, preheat_hi = resolve_protocol(protocol)["step1"]["preheat_ps_expected"]
+    sampling_block = _step2_sampling_block(protocol)
 
     forbidden_runtime_files = (
         "OUTCAR",
@@ -681,6 +739,18 @@ def _audit_step2_plans(
     for plan in plans:
         destination: Path = plan["destination"]
         issues: list[str] = []
+        notes: list[str] = []
+        source_incar = parse_incar(plan["source"] / "INCAR")
+        _source_nsw = _num(source_incar.get("NSW"))
+        source_ps = preheat_ps(
+            int(_source_nsw) if _source_nsw is not None else None,
+            _num(source_incar.get("POTIM")) or 1.0,
+        )
+        if source_ps is not None and not (preheat_lo <= source_ps <= preheat_hi):
+            notes.append(
+                f"Step1 preheat {source_ps:.2f} ps is outside the {protocol} range "
+                f"{preheat_lo}-{preheat_hi} ps"
+            )
         incar_path = destination / "INCAR"
         poscar_path = destination / "POSCAR"
         if not incar_path.is_file():
@@ -739,12 +809,15 @@ def _audit_step2_plans(
                 "temperature_k": plan["temperature_k"],
                 "nsw": STEP2_NSW,
                 "nblock": STEP2_NBLOCK,
-                "training_frames": STEP2_TRAINING_FRAMES,
+                "training_frames": sampling_block["training_frames_per_run"],
+                "protocol": protocol,
+                "step1_preheat_ps": round(source_ps, 3) if source_ps is not None else None,
                 "elements": plan["elements"],
                 "hubbard_tags": plan["hubbard_tags"],
                 "inherited_files": sorted(plan["inputs"]),
                 "inherited_sha256": inherited_hashes,
                 "issues": issues,
+                "notes": notes,
             }
         )
 
@@ -760,11 +833,8 @@ def _audit_step2_plans(
             "output_root": str(output),
             "template": template_label,
             "template_sha256": hashlib.sha256(template_text.encode()).hexdigest(),
-            "sampling": {
-                "nsw": STEP2_NSW,
-                "nblock": STEP2_NBLOCK,
-                "training_frames_per_run": STEP2_TRAINING_FRAMES,
-            },
+            "protocol": protocol,
+            "sampling": sampling_block,
             "runs": output_rows,
         }
         json_path = output / "step2_audit.json"
@@ -787,6 +857,7 @@ def _audit_step2_plans(
                     "LDAUJ",
                     "inherited_files",
                     "issues",
+                    "notes",
                 ),
                 delimiter="\t",
             )
@@ -806,6 +877,7 @@ def _audit_step2_plans(
                         "LDAUJ": row["hubbard_tags"].get("LDAUJ", ""),
                         "inherited_files": ",".join(row["inherited_files"]),
                         "issues": "; ".join(row["issues"]),
+                        "notes": "; ".join(row.get("notes", [])),
                     }
                 )
         markdown_lines = [
@@ -817,14 +889,12 @@ def _audit_step2_plans(
             f"- Output: `{output}`",
             f"- Template: `{template_label}`",
             f"- Runs: {len(output_rows)}",
-            (
-                f"- Standard sampling: `NSW={STEP2_NSW}`, `NBLOCK={STEP2_NBLOCK}` "
-                f"→ **{STEP2_TRAINING_FRAMES} labeled frames per run**"
-            ),
+            f"- Protocol: **{protocol}**",
+            _step2_sampling_markdown(sampling_block),
             "- Submission: **not performed**",
             "",
-            "| Status | Run | Species | LDAUU | Inherited inputs | Issues |",
-            "|---|---|---|---|---|---|",
+            "| Status | Run | Species | LDAUU | Inherited inputs | Issues | Notes |",
+            "|---|---|---|---|---|---|---|",
         ]
         for row in output_rows:
             markdown_lines.append(
@@ -837,6 +907,7 @@ def _audit_step2_plans(
                         row["hubbard_tags"].get("LDAUU", "—"),
                         ", ".join(row["inherited_files"]),
                         "; ".join(row["issues"]) or "—",
+                        "; ".join(row.get("notes", [])) or "—",
                     )
                 )
                 + " |"

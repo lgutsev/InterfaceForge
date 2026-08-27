@@ -31,8 +31,11 @@ The precedence rule is intentionally narrow and deterministic:
 2. Every active `LDAU*` assignment and `LMAXMIX` is copied verbatim from that
    individual Step1 run. Template Hubbard values are ignored.
 3. The requested temperature overrides `SYSTEM`, `TEBEG`, and `TEEND`.
-4. Step2 sampling is fixed at `NSW=3000` and `NBLOCK=4`, yielding 750
-   force-labeled configurations per run for downstream training.
+4. Step2 sampling is fixed at `NSW=3000` and `NBLOCK=4`. Which of those
+   steps become training frames depends on `--protocol` (see
+   [AIMD protocols](#aimd-protocols-academic-vs-training) below); the
+   default `academic` keeps the dense every-`NBLOCK` stride (750 frames
+   per run).
 
 Before creating any output tree, the command verifies that `LDAUL`, `LDAUU`,
 and `LDAUJ` each contain one value per species in that run's `CONTCAR`. This is
@@ -84,6 +87,91 @@ root before submitting the first job. It writes `step2_launch.json` and
 submitted jobs are already recorded. The audited `runvasp.sh` is preferred
 over `run.slurm`; use `--launcher NAME` only to select another already-audited
 launcher.
+
+## AIMD protocols: `academic` vs `training`
+
+InterfaceForge historically used one AIMD recipe for two different jobs: a
+long hand-curated **Step1 preheat** (~2 ps forced thermalization) followed
+by **dense Step2 retention** (every `NBLOCK`-th step, 750 of 3000). That is
+right for publication-oriented production but wrong for MLIP training data:
+
+- Frames a few fs apart in one trajectory are strongly autocorrelated.
+  Keeping hundreds of them just resamples one thermal basin and overweights
+  it in the training set.
+- A long discard-equilibration burn-in throws away exactly the
+  transient/reactive configurations (an anchor first contacting the surface,
+  a proton transfer) that are non-equilibrium by definition and matter most
+  for training.
+
+`--protocol` makes the two recipes explicit. **`academic` is the default and
+reproduces every prior result and directory convention unchanged.**
+
+| | `academic` | `training` |
+|---|---|---|
+| Purpose | Publication / production AIMD | MLIP training-data generation |
+| Step1 preheat | ~2 ps (full thermalization) | ~0.1–0.3 ps (geometry is already pre-relaxed by classical + VASP+U opt) |
+| Step2 INCAR | `NSW=3000`, `NBLOCK=4` | identical — the INCAR does **not** change |
+| Step2 frame retention | every `NBLOCK`-th step (750/run) | spaced at the measured total-energy decorrelation time (~15–40/run) |
+
+### Step1: switch and audit the preheat
+
+Step1 INCARs are hand-curated; `iface vasp step1-protocol` only retargets
+their `NSW` (preheat length) and audits the result against the profile — it
+never touches `SMASS`, thermostat, `TEBEG`, DFT+U, or anything else:
+
+```bash
+# Audit an existing Step1 tree against the training profile (no writes):
+iface vasp step1-protocol Step1 --protocol training --audit-only
+
+# Shorten every Step1 preheat below the tree to the training default (~0.25 ps):
+iface vasp step1-protocol Step1 --protocol training
+
+# Or one run / one file, with an explicit length:
+iface vasp step1-protocol Step1/NiO_m110_Big_U46 --protocol training --nsw 200
+```
+
+The audit is `PASS`/`WARN`/`FAIL`: `FAIL` only if the INCAR is not a
+fixed-temperature MD preheat at all (`IBRION≠0`, `NSW≤0`); `WARN` for a
+preheat whose length is outside the profile's expected window or whose
+restart hygiene is off (`LWAVE=.FALSE.` under `academic`). `archive/`,
+`backup/`, and `X*` paths are skipped.
+
+### Step2: prepare with a protocol, then sample by decorrelation
+
+```bash
+iface vasp step2-prepare Step1 --temperatures 300 450 600 --protocol training
+```
+
+The generated INCARs are byte-identical to `academic`; the difference is
+recorded in `step2_manifest.json` / `step2_audit.*` as the retention policy,
+and the audit adds an informational note when a discovered Step1 preheat
+length does not match the protocol (never a `FAIL`).
+
+After the Step2 jobs finish, select the frames:
+
+```bash
+iface vasp step2-sample Step2_300K Step2_450K Step2_600K
+```
+
+For each run this reads the full `OSZICAR` energy series, estimates the
+integrated autocorrelation time τ of the total energy (Sokal automatic
+windowing), drops a short burn-in (~0.15 ps), and keeps frames spaced ~τ
+apart — nudged so the count lands in 15–40. It writes `step2_sample.json`
+(per-run τ, stride, burn-in, and the selected frame indices) and
+`step2_sample.tsv`. Runs with no MD steps yet are reported `PENDING`.
+`--dry-run` prints the plan without writing. Under `academic` the same
+command just reproduces the dense `NBLOCK` stride.
+
+### Spend a step budget on many short trajectories
+
+For `training`, the better use of a fixed AIMD step budget is **many short
+independent trajectories** — different random seeds and/or different
+pre-relaxed starting configurations — rather than a few long ones. Short
+trajectories from a pre-relaxed start need almost no burn-in, decorrelate
+quickly, and sample distinct regions of configuration space instead of one
+basin very densely. The per-trajectory defaults above are tuned so that
+this is the natural pattern; InterfaceForge does not orchestrate the fan-out
+itself.
 
 ## Preparation
 
