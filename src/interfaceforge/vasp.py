@@ -374,6 +374,7 @@ def prepare_recovery(
     ml_mconf: int | None = None,
     force_expand: bool = False,
     increase_eps_low: bool = False,
+    ml_outblock: int = 1,
 ) -> dict[str, Any]:
     """Safely mutate one VASP MLFF folder for a well-defined recovery operation."""
 
@@ -383,6 +384,8 @@ def prepare_recovery(
         raise ValueError(f"Unknown recovery operation: {operation}")
     if increase_eps_low and operation != "discard":
         raise SafetyError("ML_EPS_LOW adjustment is supported only with discard recovery")
+    if operation == "heat" and ml_outblock < 1:
+        raise SafetyError("ML_OUTBLOCK must be a positive integer for heat-flux production")
 
     if operation in {"continue", "discard", "expand"}:
         require_files(run, ("CONTCAR",))
@@ -478,6 +481,7 @@ def prepare_recovery(
             # as "stability", plus ML_LHEAT to write ML_HEAT for
             # postprocessing. See https://vasp.at/wiki/ML_LHEAT
             changes["ML_LHEAT"] = ".TRUE."
+            changes["ML_OUTBLOCK"] = int(ml_outblock)
     changes["ISTART"] = 0
     delete.add("ICHARG")
     update_incar(run / "INCAR", changes, delete=delete)
@@ -491,6 +495,7 @@ def prepare_recovery(
         "ml_mb": ml_mb,
         "ml_mconf": ml_mconf,
         "ml_eps_low": parse_incar(run / "INCAR").get("ML_EPS_LOW"),
+        "ml_outblock": ml_outblock if operation == "heat" else None,
     }
 
 

@@ -241,6 +241,7 @@ class VaspTests(unittest.TestCase):
             self.assertEqual(result["operation"], "heat")
             parsed = parse_incar(run / "INCAR")
             self.assertEqual(parsed["ML_LHEAT"], ".TRUE.")
+            self.assertEqual(parsed["ML_OUTBLOCK"], "1")
             self.assertEqual(parsed["ML_MODE"], "run")
             self.assertEqual(parsed["TEBEG"], "450.0")
             self.assertEqual(parsed["TEEND"], "450.0")

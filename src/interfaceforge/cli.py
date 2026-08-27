@@ -345,6 +345,7 @@ def cmd_vasp_recover(args: argparse.Namespace) -> int:
             ml_mconf=args.ml_mconf,
             force_expand=args.force_expand,
             increase_eps_low=args.increase_eps_low,
+            ml_outblock=args.ml_outblock,
         )
     )
     return 0
@@ -677,7 +678,6 @@ def cmd_mlff_interfaces(args: argparse.Namespace) -> int:
             refit_nsw=args.refit_nsw,
             stability_nsw=args.stability_nsw,
             potim=args.potim,
-            kpoints_source=args.kpoints,
             force=args.force,
         )
     elif args.mlff_interfaces_command == "array-launch":
@@ -1061,11 +1061,10 @@ def build_parser() -> argparse.ArgumentParser:
     mi_build.add_argument("--ivdw", type=int, default=11)
     mi_build.add_argument("--tebeg", type=float, default=300.0)
     mi_build.add_argument("--teend", type=float, default=600.0)
-    mi_build.add_argument("--train-nsw", type=int, default=100000)
+    mi_build.add_argument("--train-nsw", type=int, default=3000)
     mi_build.add_argument("--refit-nsw", type=int, default=0)
-    mi_build.add_argument("--stability-nsw", type=int, default=20000)
+    mi_build.add_argument("--stability-nsw", type=int, default=3000)
     mi_build.add_argument("--potim", type=float, default=1.0)
-    mi_build.add_argument("--kpoints", help="Shared reference KPOINTS (default: Gamma-only)")
     mi_build.add_argument("--force", action="store_true")
     mi_build.set_defaults(func=cmd_mlff_interfaces)
     mi_array = mlff_interfaces_commands.add_parser(
@@ -1074,7 +1073,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_campaign_option(mi_array)
     mi_array.add_argument("--stage", default="train")
     mi_array.add_argument("--concurrency", type=int, default=4)
-    mi_array.add_argument("--array-profile-name", default="vasp_train_array")
+    mi_array.add_argument(
+        "--array-profile-name",
+        help="Optional resource profile; defaults to the selected stage's own profile",
+    )
     mi_array.add_argument("--output")
     mi_array.add_argument("--force", action="store_true")
     mi_array.set_defaults(func=cmd_mlff_interfaces)
@@ -1103,6 +1105,12 @@ def build_parser() -> argparse.ArgumentParser:
     recover.add_argument("--ml-mb", type=int)
     recover.add_argument("--ml-mconf", type=int)
     recover.add_argument("--force-expand", action="store_true")
+    recover.add_argument(
+        "--ml-outblock",
+        type=int,
+        default=1,
+        help="For heat recovery, write ML_HEAT every N steps (default: 1)",
+    )
     recover.add_argument(
         "--increase-eps-low",
         action="store_true",

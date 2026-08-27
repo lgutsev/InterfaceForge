@@ -16,10 +16,9 @@ jobs:
       SECONDS=0
       srun -n{ntasks} vasp_std
       echo "took $SECONDS sec."
-  # Sized identically to vasp_train: each array task runs one leaf's own
-  # run.slurm (which already loads vasp6/6.5.1-cpu itself), so this job
-  # entry only needs the resource request -- its own "command" is unused,
-  # since `iface mlff-interfaces array-launch` always supplies one.
+  # Optional resource override. The array launcher executes vasp_train's
+  # command directly in each leaf and inherits its modules/environment;
+  # this entry therefore only controls the Slurm resource request.
   vasp_train_array:
     partition: workq
     account: loni_perovsk27

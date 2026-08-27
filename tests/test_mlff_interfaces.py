@@ -32,6 +32,16 @@ def _write_grid(root: Path, *, term_label: dict[str, str] | None = None) -> Path
                 directory = source / family / labels[term] / f"x{x}"
                 directory.mkdir(parents=True)
                 (directory / "CONTCAR").write_text("dummy contcar\n", encoding="utf-8")
+                (directory / "INCAR").write_text(
+                    "ENCUT = 520\nIVDW = 11\nPOTIM = 1.0\nEDIFF = 1E-6\n",
+                    encoding="utf-8",
+                )
+                (directory / "KPOINTS").write_text(
+                    "Automatic\n0\nGamma\n1 1 1\n", encoding="utf-8"
+                )
+                (directory / "POTCAR").write_text(
+                    f"POTCAR for {term} x{x}\n", encoding="utf-8"
+                )
     return source
 
 
@@ -47,6 +57,7 @@ def _write_profile(path: Path) -> None:
                 "ntasks": 64,
                 "cpus_per_task": 1,
                 "time": "24:00:00",
+                "modules": ["vasp6/6.5.1-cpu"],
                 "command": "srun -n{ntasks} vasp_std",
             },
             "vasp_train_array": {
@@ -133,6 +144,15 @@ class DiscoverySourcesTests(unittest.TestCase):
                     directory = source / "Real" / term / name
                     directory.mkdir(parents=True)
                     (directory / "CONTCAR").write_text("dummy\n", encoding="utf-8")
+                    (directory / "INCAR").write_text(
+                        "ENCUT=520\nIVDW=11\nPOTIM=1.0\n", encoding="utf-8"
+                    )
+                    (directory / "KPOINTS").write_text(
+                        "Automatic\n0\nGamma\n1 1 1\n", encoding="utf-8"
+                    )
+                    (directory / "POTCAR").write_text(
+                        f"POTCAR {term} {name}\n", encoding="utf-8"
+                    )
             (source / "Real" / "Ti_Term" / "runvasp.sh").write_text("#!/bin/bash\n", encoding="utf-8")
 
             result = discover_mlff_interface_sources(
@@ -140,6 +160,7 @@ class DiscoverySourcesTests(unittest.TestCase):
             )
 
             self.assertEqual(result["status_counts"], {"matched": 10})
+            self.assertTrue(all(row["inputs_status"] == "complete" for row in result["rows"]))
             by_key = {(row["term"], row["x"]): row for row in result["rows"]}
             self.assertEqual(
                 Path(by_key[("N_Term", "0")]["structure_path"]).parent.name, "SiN_TiN_N-term"
@@ -198,7 +219,7 @@ class GenerateCampaignTests(unittest.TestCase):
                     manifest, root / "campaign", profile_path=root / "profile.yaml"
                 )
 
-    def test_generates_campaign_with_temperature_ramp_and_no_shared_potcar(self) -> None:
+    def test_generates_campaign_with_temperature_ramp_and_per_system_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = _write_grid(root)
@@ -213,12 +234,18 @@ class GenerateCampaignTests(unittest.TestCase):
             campaign_yaml = yaml.safe_load(Path(result["campaign"]).read_text(encoding="utf-8"))
             self.assertEqual(len(campaign_yaml["systems"]), 20)
             self.assertNotIn("POTCAR", campaign_yaml["reference"]["inputs"])
+            self.assertEqual(
+                set(campaign_yaml["systems"][0]["inputs"]), {"INCAR", "KPOINTS", "POTCAR"}
+            )
             train_settings = campaign_yaml["stages"]["vasp_mlff"]["train"]
             self.assertEqual(train_settings["temperature"], 300.0)
             self.assertEqual(train_settings["teend"], 600.0)
-            incar_text = (Path(result["campaign_root"]) / "inputs" / "INCAR").read_text(encoding="utf-8")
+            snapshot = Path(result["campaign_root"]) / "inputs" / "systems" / "real-n_term-x0"
+            incar_text = (snapshot / "INCAR").read_text(encoding="utf-8")
             self.assertIn("ENCUT = 520", incar_text)
             self.assertIn("IVDW = 11", incar_text)
+            self.assertTrue((snapshot / "POTCAR").is_file())
+            self.assertTrue(Path(result["provenance"]).is_file())
 
 
 class EndToEndPipelineTests(unittest.TestCase):
@@ -237,7 +264,12 @@ class EndToEndPipelineTests(unittest.TestCase):
             array_result = write_throttled_array_launcher(campaign, stage="train", concurrency=4)
 
             self.assertEqual(array_result["leaves"], 20)
-            self.assertIn("--array=0-19%4", Path(array_result["launcher"]).read_text(encoding="utf-8"))
+            launcher_text = Path(array_result["launcher"]).read_text(encoding="utf-8")
+            self.assertIn("--array=0-19%4", launcher_text)
+            self.assertIn('cd "$LEAF_DIR"', launcher_text)
+            self.assertIn("srun -n64 vasp_std", launcher_text)
+            self.assertNotIn('bash "$(basename "$LEAF_SCRIPT")"', launcher_text)
+            self.assertIn("module load vasp6/6.5.1-cpu", launcher_text)
 
             system_id = campaign.systems[0].id
             leaf = campaign.root / "runs" / "vasp" / system_id / "train"
@@ -257,6 +289,8 @@ class EndToEndPipelineTests(unittest.TestCase):
             # 2 terms x 5 x-values per family.
             family_counts = audit["train_health_by_family"][cell["family"]]
             self.assertEqual(sum(family_counts.values()), 10)
+            self.assertTrue(audit["provenance"]["passed"])
+            self.assertTrue(Path(audit["outputs"]["json"]).is_file())
 
     def test_array_launch_requires_prepare_first(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

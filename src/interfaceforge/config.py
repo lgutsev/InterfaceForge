@@ -29,6 +29,7 @@ class SystemSpec:
     structure: Path
     temperature: float | None = None
     tags: dict[str, Any] = field(default_factory=dict)
+    inputs: dict[str, Path] = field(default_factory=dict)
     run_glob: str | None = None
     """fnmatch pattern (matched against a collected trajectory's path relative
     to the dataset source root, e.g. "*/interface_*/*") identifying which
@@ -566,6 +567,12 @@ def load_campaign(path: str | Path) -> Campaign:
                 structure=_resolve(root, str(structure)).resolve(),
                 temperature=float(temperature) if temperature is not None else None,
                 tags=_mapping(entry.get("tags"), f"systems[{index}].tags"),
+                inputs={
+                    str(name): _resolve(root, str(value)).resolve()
+                    for name, value in _mapping(
+                        entry.get("inputs"), f"systems[{index}].inputs"
+                    ).items()
+                },
                 run_glob=run_glob,
             )
         )

@@ -15,6 +15,26 @@ reviewed source manifest into a `campaign.yaml` that machinery already
 knows how to prepare/submit/audit, and adds the two pieces that machinery
 did not have — throttled mass submission, and a grid-shaped audit rollup.
 
+For the LA Tech tree, `launch_scripts/periodic_interface_mlff.sh` supplies
+the established paths and settings. Its workflow remains deliberately
+review-gated:
+
+```bash
+export CER_INTERFACE_BASE=/ddnB/work/lgutsev/LATech_PROJS/Cer_Interface
+
+launch_scripts/periodic_interface_mlff.sh discover
+# Review MD_Period/VASP_MLFF_Interfaces_source_manifest.csv.
+launch_scripts/periodic_interface_mlff.sh build
+launch_scripts/periodic_interface_mlff.sh prepare
+# Review, then submit runs/vasp/_arrays/train_array.slurm with sbatch.
+launch_scripts/periodic_interface_mlff.sh audit
+```
+
+`prepare` writes the throttled `%2` training array but does not submit it.
+This prevents an unresolved manifest or unreviewed launcher from starting 20
+calculations. Override `IFACE_MLFF_SOURCE`, `IFACE_MLFF_OUTPUT`,
+`IFACE_MLFF_MANIFEST`, or `IFACE_MLFF_PROFILE` when the tree moves.
+
 ## 1. Discover sources (review before trusting)
 
 ```bash
@@ -37,8 +57,10 @@ leaf names (`SiN_TiN_N-term` vs `SiN-TiN-Ti-term`) without needing separate
 configuration — matching keys off the `N_Term`/`Ti_Term` *parent* directory,
 not the leaf's own naming. **Never guesses past reporting**:
 `manifest.csv`'s `match_status` per row is `matched`, `missing`, or
-`ambiguous` (candidates listed) — review and hand-fix `structure_path`
-before the next step, which refuses to proceed on anything not `matched`.
+`ambiguous` (candidates listed). It also resolves `INCAR`, `KPOINTS`, and
+`POTCAR` from the leaf or an ancestor no higher than `source_root`, records
+their SHA-256 hashes, and reports `inputs_status`. Review the manifest before
+the next step, which refuses anything unresolved or incomplete.
 Point `source_root` at the temperature-specific folder itself (e.g.
 `Step2_300K/`, not its `MD_Period` parent) so a temperature like `300` in
 an ancestor directory name can't be mistaken for an `x` value.
@@ -57,15 +79,13 @@ production `runvasp.sh` exactly (`workq`, 2 nodes / 128 MPI tasks,
 account/partition/binary rather than editing it as the source of truth.
 
 Writes `VASP_MLFF_Interfaces/campaign.yaml` with one system per grid cell
-(`kind: interface`, `tags: {family, term, x}`) and a starter
-`inputs/INCAR` containing `ENCUT = 520` / `IVDW = 11` (add convergence
-settings — `EDIFF`, `ISMEAR`, ... — yourself; this deliberately does not
-invent electronic-structure settings it wasn't given). **No shared
-reference POTCAR is set** — each system's own POSCAR (from its own
-structure) carries its own species, so `iface vasp submit` generates the
-correct POTCAR per leaf automatically. This matters here specifically:
-oxygen-free and oxygen-containing interfaces in a grid like this cannot
-share one POTCAR.
+(`kind: interface`, `tags: {family, term, x}`). For maximum reproducibility,
+it snapshots each reviewed leaf's exact `CONTCAR`, `INCAR`, `KPOINTS`, and
+chemistry-specific `POTCAR` below `inputs/systems/<system-id>/` and writes
+`inputs/source_provenance.json` with source/snapshot paths and SHA-256 hashes.
+It does not invent a Gamma mesh, replace a POTCAR, or discard other converged
+INCAR settings. The build refuses a source INCAR unless `ENCUT`, `IVDW`, and
+`POTIM` match the explicitly requested values (defaults: 520, 11, and 1 fs).
 
 The 300→600 K training ramp (`TEBEG`/`TEEND`) is new support in
 `stage_tags`/`prepare_campaign` (`teend` in a stage's settings), consistent
@@ -93,12 +113,15 @@ iface mlff-interfaces array-launch -c VASP_MLFF_Interfaces/campaign.yaml \
 ```
 
 Writes **one** Slurm array job (`--array=0-19%4`, Slurm's native throttling
-syntax — not a custom polling loop) that runs each already-prepared leaf's
-`run.slurm` as a plain shell script (its `#SBATCH` lines are inert executed
-this way) at up to 4 concurrent array tasks. Requires an
-`array_profile_name` job (default `vasp_train_array`) in the scheduler
-profile, sized for one leaf — the array multiplies it by concurrency, not
-by task count. This only writes the launcher; `sbatch` it yourself.
+syntax — not a custom polling loop) at up to 4 concurrent tasks. Each task
+changes into its manifest-selected run directory, verifies nonempty
+`INCAR/KPOINTS/POSCAR/POTCAR`, and invokes the stage profile's VASP command
+directly. It deliberately does not execute the leaf `run.slurm`: inside an
+array, that nested script's `SLURM_SUBMIT_DIR` belongs to the parent array
+and can redirect VASP to the wrong directory. The stage's own profile is
+used by default; `--array-profile-name` is optional. LONI profiles must not
+set memory manually. This command only writes the launcher; review it and
+`sbatch` it yourself.
 
 ## 4. Grid-aware audit
 
@@ -112,8 +135,12 @@ train/refit/stability health, plus `train_health_by_family`/
 `train_health_by_term` totals — instead of scrolling through 60 individual
 run rows (20 cells x 3 stages) to see the shape of where the grid stands.
 Family/term/x come from `campaign.systems[i].tags`, not by re-parsing the
-generated system id string, which is deliberately robust to how that id
-happens to be slugified.
+generated system id string. The audit also rehashes original and snapshotted
+inputs, verifies staged POSCAR/KPOINTS/POTCAR membership, reports key INCAR
+settings, checks `ML_AB[N]`, fast `ML_FFN`, and `ML_HEAT` readiness, and
+writes persistent `reports/mlff_interfaces/audit.json` and `audit.csv`.
+The `refit_ready` and `heat_ready` gates are true only when every grid cell
+has the required artifact; do not advance a partial 20-cell grid silently.
 
 ## 5. ML_LHEAT production (try it out)
 
@@ -123,13 +150,15 @@ stability LEAF`), the new `heat` operation promotes the same validated
 `ML_FFN` and adds `ML_LHEAT = .TRUE.`:
 
 ```bash
-iface vasp ml-recover heat LEAF --temperature 450 --nsw 200000
+iface vasp ml-recover heat LEAF --temperature 450 --nsw 1000 --ml-outblock 1
 ```
 
 Requires `ML_FFN` reporting `ML_LFAST = .TRUE.` (same requirement as
 `stability`) and archives the run before mutating it, same as every other
-recovery operation. `ML_LHEAT` writes the heat flux to `ML_HEAT` for
-Green-Kubo postprocessing — see
+recovery operation. `ML_LHEAT` writes the heat flux to `ML_HEAT`, while
+`ML_OUTBLOCK=1` makes the first short test easy to verify before committing
+to a long production trajectory. After confirming `ML_HEAT` is nonempty,
+prepare the intended production length, for example `--nsw 200000`. See
 [the VASP wiki](https://vasp.at/wiki/ML_LHEAT). This uses whatever
 ensemble/thermostat settings the validated `stability` INCAR already
 established (`MDALGO`, `SMASS`, ...) rather than asserting a new one here —

@@ -65,6 +65,7 @@ def build_plan(campaign: Campaign) -> dict[str, Any]:
                 "structure": str(item.structure),
                 "temperature": item.temperature,
                 "tags": item.tags,
+                "inputs": {name: str(path) for name, path in item.inputs.items()},
             }
             for item in campaign.systems
         ],
@@ -106,6 +107,10 @@ def prepare_campaign(campaign: Campaign, *, force: bool = False) -> dict[str, An
     warnings: list[str] = []
 
     for system in campaign.systems if vasp_enabled else ():
+        system_inputs = {
+            name: system.inputs.get(name, fallback)
+            for name, fallback in (("INCAR", base_incar), ("KPOINTS", kpoints), ("POTCAR", potcar))
+        }
         system_root = campaign.root / "runs" / "vasp" / system.id
         for stage in _STAGES:
             settings = dict(vasp_settings.get(stage, {}))
@@ -117,15 +122,17 @@ def prepare_campaign(campaign: Campaign, *, force: bool = False) -> dict[str, An
                 created.append("POSCAR")
             elif not (run / "POSCAR").is_file():
                 warnings.append(f"{system.id}/{stage}: missing structure {system.structure}")
-            for name, source in (("KPOINTS", kpoints), ("POTCAR", potcar)):
+            for name in ("KPOINTS", "POTCAR"):
+                source = system_inputs[name]
                 if source is not None and _copy_if_present(source, run / name, force=force):
                     created.append(name)
                 elif not (run / name).is_file():
                     warnings.append(f"{system.id}/{stage}: missing reference input {name}")
 
             incar = run / "INCAR"
-            if base_incar and base_incar.is_file() and (force or not incar.exists()):
-                shutil.copy2(base_incar, incar)
+            system_incar = system_inputs["INCAR"]
+            if system_incar and system_incar.is_file() and (force or not incar.exists()):
+                shutil.copy2(system_incar, incar)
                 created.append("INCAR")
             elif not incar.exists():
                 incar.write_text(
