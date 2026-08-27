@@ -385,6 +385,7 @@ def cmd_vasp_step2_launch(args: argparse.Namespace) -> int:
             args.roots,
             execute=args.execute,
             launcher=args.launcher,
+            progress=lambda message: print(message, file=sys.stderr, flush=True),
         )
     )
     return 0

@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -341,7 +341,13 @@ def prepare_step2_series(
                     destination.mkdir(parents=True, exist_ok=False)
                 shutil.copy2(plan["structure"], destination / "POSCAR")
                 for name, source_path in plan["inputs"].items():
-                    shutil.copy2(source_path, destination / name)
+                    target = destination / name
+                    shutil.copy2(source_path, target)
+                    if name in {"runvasp.sh", "run.slurm"}:
+                        # Guarantee the inherited launcher is executable even if the
+                        # Step1 copy never had its execute bit set; the auditor and
+                        # sbatch both require this.
+                        target.chmod(target.stat().st_mode | 0o111)
                 (destination / "INCAR").write_text(plan["incar_text"], encoding="utf-8")
                 manifest_rows.append(
                     {
@@ -437,7 +443,12 @@ def prepare_step2_series(
     }
 
 
-def _load_step2_launch_root(root: Path, launcher: str | None) -> list[dict[str, Any]]:
+def _load_step2_launch_root(
+    root: Path,
+    launcher: str | None,
+    emit: "Callable[[str], None]" = lambda _message: None,
+) -> list[dict[str, Any]]:
+    emit(f"[{root.name}] reading step2_audit.json + step2_manifest.json")
     audit_path = root / "step2_audit.json"
     manifest_path = root / "step2_manifest.json"
     if not audit_path.is_file() or not manifest_path.is_file():
@@ -511,6 +522,10 @@ def _load_step2_launch_root(root: Path, launcher: str | None) -> list[dict[str, 
             raise SafetyError(
                 f"Launcher {script.name} was not part of the PASS audit for {run}"
             )
+        emit(
+            f"[{root.name}] preflight OK: {relative} "
+            f"(T={audit_row.get('temperature_k')}K, launcher={script.name})"
+        )
         planned.append(
             {
                 "root": str(root),
@@ -528,6 +543,7 @@ def launch_step2_runs(
     *,
     execute: bool = False,
     launcher: str | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Launch only unchanged, PASS-audited Step2 daughter runs.
 
@@ -536,18 +552,25 @@ def launch_step2_runs(
     first job is submitted.
     """
 
+    emit = progress or (lambda _message: None)
     resolved_roots = [Path(value).expanduser().resolve() for value in roots]
     if not resolved_roots:
         raise SafetyError("At least one Step2 root is required")
+    emit(
+        f"Preflighting {len(resolved_roots)} Step2 root(s): "
+        + ", ".join(root.name for root in resolved_roots)
+    )
     planned: list[dict[str, Any]] = []
     for root in resolved_roots:
         if not root.is_dir():
             raise FileNotFoundError(root)
-        planned.extend(_load_step2_launch_root(root, launcher))
+        planned.extend(_load_step2_launch_root(root, launcher, emit))
     if not planned:
         raise SafetyError("No PASS-audited Step2 daughter runs were found")
+    emit(f"Preflight PASS: {len(planned)} run(s) ready to submit")
 
     if not execute:
+        emit("Dry run only; no jobs submitted. Re-run with --execute to submit.")
         return {
             "mode": "dry-run",
             "roots": [str(root) for root in resolved_roots],
@@ -559,15 +582,21 @@ def launch_step2_runs(
 
     rows: list[dict[str, Any]] = []
     failure: str | None = None
-    for item in planned:
+    for index, item in enumerate(planned, start=1):
+        emit(
+            f"[{index}/{len(planned)}] sbatch {item['relative_path']} "
+            f"in {item['directory']}"
+        )
         try:
             job_id = submit_run(item["directory"], item["launcher"])
             rows.append({**item, "status": "SUBMITTED", "job_id": job_id, "detail": ""})
+            emit(f"    submitted job {job_id}")
         except Exception as exc:
             failure = f"{item['directory']}: {exc}"
             rows.append(
                 {**item, "status": "FAILED", "job_id": "", "detail": str(exc)}
             )
+            emit(f"    FAILED: {exc}")
             break
 
     report_paths: list[str] = []
@@ -609,11 +638,13 @@ def launch_step2_runs(
                 {key: row.get(key, "") for key in writer.fieldnames} for row in root_rows
             )
         report_paths.extend((str(json_path), str(tsv_path)))
+        emit(f"[{root.name}] {root_status}; wrote {json_path.name}, {tsv_path.name}")
     if failure is not None:
         raise SafetyError(
             f"Step2 launch stopped after a submission failure ({failure}). "
             f"Review partial launch records: {', '.join(report_paths)}"
         )
+    emit(f"Done: {len(rows)} job(s) submitted across {len(resolved_roots)} root(s)")
     return {
         "mode": "submitted",
         "roots": [str(root) for root in resolved_roots],
