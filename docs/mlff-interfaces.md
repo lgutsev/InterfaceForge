@@ -47,8 +47,14 @@ an ancestor directory name can't be mistaken for an `x` value.
 
 ```bash
 iface mlff-interfaces build manifest.csv VASP_MLFF_Interfaces \
-  --profile profiles/loni.yaml --tebeg 300 --teend 600
+  --profile examples/mlff-interfaces/profile_loni.yaml --tebeg 300 --teend 600
 ```
+
+[`examples/mlff-interfaces/profile_loni.yaml`](../examples/mlff-interfaces/profile_loni.yaml)
+defines `vasp_train`/`vasp_train_array`, matching the maintainer's
+production `runvasp.sh` exactly (`workq`, 2 nodes / 128 MPI tasks,
+`vasp6/6.5.1-cpu`, `vasp_std`, 72h). Copy and adjust it for a different
+account/partition/binary rather than editing it as the source of truth.
 
 Writes `VASP_MLFF_Interfaces/campaign.yaml` with one system per grid cell
 (`kind: interface`, `tags: {family, term, x}`) and a starter
