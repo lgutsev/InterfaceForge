@@ -109,7 +109,7 @@ reproduces every prior result and directory convention unchanged.**
 | | `academic` | `training` |
 |---|---|---|
 | Purpose | Publication / production AIMD | MLIP training-data generation |
-| Step1 preheat | ~2 ps (full thermalization) | ~0.1–0.3 ps (geometry is already pre-relaxed by classical + VASP+U opt) |
+| Step1 preheat | ~2 ps (full thermalization) | ~0.4 ps (geometry is already pre-relaxed by classical + VASP+U opt) |
 | Step2 INCAR | `NSW=3000`, `NBLOCK=4` | identical — the INCAR does **not** change |
 | Step2 frame retention | every `NBLOCK`-th step (750/run) | spaced at the measured total-energy decorrelation time (~15–40/run) |
 
@@ -123,7 +123,7 @@ never touches `SMASS`, thermostat, `TEBEG`, DFT+U, or anything else:
 # Audit an existing Step1 tree against the training profile (no writes):
 iface vasp step1-protocol Step1 --protocol training --audit-only
 
-# Shorten every Step1 preheat below the tree to the training default (~0.25 ps):
+# Shorten every Step1 preheat below the tree to the training default (~0.4 ps):
 iface vasp step1-protocol Step1 --protocol training
 
 # Or one run / one file, with an explicit length:

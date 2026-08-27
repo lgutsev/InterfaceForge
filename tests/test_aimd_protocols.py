@@ -92,7 +92,7 @@ class Step1ProtocolTests(unittest.TestCase):
             self.assertEqual(result["mode"], "switched")
             self.assertEqual(result["changed"], 1)
             parsed = parse_incar(incar)
-            self.assertEqual(parsed["NSW"], "250")
+            self.assertEqual(parsed["NSW"], "400")
             # Everything else is untouched.
             self.assertEqual(parsed["SMASS"], "-1")
             self.assertEqual(parsed["TEBEG"], "300")
@@ -135,7 +135,7 @@ class Step1ProtocolTests(unittest.TestCase):
             self.assertEqual(result["incars"], 2)  # archive/ skipped
             self.assertEqual(result["changed"], 2)
             for name in ("NiO_m110_Big_U46", "NiO_m110_Big_U46_Me4PACz"):
-                self.assertEqual(parse_incar(root / name / "INCAR")["NSW"], "250")
+                self.assertEqual(parse_incar(root / name / "INCAR")["NSW"], "400")
             self.assertEqual(parse_incar(root / "archive" / "old" / "INCAR")["NSW"], "2000")
 
     def test_cli_step1_protocol_runs(self) -> None:
@@ -145,7 +145,7 @@ class Step1ProtocolTests(unittest.TestCase):
             self.assertEqual(
                 main(["vasp", "step1-protocol", str(incar), "--protocol", "training"]), 0
             )
-            self.assertEqual(parse_incar(incar)["NSW"], "250")
+            self.assertEqual(parse_incar(incar)["NSW"], "400")
 
 
 def _step1_tree(root: Path, *, nsw: int) -> Path:
@@ -216,7 +216,7 @@ class Step2ProtocolTests(unittest.TestCase):
     def test_step2_sample_produces_small_decorrelated_count_for_training(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            step1 = _step1_tree(root, nsw=250)
+            step1 = _step1_tree(root, nsw=400)
             prepare_step2_series(step1, temperatures=[300], protocol="training")
 
             run_dir = root / "Step2_300K" / "NiO_m110_Big_U46"
@@ -240,7 +240,7 @@ class Step2ProtocolTests(unittest.TestCase):
     def test_step2_sample_reports_pending_when_no_trajectory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            step1 = _step1_tree(root, nsw=250)
+            step1 = _step1_tree(root, nsw=400)
             prepare_step2_series(step1, temperatures=[300], protocol="training")
 
             summary = sample_step2_runs([root / "Step2_300K"], dry_run=True)

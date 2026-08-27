@@ -65,8 +65,8 @@ AIMD_PROTOCOLS: dict[str, dict[str, Any]] = {
                 "Minimal burn-in only; the geometry is already pre-relaxed "
                 "(classical + VASP+U opt) before AIMD starts."
             ),
-            "nsw": 250,
-            "preheat_ps_expected": [0.05, 0.4],
+            "nsw": 400,
+            "preheat_ps_expected": [0.1, 0.6],
         },
         "step2": {
             "retention_method": "energy-autocorrelation",

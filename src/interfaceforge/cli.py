@@ -1229,7 +1229,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="academic",
         help=(
             "academic (~2 ps preheat, default, matches step2-prepare) or "
-            "training (~0.25 ps preheat)"
+            "training (~0.4 ps preheat)"
         ),
     )
     step1_protocol.add_argument(
@@ -1237,7 +1237,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help=(
             "Override the profile preheat length in steps; by default the "
-            "protocol's own value is used (academic 2000, training 250)"
+            "protocol's own value is used (academic 2000, training 400)"
         ),
     )
     step1_protocol.add_argument(
