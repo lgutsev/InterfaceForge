@@ -76,13 +76,13 @@ STEP2_TRAINING_FORCED_TAGS = {"NWRITE": "1", "LDAUPRINT": "0"}
 STEP2_TRAINING_STRIPPED_TAGS = ("LORBIT", "LDIPOL", "IDIPOL", "DIPOL")
 
 # Audit note (never a FAIL) when the promoted Step1 slab has less than this
-# much vacuum on its thinner face -- a large passivant on one side can leave
-# too little room even when the total vacuum looks fine.
+# much vacuum between the slab+adsorbate stack and its periodic image -- a
+# tall passivant eats headroom that the bare-slab cell had to spare.
 STEP2_MIN_VACUUM_A = 12.0
 
 
 def _step2_slab_vacuum(structure: Path) -> dict[str, Any] | None:
-    """Best-effort per-face vacuum of a slab POSCAR; ``None`` if ASE is absent."""
+    """Best-effort slab-to-image vacuum of a POSCAR; ``None`` if ASE is absent."""
 
     try:
         from .geometry import slab_vacuum
@@ -998,12 +998,11 @@ def _audit_step2_plans(
         elif _sha256_file(poscar_path) != _sha256_file(plan["structure"]):
             issues.append(f"POSCAR does not match Step1 {source_structure}")
         vacuum_a = _step2_slab_vacuum(plan["structure"])
-        if vacuum_a is not None and vacuum_a["min_side_a"] < STEP2_MIN_VACUUM_A:
+        if vacuum_a is not None and vacuum_a["vacuum_a"] < STEP2_MIN_VACUUM_A:
             notes.append(
-                f"thin vacuum: {vacuum_a['min_side_a']:.1f} A on the closer {vacuum_a['axis']}-face "
-                f"(low {vacuum_a['vacuum_low_a']:.1f} / high {vacuum_a['vacuum_high_a']:.1f}); "
-                f"extend with: iface vasp geom vacuum {plan['source'] / source_structure} "
-                f"--extend 15 -o {poscar_path}"
+                f"thin vacuum: {vacuum_a['vacuum_a']:.1f} A between the slab stack and its "
+                f"{vacuum_a['axis']}-image; extend with: iface vasp geom vacuum "
+                f"{plan['source'] / source_structure} --extend 18 -o {poscar_path}"
             )
         inherited_hashes: dict[str, str] = {}
         for name, source_path in plan["inputs"].items():
@@ -1035,9 +1034,8 @@ def _audit_step2_plans(
                 "slab_vacuum_a": (
                     {
                         "axis": vacuum_a["axis"],
-                        "total": round(vacuum_a["vacuum_total_a"], 2),
-                        "low": round(vacuum_a["vacuum_low_a"], 2),
-                        "high": round(vacuum_a["vacuum_high_a"], 2),
+                        "gap_to_image": round(vacuum_a["vacuum_a"], 2),
+                        "slab_span": round(vacuum_a["slab_span_a"], 2),
                     }
                     if vacuum_a is not None
                     else None

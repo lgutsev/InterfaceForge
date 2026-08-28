@@ -256,47 +256,49 @@ def _axis_index(axis: int | str) -> int:
 
 
 def _vacuum_along(atoms: Any, ax: int) -> dict[str, Any] | None:
-    """Vacuum split around a contiguous slab along lattice vector ``ax``.
+    """Vacuum around a contiguous slab+adsorbate stack along lattice vector ``ax``.
 
-    The slab is treated as the single largest contiguous band of atoms along
-    the axis (modulo periodicity); everything else is vacuum. If that band
-    straddles the input cell boundary it is rotated to sit inside ``[0, 1)``
-    first, and ``wrapped`` is set so the caller can note the cosmetic issue.
+    The stack is the single largest contiguous band of atoms along the axis
+    (modulo periodicity); ``vacuum_a`` is the remaining gap, i.e. the real
+    distance from the top of the stack, through the periodic vacuum, to the
+    bottom of the stack's own image. This is frame-independent: it does not
+    matter where the slab sits in the cell or which face the adsorbate is
+    on. ``box_gap_below_a`` / ``box_gap_above_a`` are the empty space between
+    the cell faces (frac 0 and 1) and the stack -- purely cosmetic (where
+    the atoms sit in the box), never the physical constraint.
     """
 
     length = float(np.linalg.norm(np.asarray(atoms.cell.array)[ax]))
     if length == 0.0 or len(atoms) == 0:
         return None
-    frac = np.sort(np.mod(atoms.get_scaled_positions(wrap=False)[:, ax], 1.0))
-    if len(frac) == 1:
-        lo = hi = float(frac[0])
+    raw = np.sort(np.mod(atoms.get_scaled_positions(wrap=False)[:, ax], 1.0))
+    if len(raw) == 1:
+        lo = hi = float(raw[0])
         wrapped = False
     else:
-        gaps = np.append(np.diff(frac), (frac[0] + 1.0) - frac[-1])
+        gaps = np.append(np.diff(raw), (raw[0] + 1.0) - raw[-1])
         widest = int(np.argmax(gaps))
         wrapped = widest != len(gaps) - 1
-        if wrapped:
-            frac = np.sort(np.mod(frac + (1.0 - frac[widest + 1]), 1.0))
-        lo, hi = float(frac[0]), float(frac[-1])
+        rotated = np.sort(np.mod(raw + (1.0 - raw[widest + 1]), 1.0)) if wrapped else raw
+        lo, hi = float(rotated[0]), float(rotated[-1])
     span = hi - lo
     return {
         "axis_length_a": length,
         "slab_span_a": span * length,
-        "vacuum_total_a": (1.0 - span) * length,
-        "vacuum_low_a": lo * length,
-        "vacuum_high_a": (1.0 - hi) * length,
-        "slab_center_frac": 0.5 * (lo + hi),
+        "vacuum_a": (1.0 - span) * length,
+        "box_gap_below_a": float(raw[0]) * length,
+        "box_gap_above_a": (1.0 - float(raw[-1])) * length,
         "wrapped": wrapped,
     }
 
 
 def slab_vacuum(atoms_or_path: Any, *, axis: int | str = "auto") -> dict[str, Any]:
-    """Report the vacuum on each side of a slab along the surface normal.
+    """Vacuum between a slab (plus any adsorbate) and its periodic image.
 
-    ``axis="auto"`` picks the lattice vector with the most total vacuum (the
-    surface normal for a slab). Returns total vacuum plus the ``-``/``+``
-    split relative to the slab, so an adsorbate that sticks far out of one
-    face is caught even when the *total* vacuum looks generous.
+    ``axis="auto"`` picks the lattice vector with the most vacuum (the
+    surface normal for a slab). ``vacuum_a`` is the one number that matters:
+    the gap from the top of the tallest adsorbate, through the periodic
+    vacuum on both sides of the centred slab, to the slab's own image.
     """
 
     ase = _ase()
@@ -313,17 +315,13 @@ def slab_vacuum(atoms_or_path: Any, *, axis: int | str = "auto") -> dict[str, An
         ]
         if not candidates:
             raise SafetyError("Structure has no cell; cannot measure vacuum")
-        report, ax = max(candidates, key=lambda item: item[0]["vacuum_total_a"])
+        report, ax = max(candidates, key=lambda item: item[0]["vacuum_a"])
     else:
         ax = _axis_index(axis)
         report = _vacuum_along(atoms, ax)
         if report is None:
             raise SafetyError(f"Lattice vector {'abc'[ax]} has zero length")
-    return {
-        "axis": "abc"[ax],
-        "min_side_a": min(report["vacuum_low_a"], report["vacuum_high_a"]),
-        **report,
-    }
+    return {"axis": "abc"[ax], **report}
 
 
 def extend_slab_vacuum(
@@ -331,21 +329,22 @@ def extend_slab_vacuum(
     output: str | Path,
     *,
     axis: int | str = "auto",
-    vacuum_per_side: float = 8.0,
-    keep_position: bool = False,
+    vacuum: float = 15.0,
+    recenter: bool = True,
     sort_atoms: bool = False,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Stretch the cell so each slab face has at least ``vacuum_per_side`` Å.
+    """Grow the normal cell vector so the slab-to-image gap is ``vacuum`` Å.
 
-    By default the slab is re-centred with exactly ``vacuum_per_side`` on
-    each face. ``keep_position=True`` instead only adds the vacuum that is
-    missing on each side and shifts the slab as little as possible (falls
-    back to re-centring if the input slab wraps the cell boundary).
+    Only empty space is added along the surface normal -- every atomic
+    position (and every bond) is unchanged, so a relaxed CONTCAR can be
+    stretched and reused directly. ``recenter`` (default) then translates
+    the whole stack so it sits tidily inside ``[0, c)``; that is cosmetic
+    and does not change ``vacuum_a``. A shorter cell is left alone.
     """
 
-    if vacuum_per_side <= 0:
-        raise ValueError("--vacuum must be positive")
+    if vacuum <= 0:
+        raise ValueError("--extend vacuum must be positive")
     ase = _ase()
     source_path = Path(source).resolve()
     output_path = Path(output).resolve()
@@ -362,17 +361,11 @@ def extend_slab_vacuum(
 
     cell = np.asarray(atoms.cell.array).copy()
     unit = cell[ax] / np.linalg.norm(cell[ax])
-    recenter = not keep_position or before["wrapped"]
+    new_length = max(before["axis_length_a"], before["slab_span_a"] + float(vacuum))
+    cell[ax] = unit * new_length
+    atoms.set_cell(cell, scale_atoms=False)
     if recenter:
-        cell[ax] = unit * (before["slab_span_a"] + 2.0 * vacuum_per_side)
-        atoms.set_cell(cell, scale_atoms=False)
         atoms.center(axis=ax)
-    else:
-        need_low = max(0.0, vacuum_per_side - before["vacuum_low_a"])
-        need_high = max(0.0, vacuum_per_side - before["vacuum_high_a"])
-        cell[ax] = unit * (before["axis_length_a"] + need_low + need_high)
-        atoms.set_cell(cell, scale_atoms=False)
-        atoms.positions = atoms.positions + unit * need_low
 
     if sort_atoms:
         atoms = ase["sort"](atoms)
@@ -382,18 +375,12 @@ def extend_slab_vacuum(
     summary.update(
         {
             "axis": "abc"[ax],
-            "vacuum_per_side_target_a": float(vacuum_per_side),
-            "recentred": recenter,
-            "vacuum_before_a": {
-                "total": before["vacuum_total_a"],
-                "low": before["vacuum_low_a"],
-                "high": before["vacuum_high_a"],
-            },
-            "vacuum_after_a": {
-                "total": after["vacuum_total_a"],
-                "low": after["vacuum_low_a"],
-                "high": after["vacuum_high_a"],
-            },
+            "vacuum_target_a": float(vacuum),
+            "recentred": bool(recenter),
+            "vacuum_before_a": round(before["vacuum_a"], 2),
+            "vacuum_after_a": round(after["vacuum_a"], 2),
+            "axis_length_before_a": round(before["axis_length_a"], 2),
+            "axis_length_after_a": round(after["axis_length_a"], 2),
         }
     )
     return summary
@@ -423,7 +410,6 @@ def batch_slab_vacuum(
     axis: int | str = "auto",
     min_vacuum: float = 12.0,
     extend: float | None = None,
-    keep_position: bool = False,
     force: bool = False,
 ) -> dict[str, Any]:
     """Audit (and optionally extend in place) every slab under a directory tree."""
@@ -438,30 +424,25 @@ def batch_slab_vacuum(
     rows: list[dict[str, Any]] = []
     for path in structures:
         report = slab_vacuum(path, axis=axis)
-        thin = report["min_side_a"] < min_vacuum
+        thin = report["vacuum_a"] < min_vacuum
         row: dict[str, Any] = {
             "path": str(path.relative_to(root_path)),
             "axis": report["axis"],
             "slab_span_a": round(report["slab_span_a"], 2),
-            "vacuum_total_a": round(report["vacuum_total_a"], 2),
-            "vacuum_low_a": round(report["vacuum_low_a"], 2),
-            "vacuum_high_a": round(report["vacuum_high_a"], 2),
-            "min_side_a": round(report["min_side_a"], 2),
+            "vacuum_a": round(report["vacuum_a"], 2),
             "status": "THIN" if thin else "PASS",
         }
         if extend is not None and thin:
-            result = extend_slab_vacuum(
-                path, path, axis=axis, vacuum_per_side=extend,
-                keep_position=keep_position, force=force,
-            )
-            row["extended_to"] = result["vacuum_after_a"]
+            result = extend_slab_vacuum(path, path, axis=axis, vacuum=extend, force=force)
+            row["vacuum_a"] = result["vacuum_after_a"]
+            row["extended"] = True
         rows.append(row)
     return {
         "root": str(root_path),
         "min_vacuum_a": float(min_vacuum),
         "structures": len(rows),
         "thin": sum(r["status"] == "THIN" for r in rows),
-        "extended": sum("extended_to" in r for r in rows),
+        "extended": sum(r.get("extended", False) for r in rows),
         "rows": rows,
     }
 

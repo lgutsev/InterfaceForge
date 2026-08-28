@@ -350,11 +350,14 @@ class Step2SpinInheritanceTests(unittest.TestCase):
                 prepare_step2_series(step1, temperatures=[300])
 
 
-def _contcar_slab(vac_low: float, vac_high: float) -> str:
-    c = vac_low + 6.0 + vac_high
-    zs = [vac_low + i for i in (0.0, 2.0, 4.0, 6.0)]
-    coords = "\n".join(f"0.1 0.1 {z / c:.6f}" for z in zs)
-    return f"slab\n1.0\n8 0 0\n0 8 0\n0 0 {c}\nNi\n4\nDirect\n{coords}\n"
+def _contcar_slab(vacuum: float, *, thickness: float = 6.0) -> str:
+    c = thickness + vacuum
+    zs = [2.0 + i for i in (0.0, thickness / 3, 2 * thickness / 3, thickness)]
+    coords = "\n".join(
+        f"{x} {y} {(z % c) / c:.6f}" for x in ("0.1", "0.6") for y in ("0.1", "0.6") for z in zs
+    )
+    n = 4 * len(zs)
+    return f"slab\n1.0\n8 0 0\n0 8 0\n0 0 {c}\nNi\n{n}\nDirect\n{coords}\n"
 
 
 class Step2VacuumAuditTests(unittest.TestCase):
@@ -378,7 +381,7 @@ class Step2VacuumAuditTests(unittest.TestCase):
     def test_thin_vacuum_face_is_noted_with_a_fix_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            step1 = self._tree(root, _contcar_slab(14.0, 2.0))  # +z face only 2 A
+            step1 = self._tree(root, _contcar_slab(7.0))  # only 7 A slab-to-image gap
 
             audit = prepare_step2_series(step1, temperatures=[300])["audit"]
             self.assertEqual(audit["status"], "PASS")  # a note, never a FAIL
@@ -392,7 +395,7 @@ class Step2VacuumAuditTests(unittest.TestCase):
     def test_generous_vacuum_is_not_noted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            step1 = self._tree(root, _contcar_slab(15.0, 15.0))
+            step1 = self._tree(root, _contcar_slab(25.0))
 
             prepare_step2_series(step1, temperatures=[300])
             notes = json.loads(

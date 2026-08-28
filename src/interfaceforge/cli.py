@@ -610,7 +610,6 @@ def cmd_geom(args: argparse.Namespace) -> int:
                 axis=args.axis,
                 min_vacuum=args.min_vacuum,
                 extend=args.extend,
-                keep_position=args.keep_position,
                 force=True,
             )
         elif args.extend is not None:
@@ -619,18 +618,18 @@ def cmd_geom(args: argparse.Namespace) -> int:
                 args.source,
                 output,
                 axis=args.axis,
-                vacuum_per_side=args.extend,
-                keep_position=args.keep_position,
+                vacuum=args.extend,
+                recenter=not args.no_recenter,
                 sort_atoms=not args.no_sort,
                 force=args.force,
             )
         else:
             report = slab_vacuum(args.source, axis=args.axis)
-            report["status"] = "PASS" if report["min_side_a"] >= args.min_vacuum else "THIN"
+            report["status"] = "PASS" if report["vacuum_a"] >= args.min_vacuum else "THIN"
             report["min_vacuum_a"] = args.min_vacuum
             if report["status"] == "THIN":
                 report["fix"] = (
-                    f"iface vasp geom vacuum {args.source} --extend 15 -o {args.source}.extended"
+                    f"iface vasp geom vacuum {args.source} --extend 18 -o {args.source}.extended"
                 )
             payload = report
     else:
@@ -1614,21 +1613,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-vacuum",
         type=float,
         default=12.0,
-        help="Audit threshold on the thinner face (default: 12 A)",
+        help="Audit threshold on the slab-to-image gap (default: 12 A)",
     )
     vacuum.add_argument(
         "--extend",
         nargs="?",
         type=float,
-        const=15.0,
-        metavar="PER_SIDE",
-        help="Write a stretched structure with this much vacuum per face (default 15 A if bare)",
+        const=18.0,
+        metavar="VACUUM",
+        help="Grow the normal cell vector to this slab-to-image gap (default 18 A if bare)",
     )
     vacuum.add_argument("-o", "--output", help="Output path for --extend (default: <source>.extended)")
     vacuum.add_argument(
-        "--keep-position",
+        "--no-recenter",
         action="store_true",
-        help="With --extend, only add missing vacuum per side instead of re-centring the slab",
+        help="With --extend, leave the slab where it is instead of re-centring it in the box",
     )
     vacuum.add_argument("--no-sort", action="store_true")
     vacuum.add_argument("--force", action="store_true")

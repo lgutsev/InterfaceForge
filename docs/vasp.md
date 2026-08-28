@@ -229,32 +229,35 @@ over structures itself.
 
 ### Slab vacuum check
 
-`step2-prepare`'s audit measures the vacuum on **each face** of the promoted
-slab along its surface normal (the largest contiguous atom band is the slab;
-the rest is vacuum, split into a `-` and a `+` side). A large passivant or
-adsorbate on one face can leave too little room even when the *total* vacuum
-looks fine, so the check is on the **thinner** side. Below 12 Å it adds a
-note (never a `FAIL`) with the exact fix command.
-
-Audit or fix any structure directly:
+For a slab periodic in the surface plane, the one quantity that matters is
+`vacuum_a` — the gap between the top of the tallest adsorbate and the
+**bottom of the slab's own periodic image**, measured through the vacuum on
+*both* sides of the (centred) slab. It is frame-independent: where the slab
+sits in the cell, and which face an adsorbate is on, do not change it. A
+tall passivant eats into the headroom the bare-slab cell had to spare, so
+`step2-prepare`'s audit notes (never a `FAIL`) when the promoted structure
+drops below 12 Å, with the fix command.
 
 ```bash
-# report per-face vacuum and slab thickness along the auto-detected normal
+# report vacuum_a + slab span along the auto-detected normal
 iface vasp geom vacuum Step1/NiO_m110_Big_U46_DCZ-4P/CONTCAR
 
-# write a stretched copy with ≥15 Å on each face (slab re-centred)
-iface vasp geom vacuum <CONTCAR> --extend 15 -o POSCAR
+# audit a whole tree
+iface vasp geom vacuum Step1
 
-# only top up the side(s) that are short, moving the slab as little as possible
-iface vasp geom vacuum <CONTCAR> --extend 15 --keep-position -o POSCAR
+# grow the normal cell vector so vacuum_a = 18 Å (relaxed geometry unchanged)
+iface vasp geom vacuum <CONTCAR> --extend 18 -o POSCAR
+
+# fix every thin structure below a tree in place
+iface vasp geom vacuum Step1 --extend 18 --force
 ```
 
-`--extend` keeps the relaxed geometry unchanged and only grows the cell
-vector along the normal (adds empty space), so a Step1 CONTCAR can be
-stretched and reused directly — the MD re-settles the first ~50 fs anyway.
-Fix it in Step1 and re-run `step2-prepare`, or extend the already-promoted
-`Step2_<T>K/*/POSCAR` in place. Use `--axis a|b|c` to override the
-auto-detected normal.
+`--extend` only adds empty space along the normal — every atomic position
+and bond is unchanged — then re-centres the slab in the enlarged cell
+(`--no-recenter` to skip; it is cosmetic and does not change `vacuum_a`). A
+Step1 CONTCAR can be stretched and reused directly; the MD re-settles the
+first ~50 fs anyway. A cell that already has more vacuum than the target is
+left alone. `--axis a|b|c` overrides the auto-detected normal.
 
 ## Preparation
 
