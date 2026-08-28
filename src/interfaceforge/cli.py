@@ -36,7 +36,9 @@ from .geometry import (
     build_supercell,
     clean_duplicates,
     convert_structure,
+    extend_slab_vacuum,
     freeze_structure,
+    slab_vacuum,
     structure_summary,
     write_summary,
 )
@@ -595,6 +597,27 @@ def cmd_geom(args: argparse.Namespace) -> int:
         payload = clean_duplicates(
             args.source, args.output, cutoff=args.cutoff, force=args.force
         )
+    elif args.geometry == "vacuum":
+        if args.extend is not None:
+            output = args.output or f"{args.source}.extended"
+            payload = extend_slab_vacuum(
+                args.source,
+                output,
+                axis=args.axis,
+                vacuum_per_side=args.extend,
+                keep_position=args.keep_position,
+                sort_atoms=not args.no_sort,
+                force=args.force,
+            )
+        else:
+            report = slab_vacuum(args.source, axis=args.axis)
+            report["status"] = "PASS" if report["min_side_a"] >= args.min_vacuum else "THIN"
+            report["min_vacuum_a"] = args.min_vacuum
+            if report["status"] == "THIN":
+                report["fix"] = (
+                    f"iface vasp geom vacuum {args.source} --extend 15 -o {args.source}.extended"
+                )
+            payload = report
     else:
         payload = structure_summary(args.source)
     write_summary(payload, getattr(args, "summary", None))
@@ -1560,6 +1583,39 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("source")
     inspect.add_argument("--summary")
     inspect.set_defaults(func=cmd_geom)
+    vacuum = geom_commands.add_parser(
+        "vacuum", help="Audit slab vacuum per face; --extend stretches the cell"
+    )
+    vacuum.add_argument("source", help="POSCAR/CONTCAR/xyz slab structure")
+    vacuum.add_argument(
+        "--axis",
+        default="auto",
+        help="Surface normal: a/b/c or auto (default: the axis with the most vacuum)",
+    )
+    vacuum.add_argument(
+        "--min-vacuum",
+        type=float,
+        default=12.0,
+        help="Audit threshold on the thinner face (default: 12 A)",
+    )
+    vacuum.add_argument(
+        "--extend",
+        nargs="?",
+        type=float,
+        const=15.0,
+        metavar="PER_SIDE",
+        help="Write a stretched structure with this much vacuum per face (default 15 A if bare)",
+    )
+    vacuum.add_argument("-o", "--output", help="Output path for --extend (default: <source>.extended)")
+    vacuum.add_argument(
+        "--keep-position",
+        action="store_true",
+        help="With --extend, only add missing vacuum per side instead of re-centring the slab",
+    )
+    vacuum.add_argument("--no-sort", action="store_true")
+    vacuum.add_argument("--force", action="store_true")
+    vacuum.add_argument("--summary")
+    vacuum.set_defaults(func=cmd_geom)
 
     return parser
 

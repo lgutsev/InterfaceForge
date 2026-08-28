@@ -19,7 +19,7 @@ from typing import Any
 
 import yaml
 
-from .errors import SafetyError
+from .errors import DependencyError, SafetyError
 
 _INCAR_LINE = re.compile(r"^(\s*)([A-Za-z][A-Za-z0-9_]*)(\s*=\s*)(.*?)(\r?\n)?$")
 _ARCHIVE_FILES = (
@@ -74,6 +74,24 @@ STEP2_INHERITED_ELECTRONIC_TAGS = ("ISPIN", "MAGMOM", "LASPH", "LNONCOLLINEAR")
 # vacuum instead). academic leaves the template untouched.
 STEP2_TRAINING_FORCED_TAGS = {"NWRITE": "1", "LDAUPRINT": "0"}
 STEP2_TRAINING_STRIPPED_TAGS = ("LORBIT", "LDIPOL", "IDIPOL", "DIPOL")
+
+# Audit note (never a FAIL) when the promoted Step1 slab has less than this
+# much vacuum on its thinner face -- a large passivant on one side can leave
+# too little room even when the total vacuum looks fine.
+STEP2_MIN_VACUUM_A = 12.0
+
+
+def _step2_slab_vacuum(structure: Path) -> dict[str, Any] | None:
+    """Best-effort per-face vacuum of a slab POSCAR; ``None`` if ASE is absent."""
+
+    try:
+        from .geometry import slab_vacuum
+
+        return slab_vacuum(structure, axis="auto")
+    except DependencyError:
+        return None
+    except Exception:  # best-effort note only; never block the audit
+        return None
 
 
 def _step2_sampling_block(protocol: str) -> dict[str, Any]:
@@ -979,6 +997,14 @@ def _audit_step2_plans(
             issues.append("missing POSCAR")
         elif _sha256_file(poscar_path) != _sha256_file(plan["structure"]):
             issues.append(f"POSCAR does not match Step1 {source_structure}")
+        vacuum_a = _step2_slab_vacuum(plan["structure"])
+        if vacuum_a is not None and vacuum_a["min_side_a"] < STEP2_MIN_VACUUM_A:
+            notes.append(
+                f"thin vacuum: {vacuum_a['min_side_a']:.1f} A on the closer {vacuum_a['axis']}-face "
+                f"(low {vacuum_a['vacuum_low_a']:.1f} / high {vacuum_a['vacuum_high_a']:.1f}); "
+                f"extend with: iface vasp geom vacuum {plan['source'] / source_structure} "
+                f"--extend 15 -o {poscar_path}"
+            )
         inherited_hashes: dict[str, str] = {}
         for name, source_path in plan["inputs"].items():
             target = destination / name
@@ -1006,6 +1032,16 @@ def _audit_step2_plans(
                 "training_frames": sampling_block["training_frames_per_run"],
                 "protocol": protocol,
                 "step1_preheat_ps": round(source_ps, 3) if source_ps is not None else None,
+                "slab_vacuum_a": (
+                    {
+                        "axis": vacuum_a["axis"],
+                        "total": round(vacuum_a["vacuum_total_a"], 2),
+                        "low": round(vacuum_a["vacuum_low_a"], 2),
+                        "high": round(vacuum_a["vacuum_high_a"], 2),
+                    }
+                    if vacuum_a is not None
+                    else None
+                ),
                 "elements": plan["elements"],
                 "hubbard_tags": plan["hubbard_tags"],
                 "electronic_tags": plan["electronic_tags"],

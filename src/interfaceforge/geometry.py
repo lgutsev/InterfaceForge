@@ -241,6 +241,164 @@ def clean_duplicates(
     return summary
 
 
+_AXIS_INDEX = {"a": 0, "b": 1, "c": 2, "x": 0, "y": 1, "z": 2, "0": 0, "1": 1, "2": 2}
+
+
+def _axis_index(axis: int | str) -> int:
+    if isinstance(axis, int):
+        if axis not in (0, 1, 2):
+            raise ValueError(f"axis index must be 0, 1, or 2; got {axis}")
+        return axis
+    key = str(axis).strip().lower()
+    if key not in _AXIS_INDEX:
+        raise ValueError(f"axis must be a/b/c or 0/1/2; got {axis!r}")
+    return _AXIS_INDEX[key]
+
+
+def _vacuum_along(atoms: Any, ax: int) -> dict[str, Any] | None:
+    """Vacuum split around a contiguous slab along lattice vector ``ax``.
+
+    The slab is treated as the single largest contiguous band of atoms along
+    the axis (modulo periodicity); everything else is vacuum. If that band
+    straddles the input cell boundary it is rotated to sit inside ``[0, 1)``
+    first, and ``wrapped`` is set so the caller can note the cosmetic issue.
+    """
+
+    length = float(np.linalg.norm(np.asarray(atoms.cell.array)[ax]))
+    if length == 0.0 or len(atoms) == 0:
+        return None
+    frac = np.sort(np.mod(atoms.get_scaled_positions(wrap=False)[:, ax], 1.0))
+    if len(frac) == 1:
+        lo = hi = float(frac[0])
+        wrapped = False
+    else:
+        gaps = np.append(np.diff(frac), (frac[0] + 1.0) - frac[-1])
+        widest = int(np.argmax(gaps))
+        wrapped = widest != len(gaps) - 1
+        if wrapped:
+            frac = np.sort(np.mod(frac + (1.0 - frac[widest + 1]), 1.0))
+        lo, hi = float(frac[0]), float(frac[-1])
+    span = hi - lo
+    return {
+        "axis_length_a": length,
+        "slab_span_a": span * length,
+        "vacuum_total_a": (1.0 - span) * length,
+        "vacuum_low_a": lo * length,
+        "vacuum_high_a": (1.0 - hi) * length,
+        "slab_center_frac": 0.5 * (lo + hi),
+        "wrapped": wrapped,
+    }
+
+
+def slab_vacuum(atoms_or_path: Any, *, axis: int | str = "auto") -> dict[str, Any]:
+    """Report the vacuum on each side of a slab along the surface normal.
+
+    ``axis="auto"`` picks the lattice vector with the most total vacuum (the
+    surface normal for a slab). Returns total vacuum plus the ``-``/``+``
+    split relative to the slab, so an adsorbate that sticks far out of one
+    face is caught even when the *total* vacuum looks generous.
+    """
+
+    ase = _ase()
+    atoms = (
+        ase["read"](str(Path(atoms_or_path).resolve()))
+        if isinstance(atoms_or_path, (str, Path))
+        else atoms_or_path
+    )
+    if str(axis) == "auto":
+        candidates = [
+            (report, index)
+            for index in range(3)
+            if (report := _vacuum_along(atoms, index)) is not None
+        ]
+        if not candidates:
+            raise SafetyError("Structure has no cell; cannot measure vacuum")
+        report, ax = max(candidates, key=lambda item: item[0]["vacuum_total_a"])
+    else:
+        ax = _axis_index(axis)
+        report = _vacuum_along(atoms, ax)
+        if report is None:
+            raise SafetyError(f"Lattice vector {'abc'[ax]} has zero length")
+    return {
+        "axis": "abc"[ax],
+        "min_side_a": min(report["vacuum_low_a"], report["vacuum_high_a"]),
+        **report,
+    }
+
+
+def extend_slab_vacuum(
+    source: str | Path,
+    output: str | Path,
+    *,
+    axis: int | str = "auto",
+    vacuum_per_side: float = 8.0,
+    keep_position: bool = False,
+    sort_atoms: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Stretch the cell so each slab face has at least ``vacuum_per_side`` Å.
+
+    By default the slab is re-centred with exactly ``vacuum_per_side`` on
+    each face. ``keep_position=True`` instead only adds the vacuum that is
+    missing on each side and shifts the slab as little as possible (falls
+    back to re-centring if the input slab wraps the cell boundary).
+    """
+
+    if vacuum_per_side <= 0:
+        raise ValueError("--vacuum must be positive")
+    ase = _ase()
+    source_path = Path(source).resolve()
+    output_path = Path(output).resolve()
+    _output_guard(output_path, force)
+    atoms = ase["read"](str(source_path))
+    ax = (
+        _axis_index(axis)
+        if str(axis) != "auto"
+        else int("abc".index(slab_vacuum(atoms, axis="auto")["axis"]))
+    )
+    before = _vacuum_along(atoms, ax)
+    if before is None:
+        raise SafetyError(f"Lattice vector {'abc'[ax]} has zero length")
+
+    cell = np.asarray(atoms.cell.array).copy()
+    unit = cell[ax] / np.linalg.norm(cell[ax])
+    recenter = not keep_position or before["wrapped"]
+    if recenter:
+        cell[ax] = unit * (before["slab_span_a"] + 2.0 * vacuum_per_side)
+        atoms.set_cell(cell, scale_atoms=False)
+        atoms.center(axis=ax)
+    else:
+        need_low = max(0.0, vacuum_per_side - before["vacuum_low_a"])
+        need_high = max(0.0, vacuum_per_side - before["vacuum_high_a"])
+        cell[ax] = unit * (before["axis_length_a"] + need_low + need_high)
+        atoms.set_cell(cell, scale_atoms=False)
+        atoms.positions = atoms.positions + unit * need_low
+
+    if sort_atoms:
+        atoms = ase["sort"](atoms)
+    ase["write"](str(output_path), atoms, format="vasp", direct=True, vasp5=True)
+    after = _vacuum_along(atoms, ax)
+    summary = structure_summary(atoms, source=source_path, output=output_path)
+    summary.update(
+        {
+            "axis": "abc"[ax],
+            "vacuum_per_side_target_a": float(vacuum_per_side),
+            "recentred": recenter,
+            "vacuum_before_a": {
+                "total": before["vacuum_total_a"],
+                "low": before["vacuum_low_a"],
+                "high": before["vacuum_high_a"],
+            },
+            "vacuum_after_a": {
+                "total": after["vacuum_total_a"],
+                "low": after["vacuum_low_a"],
+                "high": after["vacuum_high_a"],
+            },
+        }
+    )
+    return summary
+
+
 def structure_summary(
     atoms_or_path: Any,
     *,

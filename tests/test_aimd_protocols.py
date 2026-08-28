@@ -17,6 +17,13 @@ from interfaceforge.cli import main
 from interfaceforge.errors import SafetyError
 from interfaceforge.vasp import parse_incar, prepare_step2_series
 
+try:
+    import ase  # noqa: F401
+
+    _HAVE_ASE = True
+except ImportError:  # pragma: no cover
+    _HAVE_ASE = False
+
 
 def _ar1_series(n: int, phi: float, *, seed: int = 7) -> list[float]:
     import numpy as np
@@ -341,6 +348,57 @@ class Step2SpinInheritanceTests(unittest.TestCase):
 
             with self.assertRaises(SafetyError):
                 prepare_step2_series(step1, temperatures=[300])
+
+
+def _contcar_slab(vac_low: float, vac_high: float) -> str:
+    c = vac_low + 6.0 + vac_high
+    zs = [vac_low + i for i in (0.0, 2.0, 4.0, 6.0)]
+    coords = "\n".join(f"0.1 0.1 {z / c:.6f}" for z in zs)
+    return f"slab\n1.0\n8 0 0\n0 8 0\n0 0 {c}\nNi\n4\nDirect\n{coords}\n"
+
+
+class Step2VacuumAuditTests(unittest.TestCase):
+    def _tree(self, root: Path, contcar: str) -> Path:
+        step1 = root / "Step1"
+        (step1 / "run").mkdir(parents=True)
+        (step1 / "KPOINTS").write_text("Gamma\n0\nGamma\n1 1 1\n0 0 0\n", encoding="utf-8")
+        launcher = step1 / "runvasp.sh"
+        launcher.write_text("#!/usr/bin/env bash\nsbatch x\n", encoding="utf-8")
+        launcher.chmod(0o755)
+        (step1 / "run" / "INCAR").write_text(
+            "IBRION = 0\nNSW = 400\nPOTIM = 1.0\nSMASS = -1\nLDAU = .TRUE.\n"
+            "LDAUL = 2\nLDAUU = 4.6\nLDAUJ = 0.0\nLMAXMIX = 4\n",
+            encoding="utf-8",
+        )
+        (step1 / "run" / "CONTCAR").write_text(contcar, encoding="utf-8")
+        (step1 / "run" / "POTCAR").write_text("fixture Ni\n", encoding="utf-8")
+        return step1
+
+    @unittest.skipUnless(_HAVE_ASE, "ASE not installed")
+    def test_thin_vacuum_face_is_noted_with_a_fix_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            step1 = self._tree(root, _contcar_slab(14.0, 2.0))  # +z face only 2 A
+
+            audit = prepare_step2_series(step1, temperatures=[300])["audit"]
+            self.assertEqual(audit["status"], "PASS")  # a note, never a FAIL
+
+            notes = json.loads(
+                (root / "Step2_300K" / "step2_audit.json").read_text(encoding="utf-8")
+            )["runs"][0]["notes"]
+            self.assertTrue(any("thin vacuum" in n and "geom vacuum" in n for n in notes))
+
+    @unittest.skipUnless(_HAVE_ASE, "ASE not installed")
+    def test_generous_vacuum_is_not_noted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            step1 = self._tree(root, _contcar_slab(15.0, 15.0))
+
+            prepare_step2_series(step1, temperatures=[300])
+            notes = json.loads(
+                (root / "Step2_300K" / "step2_audit.json").read_text(encoding="utf-8")
+            )["runs"][0]["notes"]
+            self.assertFalse(any("thin vacuum" in n for n in notes))
 
 
 class Step2ProtocolTests(unittest.TestCase):

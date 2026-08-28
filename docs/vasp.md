@@ -227,6 +227,35 @@ picosecond of the same trajectory adds almost none. InterfaceForge makes
 the per-trajectory defaults correct; it does not orchestrate the fan-out
 over structures itself.
 
+### Slab vacuum check
+
+`step2-prepare`'s audit measures the vacuum on **each face** of the promoted
+slab along its surface normal (the largest contiguous atom band is the slab;
+the rest is vacuum, split into a `-` and a `+` side). A large passivant or
+adsorbate on one face can leave too little room even when the *total* vacuum
+looks fine, so the check is on the **thinner** side. Below 12 Å it adds a
+note (never a `FAIL`) with the exact fix command.
+
+Audit or fix any structure directly:
+
+```bash
+# report per-face vacuum and slab thickness along the auto-detected normal
+iface vasp geom vacuum Step1/NiO_m110_Big_U46_DCZ-4P/CONTCAR
+
+# write a stretched copy with ≥15 Å on each face (slab re-centred)
+iface vasp geom vacuum <CONTCAR> --extend 15 -o POSCAR
+
+# only top up the side(s) that are short, moving the slab as little as possible
+iface vasp geom vacuum <CONTCAR> --extend 15 --keep-position -o POSCAR
+```
+
+`--extend` keeps the relaxed geometry unchanged and only grows the cell
+vector along the normal (adds empty space), so a Step1 CONTCAR can be
+stretched and reused directly — the MD re-settles the first ~50 fs anyway.
+Fix it in Step1 and re-run `step2-prepare`, or extend the already-promoted
+`Step2_<T>K/*/POSCAR` in place. Use `--axis a|b|c` to override the
+auto-detected normal.
+
 ## Preparation
 
 `iface prepare` creates `train`, `refit` and `stability` directories for every
