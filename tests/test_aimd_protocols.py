@@ -72,7 +72,7 @@ class AutocorrelationTests(unittest.TestCase):
         )
         self.assertLess(plan["kept_frames"], 60)
         self.assertGreater(plan["stride"], 4)
-        self.assertEqual(plan["burn_in_frames"], 150)
+        self.assertEqual(plan["burn_in_frames"], 50)
 
 
 _ACADEMIC_STEP1 = (
@@ -377,13 +377,13 @@ class Step2ProtocolTests(unittest.TestCase):
             result = prepare_step2_series(step1, temperatures=[300])
 
             self.assertEqual(result["protocol"], "academic")
-            self.assertEqual(result["sampling"]["training_frames_per_run"], 750)
+            self.assertEqual(result["sampling"]["training_frames_per_run"], 1250)
             audit = json.loads(
                 (root / "Step2_300K" / "step2_audit.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(audit["sampling"]["nsw"], 3000)
+            self.assertEqual(audit["sampling"]["nsw"], 5000)
             self.assertEqual(audit["sampling"]["nblock"], 4)
-            self.assertTrue(all(row["training_frames"] == 750 for row in audit["runs"]))
+            self.assertTrue(all(row["training_frames"] == 1250 for row in audit["runs"]))
 
     def test_step2_sample_produces_small_decorrelated_count_for_training(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -407,7 +407,7 @@ class Step2ProtocolTests(unittest.TestCase):
             self.assertEqual(row["status"], "OK")
             self.assertGreaterEqual(row["kept_frames"], 15)
             self.assertLessEqual(row["kept_frames"], 40)
-            self.assertEqual(row["burn_in_frames"], 150)
+            self.assertEqual(row["burn_in_frames"], 50)
 
     def test_step2_sample_reports_pending_when_no_trajectory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

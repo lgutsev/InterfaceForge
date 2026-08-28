@@ -1203,10 +1203,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(AIMD_PROTOCOLS),
         default="academic",
         help=(
-            "AIMD retention profile recorded in the manifest/audit. 'academic' "
-            "keeps the dense NBLOCK stride (unchanged default); 'training' defers "
-            "frame selection to 'iface vasp step2-sample' at the energy "
-            "decorrelation time"
+            "AIMD profile. 'academic' (default): NSW=5000 (5 ps), dense NBLOCK "
+            "stride. 'training': NSW=1000 (1 ps), OUTCAR-trimmed INCAR, frames "
+            "thinned by decorrelation via 'iface vasp step2-sample'"
         ),
     )
     step2.add_argument("--dry-run", action="store_true", help="Validate and print the exact plan only")

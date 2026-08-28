@@ -1,8 +1,8 @@
 """AIMD protocol tooling: ``academic`` production vs ``training`` MLIP data.
 
 InterfaceForge historically used one AIMD default for both purposes: a long
-hand-curated Step1 preheat (~2 ps) followed by a dense Step2 frame
-retention (every ``NBLOCK``-th step, e.g. 750 of 3000). That is right for
+hand-curated Step1 preheat (~2 ps) followed by a long Step2 trajectory with
+dense frame retention (every ``NBLOCK``-th step). That is right for
 publication-oriented production runs and wrong for MLIP training-data
 generation, where
 
@@ -44,13 +44,14 @@ DEFAULT_PROTOCOL = "academic"
 
 AIMD_PROTOCOLS: dict[str, dict[str, Any]] = {
     "academic": {
-        "summary": "Publication-oriented production AIMD (unchanged historical default).",
+        "summary": "Publication-oriented production AIMD: one long trajectory, dense frames.",
         "step1": {
             "purpose": "Full forced thermalization from the optimized AFM electronic state.",
             "nsw": 2000,
             "preheat_ps_expected": [1.0, 4.0],
         },
         "step2": {
+            "nsw": 5000,  # 5 ps at POTIM=1 -- long trajectory for NAMD analysis
             "retention_method": "fixed-nblock-stride",
             "retention_summary": "Keep every NBLOCK-th Step2 frame (dense, on purpose).",
         },
@@ -69,11 +70,12 @@ AIMD_PROTOCOLS: dict[str, dict[str, Any]] = {
             "preheat_ps_expected": [0.1, 0.6],
         },
         "step2": {
+            "nsw": 1000,  # 1 ps at POTIM=1 -- a short thermal burst per start structure
             "retention_method": "energy-autocorrelation",
             "retention_summary": (
                 "Space kept frames at the measured total-energy decorrelation time."
             ),
-            "burn_in_ps": 0.15,
+            "burn_in_ps": 0.05,  # Step1 already thermalized; Step2 continues from its CONTCAR
             "target_frames": [15, 40],
         },
     },

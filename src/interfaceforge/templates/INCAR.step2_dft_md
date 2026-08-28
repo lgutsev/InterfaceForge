@@ -26,7 +26,7 @@ ISYM   = 0
 # MD settings
 # ----------------------------
 IBRION = 0
-NSW    = 3000
+NSW    = 5000
 POTIM  = 1.0
 
 MDALGO = 2
@@ -41,7 +41,10 @@ ISIF   = 2
 # Output / trajectory stride
 # ----------------------------
 NWRITE = 1
-NBLOCK = 4 #750 frames per run, likely sufficient given the diversity
+NBLOCK = 4
+# NSW/NBLOCK here are the academic (5 ps) defaults. `--protocol training`
+# overrides NSW to 1000 and thins frames by decorrelation at collection
+# time (iface vasp step2-sample), not by NBLOCK.
 
 LWAVE  = .FALSE.
 LCHARG = .FALSE.

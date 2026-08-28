@@ -36,11 +36,11 @@ The precedence rule is intentionally narrow and deterministic:
    non-spin-polarised. `ISTART` is *not* set (Step2 does not inherit a
    WAVECAR, so the moments still initialise from the inherited `MAGMOM`).
 4. The requested temperature overrides `SYSTEM`, `TEBEG`, and `TEEND`.
-5. Step2 sampling is fixed at `NSW=3000` and `NBLOCK=4`. Which of those
-   steps become training frames depends on `--protocol` (see
-   [AIMD protocols](#aimd-protocols-academic-vs-training) below); the
-   default `academic` keeps the dense every-`NBLOCK` stride (750 frames
-   per run).
+5. `NSW` and the frame policy come from `--protocol` (see
+   [AIMD protocols](#aimd-protocols-academic-vs-training) below): the default
+   `academic` runs `NSW=5000` (5 ps) and keeps the dense every-`NBLOCK`
+   stride; `training` runs `NSW=1000` (1 ps) and thins by decorrelation at
+   collection time. `NBLOCK=4` either way.
 
 Before creating any output tree, the command verifies that `LDAUL`, `LDAUU`,
 and `LDAUJ` each contain one value per species in that run's `CONTCAR`, and
@@ -55,8 +55,9 @@ Each temperature root receives `step2_manifest.json` plus
 `step2_audit.json`, `step2_audit.tsv`, and `step2_audit.md`. The audit reopens
 every generated file, verifies exact INCAR/structure/input hashes, checks
 temperature, Hubbard values, inherited spin tags (`FAIL` if Step1 was
-`ISPIN=2` but Step2 is not, or if `MAGMOM` has the wrong length), `NSW=3000`,
-`NBLOCK=4`, and the frame budget, rejects inherited runtime outputs, and
+`ISPIN=2` but Step2 is not, or if `MAGMOM` has the wrong length), the
+protocol's `NSW`, `NBLOCK=4`, and the frame policy, rejects inherited
+runtime outputs, and
 clearly states that submission was not performed. Existing `Step2_<T>K` roots
 are never overwritten. To use another parent or the attached template
 explicitly:
@@ -99,9 +100,9 @@ launcher.
 ## AIMD protocols: `academic` vs `training`
 
 InterfaceForge historically used one AIMD recipe for two different jobs: a
-long hand-curated **Step1 preheat** (~2 ps forced thermalization) followed
-by **dense Step2 retention** (every `NBLOCK`-th step, 750 of 3000). That is
-right for publication-oriented production but wrong for MLIP training data:
+long hand-curated **Step1 preheat** followed by a **long Step2 trajectory
+with dense retention** (every `NBLOCK`-th step). That is right for
+publication-oriented production but wrong for MLIP training data:
 
 - Frames a few fs apart in one trajectory are strongly autocorrelated.
   Keeping hundreds of them just resamples one thermal basin and overweights
@@ -110,17 +111,25 @@ right for publication-oriented production but wrong for MLIP training data:
   transient/reactive configurations (an anchor first contacting the surface,
   a proton transfer) that are non-equilibrium by definition and matter most
   for training.
+- Training-set diversity should come from **many independent short runs** —
+  different pre-relaxed starting structures (e.g. a range of hydroxylation
+  patterns) — not from one long trajectory of a single structure.
 
-`--protocol` makes the two recipes explicit. **`academic` is the default and
-reproduces every prior result and directory convention unchanged.**
+`--protocol` makes the two recipes explicit. `academic` is the default.
 
 | | `academic` | `training` |
 |---|---|---|
-| Purpose | Publication / production AIMD | MLIP training-data generation |
-| Step1 preheat | ~2 ps (full thermalization) | ~0.4 ps (geometry is already pre-relaxed by classical + VASP+U opt) |
+| Purpose | Publication / production AIMD (e.g. NAMD analysis) | MLIP training-data generation |
+| Step1 preheat | ~2 ps (`NSW=2000`, full thermalization) | ~0.4 ps (`NSW=400`; geometry already pre-relaxed by classical + VASP+U opt) |
+| Step2 trajectory | **5 ps** (`NSW=5000`) | **1 ps** (`NSW=1000`) — a short thermal burst per start structure |
 | Step2 INCAR | template as-is | template + `NWRITE=1`, `LDAUPRINT=0`, `LORBIT`/dipole stripped (small OUTCARs) |
 | Step2 spin tags | `ISPIN`/`MAGMOM`/`LASPH` inherited verbatim from Step1 (both protocols) | same |
-| Step2 frame retention | every `NBLOCK`-th step (750/run) | spaced at the measured total-energy decorrelation time (~15–40/run) |
+| Step2 frame retention | every `NBLOCK`-th step | spaced at the measured total-energy decorrelation time, ~15–40/run |
+
+`NBLOCK=4` only controls how often VASP writes `XDATCAR`; forces and
+energies land in `OUTCAR` every step regardless, and InterfaceForge trains
+from `OUTCAR`. So `NBLOCK` is **not** the training-frame knob — `iface vasp
+step2-sample` is.
 
 ### Step1: switch and audit the preheat
 
@@ -199,8 +208,9 @@ iface vasp step2-sample Step2_300K Step2_450K Step2_600K
 
 For each run this reads the full `OSZICAR` energy series, estimates the
 integrated autocorrelation time τ of the total energy (Sokal automatic
-windowing), drops a short burn-in (~0.15 ps), and keeps frames spaced ~τ
-apart — nudged so the count lands in 15–40. It writes `step2_sample.json`
+windowing), drops a short burn-in (~0.05 ps — Step1 already thermalized and
+Step2 continues from its `CONTCAR`), and keeps frames spaced ~τ apart —
+nudged so the count lands in 15–40. It writes `step2_sample.json`
 (per-run τ, stride, burn-in, and the selected frame indices) and
 `step2_sample.tsv`. Runs with no MD steps yet are reported `PENDING`.
 `--dry-run` prints the plan without writing. Under `academic` the same
@@ -208,14 +218,14 @@ command just reproduces the dense `NBLOCK` stride.
 
 ### Spend a step budget on many short trajectories
 
-For `training`, the better use of a fixed AIMD step budget is **many short
-independent trajectories** — different random seeds and/or different
-pre-relaxed starting configurations — rather than a few long ones. Short
-trajectories from a pre-relaxed start need almost no burn-in, decorrelate
-quickly, and sample distinct regions of configuration space instead of one
-basin very densely. The per-trajectory defaults above are tuned so that
-this is the natural pattern; InterfaceForge does not orchestrate the fan-out
-itself.
+`training`'s `NSW=1000` is deliberately short: from a pre-relaxed, preheated
+start you only need enough steps for the electronic transient to settle
+(~50 fs) plus ~15–40 decorrelation times of sampling. Spend the rest of a
+fixed AIMD budget on **more starting structures**, not longer runs — each
+new hydroxylation pattern / adsorbate geometry adds real diversity, another
+picosecond of the same trajectory adds almost none. InterfaceForge makes
+the per-trajectory defaults correct; it does not orchestrate the fan-out
+over structures itself.
 
 ## Preparation
 

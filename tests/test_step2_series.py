@@ -98,7 +98,7 @@ class Step2SeriesTests(unittest.TestCase):
 
             self.assertEqual(result["mode"], "prepared-and-audited")
             self.assertEqual(result["audit"]["status"], "PASS")
-            self.assertEqual(result["sampling"]["training_frames_per_run"], 750)
+            self.assertEqual(result["sampling"]["training_frames_per_run"], 1250)
             expected_u = {
                 "Real/N_Term/x0.25": "0.0 0.0 0.0 4.6 0.0 0.0",
                 "Ideal/Ti_Term/x0.50": "0.0 0.0 3.2 0.0",
@@ -113,10 +113,10 @@ class Step2SeriesTests(unittest.TestCase):
                 )
                 self.assertEqual(len(manifest["runs"]), 2)
                 self.assertEqual(audit["status"], "PASS")
-                self.assertEqual(audit["sampling"]["nsw"], 3000)
+                self.assertEqual(audit["sampling"]["nsw"], 5000)
                 self.assertEqual(audit["sampling"]["nblock"], 4)
-                self.assertEqual(audit["sampling"]["training_frames_per_run"], 750)
-                self.assertTrue(all(row["training_frames"] == 750 for row in audit["runs"]))
+                self.assertEqual(audit["sampling"]["training_frames_per_run"], 1250)
+                self.assertTrue(all(row["training_frames"] == 1250 for row in audit["runs"]))
                 self.assertTrue((output / "step2_audit.tsv").is_file())
                 self.assertTrue((output / "step2_audit.md").is_file())
                 for relative, ldauu in expected_u.items():
@@ -126,7 +126,7 @@ class Step2SeriesTests(unittest.TestCase):
                     self.assertEqual(incar["SYSTEM"], f"Step2_DFT_MD_{temperature}K")
                     self.assertEqual(incar["TEBEG"], str(temperature))
                     self.assertEqual(incar["TEEND"], str(temperature))
-                    self.assertEqual(incar["NSW"], "3000")
+                    self.assertEqual(incar["NSW"], "5000")
                     self.assertEqual(incar["NBLOCK"], "4")
                     self.assertEqual(incar["ENCUT"], "520")
                     self.assertEqual(incar["LWAVE"], ".FALSE.")
@@ -159,7 +159,7 @@ class Step2SeriesTests(unittest.TestCase):
             parsed = parse_incar(root / "Step2_450K/Real/N_Term/x0.25/INCAR")
             self.assertEqual(parsed["ENCUT"], "610")
             self.assertEqual(parsed["TEBEG"], "450")
-            self.assertEqual(parsed["NSW"], "3000")
+            self.assertEqual(parsed["NSW"], "5000")
             self.assertEqual(parsed["NBLOCK"], "4")
             self.assertEqual(parsed["LDAUU"], "0.0 0.0 0.0 4.6 0.0 0.0")
             self.assertEqual(parsed["LMAXMIX"], "4")

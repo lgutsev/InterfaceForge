@@ -48,9 +48,19 @@ MLFF_ACCURACY_PROFILES = ("accurate",)
 STEP2_HUBBARD_TAG_PREFIX = "LDAU"
 STEP2_HUBBARD_TAGS = ("LMAXMIX",)
 STEP2_INHERITED_FILES = ("KPOINTS", "POTCAR", "runvasp.sh", "run.slurm")
-STEP2_NSW = 3000
 STEP2_NBLOCK = 4
-STEP2_TRAINING_FRAMES = STEP2_NSW // STEP2_NBLOCK
+
+
+def _step2_nsw(protocol: str) -> int:
+    """Step2 MD length in steps for ``protocol`` (academic 5000, training 1000)."""
+
+    from .aimd import resolve_protocol
+
+    return int(resolve_protocol(protocol)["step2"]["nsw"])
+
+
+def _step2_dense_frames(protocol: str) -> int:
+    return _step2_nsw(protocol) // STEP2_NBLOCK
 
 # Active spin/electronic tags copied verbatim from each Step1 INCAR (like the
 # LDAU* set) so a fixed-temperature Step2 MD keeps the same magnetic ground
@@ -69,18 +79,23 @@ STEP2_TRAINING_STRIPPED_TAGS = ("LORBIT", "LDIPOL", "IDIPOL", "DIPOL")
 def _step2_sampling_block(protocol: str) -> dict[str, Any]:
     """Sampling summary recorded in the Step2 manifest and audit.
 
-    The generated INCAR is identical for every protocol (``NSW``/``NBLOCK``
-    always come from the template). Only the *retention policy* differs:
-    ``academic`` keeps the dense NBLOCK stride; ``training`` defers frame
+    ``academic`` runs a long trajectory (5 ps) and keeps the dense NBLOCK
+    stride; ``training`` runs a short trajectory (1 ps) and defers frame
     selection to ``iface vasp step2-sample``, which spaces frames at the
-    measured energy decorrelation time.
+    measured energy decorrelation time. The training-set diversity is meant
+    to come from many independent short runs (different pre-relaxed start
+    structures), not from one long trajectory.
     """
 
     from .aimd import resolve_protocol
 
-    block: dict[str, Any] = {"protocol": protocol, "nsw": STEP2_NSW, "nblock": STEP2_NBLOCK}
+    block: dict[str, Any] = {
+        "protocol": protocol,
+        "nsw": _step2_nsw(protocol),
+        "nblock": STEP2_NBLOCK,
+    }
     if protocol == "academic":
-        block["training_frames_per_run"] = STEP2_TRAINING_FRAMES
+        block["training_frames_per_run"] = _step2_dense_frames(protocol)
         block["retention"] = "fixed NBLOCK stride (dense)"
     else:
         step2 = resolve_protocol(protocol)["step2"]
@@ -253,7 +268,7 @@ def _render_step2_incar(
         "SYSTEM": f"Step2_DFT_MD_{_temperature_label(float(temperature))}K",
         "TEBEG": temperature_text,
         "TEEND": temperature_text,
-        "NSW": str(STEP2_NSW),
+        "NSW": str(_step2_nsw(protocol)),
         "NBLOCK": str(STEP2_NBLOCK),
     }
     if training:
@@ -568,8 +583,9 @@ def prepare_step2_series(
                         ),
                         "temperature_tags": "requested temperature overrides SYSTEM, TEBEG, and TEEND",
                         "sampling_tags": (
-                            f"Step2 fixes NSW={STEP2_NSW} and NBLOCK={STEP2_NBLOCK}; "
-                            f"the {protocol} retention policy governs which frames are kept"
+                            f"{protocol} Step2 fixes NSW={_step2_nsw(protocol)} and "
+                            f"NBLOCK={STEP2_NBLOCK}; the {protocol} retention policy "
+                            "governs which frames are kept"
                         ),
                         "training_trim": (
                             "training strips "
@@ -927,7 +943,7 @@ def _audit_step2_plans(
             ("SYSTEM", expected_system),
             ("TEBEG", expected_temperature),
             ("TEEND", expected_temperature),
-            ("NSW", str(STEP2_NSW)),
+            ("NSW", str(_step2_nsw(protocol))),
             ("NBLOCK", str(STEP2_NBLOCK)),
         ):
             if parsed.get(tag) != expected:
@@ -985,7 +1001,7 @@ def _audit_step2_plans(
                 "relative_path": plan["relative"].as_posix() or ".",
                 "destination": str(destination),
                 "temperature_k": plan["temperature_k"],
-                "nsw": STEP2_NSW,
+                "nsw": _step2_nsw(protocol),
                 "nblock": STEP2_NBLOCK,
                 "training_frames": sampling_block["training_frames_per_run"],
                 "protocol": protocol,
