@@ -118,6 +118,47 @@ def preheat_ps(nsw: int | None, potim_fs: float | None) -> float | None:
 _STEP1_EXCLUDED = ("archive", "backup")
 
 
+_OVERCONVERGED_FOR_TRAINING = {
+    "LREAL": (
+        lambda v: v.strip().upper() in {".FALSE.", "F", "FALSE"},
+        "LREAL=.FALSE. — real-space projectors are ~3-4x faster for MD/relaxation",
+    ),
+    "PREC": (
+        lambda v: v.strip().lower().startswith(("acc", "high")) or v.strip().lower() == "a",
+        "PREC=Accurate/High — Normal is enough for training labels",
+    ),
+    "ADDGRID": (
+        lambda v: v.strip().upper() in {".TRUE.", "T", "TRUE"},
+        "ADDGRID=.TRUE. — rarely needed for training",
+    ),
+    "EDIFF": (
+        lambda v: _first_float(v.replace("D", "E").replace("d", "e"), 1.0) <= 1e-6,
+        "EDIFF<=1E-6 — 1E-5 converges forces to EDIFFG=-0.02",
+    ),
+    "LORBIT": (
+        lambda v: _first_int(v) is not None and _first_int(v) >= 10,
+        "LORBIT>=10 — per-ion projection tables bloat OUTCAR, not needed for training",
+    ),
+    "LDAUPRINT": (
+        lambda v: _first_int(v) is not None and _first_int(v) >= 1,
+        "LDAUPRINT>=1 — occupancy matrices bloat OUTCAR; set 0 unless debugging U",
+    ),
+    "LDIPOL": (
+        lambda v: v.strip().upper() in {".TRUE.", "T", "TRUE"},
+        "LDIPOL=.TRUE. — negligible for training forces; use more vacuum instead",
+    ),
+}
+
+
+def _overconverged_notes(parsed: dict[str, str]) -> list[str]:
+    notes: list[str] = []
+    for tag, (predicate, message) in _OVERCONVERGED_FOR_TRAINING.items():
+        value = parsed.get(tag)
+        if value is not None and predicate(value):
+            notes.append(f"over-converged for training: {message}")
+    return notes
+
+
 def audit_step1_incar(incar_path: str | Path, protocol: str) -> dict[str, Any]:
     """Audit a Step1 preheat INCAR against the requested protocol.
 
@@ -157,6 +198,9 @@ def audit_step1_incar(incar_path: str | Path, protocol: str) -> dict[str, Any]:
         )
     if protocol == "academic" and parsed.get("LWAVE", "").upper() in {".FALSE.", "F", "FALSE"}:
         notes.append("LWAVE=.FALSE.: Step2 cannot restart the wavefunction from this preheat")
+
+    if protocol == "training":
+        notes.extend(_overconverged_notes(parsed))
 
     status = "FAIL" if issues else ("WARN" if notes else "PASS")
     return {

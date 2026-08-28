@@ -130,8 +130,14 @@ def discover_leaf_outcars(
 
     discovered: list[LeafSource] = []
     seen_ids: dict[str, int] = {}
-    for outcar in sorted(source_root.rglob(outcar_name)):
+    candidates = sorted(source_root.rglob(outcar_name)) + sorted(
+        source_root.rglob(f"{outcar_name}.gz")
+    )
+    for outcar in candidates:
         if not outcar.is_file():
+            continue
+        # Prefer an uncompressed OUTCAR when both sit in the same directory.
+        if outcar.name.endswith(".gz") and outcar.with_name(outcar.name[:-3]).is_file():
             continue
         relative_outcar = outcar.relative_to(source_root)
         if _is_excluded(relative_outcar, exclude):

@@ -30,17 +30,23 @@ The precedence rule is intentionally narrow and deterministic:
    every ordinary INCAR tag.
 2. Every active `LDAU*` assignment and `LMAXMIX` is copied verbatim from that
    individual Step1 run. Template Hubbard values are ignored.
-3. The requested temperature overrides `SYSTEM`, `TEBEG`, and `TEEND`.
-4. Step2 sampling is fixed at `NSW=3000` and `NBLOCK=4`. Which of those
+3. Every active `ISPIN`, `MAGMOM`, `LASPH`, and `LNONCOLLINEAR` line is
+   likewise copied verbatim from that Step1 run, so a fixed-temperature
+   Step2 MD keeps Step1's magnetic ground state instead of silently running
+   non-spin-polarised. `ISTART` is *not* set (Step2 does not inherit a
+   WAVECAR, so the moments still initialise from the inherited `MAGMOM`).
+4. The requested temperature overrides `SYSTEM`, `TEBEG`, and `TEEND`.
+5. Step2 sampling is fixed at `NSW=3000` and `NBLOCK=4`. Which of those
    steps become training frames depends on `--protocol` (see
    [AIMD protocols](#aimd-protocols-academic-vs-training) below); the
    default `academic` keeps the dense every-`NBLOCK` stride (750 frames
    per run).
 
 Before creating any output tree, the command verifies that `LDAUL`, `LDAUU`,
-and `LDAUJ` each contain one value per species in that run's `CONTCAR`. This is
-what makes mixed atom-type orders safe: InterfaceForge never reconstructs or
-reorders a Hubbard array. `CONTCAR` becomes the new `POSCAR`; the nearest
+and `LDAUJ` each contain one value per species in that run's `CONTCAR`, and
+that an inherited `MAGMOM` has one value per ion. This is what makes mixed
+atom-type orders safe: InterfaceForge never reconstructs or reorders a
+Hubbard or moment array. `CONTCAR` becomes the new `POSCAR`; the nearest
 run-specific or shared ancestor `KPOINTS`, `POTCAR`, `runvasp.sh`, and
 `run.slurm` files are copied. Runtime outputs such as `OUTCAR`, `WAVECAR`, and
 `CHGCAR` are not inherited.
@@ -48,10 +54,12 @@ run-specific or shared ancestor `KPOINTS`, `POTCAR`, `runvasp.sh`, and
 Each temperature root receives `step2_manifest.json` plus
 `step2_audit.json`, `step2_audit.tsv`, and `step2_audit.md`. The audit reopens
 every generated file, verifies exact INCAR/structure/input hashes, checks
-temperature, Hubbard values, `NSW=3000`, `NBLOCK=4`, and the expected 750-frame
-count, rejects inherited runtime outputs, and clearly states that submission
-was not performed. Existing `Step2_<T>K` roots are never overwritten. To use
-another parent or the attached template explicitly:
+temperature, Hubbard values, inherited spin tags (`FAIL` if Step1 was
+`ISPIN=2` but Step2 is not, or if `MAGMOM` has the wrong length), `NSW=3000`,
+`NBLOCK=4`, and the frame budget, rejects inherited runtime outputs, and
+clearly states that submission was not performed. Existing `Step2_<T>K` roots
+are never overwritten. To use another parent or the attached template
+explicitly:
 
 ```bash
 iface vasp step2-prepare Step1 \
@@ -110,7 +118,8 @@ reproduces every prior result and directory convention unchanged.**
 |---|---|---|
 | Purpose | Publication / production AIMD | MLIP training-data generation |
 | Step1 preheat | ~2 ps (full thermalization) | ~0.4 ps (geometry is already pre-relaxed by classical + VASP+U opt) |
-| Step2 INCAR | `NSW=3000`, `NBLOCK=4` | identical — the INCAR does **not** change |
+| Step2 INCAR | template as-is | template + `NWRITE=1`, `LDAUPRINT=0`, `LORBIT`/dipole stripped (small OUTCARs) |
+| Step2 spin tags | `ISPIN`/`MAGMOM`/`LASPH` inherited verbatim from Step1 (both protocols) | same |
 | Step2 frame retention | every `NBLOCK`-th step (750/run) | spaced at the measured total-energy decorrelation time (~15–40/run) |
 
 ### Step1: switch and audit the preheat
@@ -132,9 +141,11 @@ iface vasp step1-protocol Step1/NiO_m110_Big_U46 --protocol training --nsw 200
 
 The audit is `PASS`/`WARN`/`FAIL`: `FAIL` only if the INCAR is not a
 fixed-temperature MD preheat at all (`IBRION≠0`, `NSW≤0`); `WARN` for a
-preheat whose length is outside the profile's expected window or whose
-restart hygiene is off (`LWAVE=.FALSE.` under `academic`). `archive/`,
-`backup/`, and `X*` paths are skipped.
+preheat whose length is outside the profile's expected window, whose restart
+hygiene is off (`LWAVE=.FALSE.` under `academic`), or — under `training` —
+that carries over-converged settings for training data (`LREAL=.FALSE.`,
+`PREC=Accurate/High`, `EDIFF≤1E-6`, `ADDGRID`, `LORBIT≥10`, `LDAUPRINT≥1`,
+`LDIPOL`). `archive/`, `backup/`, and `X*` paths are skipped.
 
 ### Step2: prepare with a protocol, then sample by decorrelation
 
@@ -142,10 +153,27 @@ restart hygiene is off (`LWAVE=.FALSE.` under `academic`). `archive/`,
 iface vasp step2-prepare Step1 --temperatures 300 450 600 --protocol training
 ```
 
-The generated INCARs are byte-identical to `academic`; the difference is
-recorded in `step2_manifest.json` / `step2_audit.*` as the retention policy,
-and the audit adds an informational note when a discovered Step1 preheat
-length does not match the protocol (never a `FAIL`).
+`academic` leaves the template untouched — only the retention policy is
+recorded in `step2_manifest.json` / `step2_audit.*`, and the audit adds an
+informational note (never a `FAIL`) when a discovered Step1 preheat length
+does not match the protocol.
+
+`training` additionally rewrites the generated Step2 INCAR to keep OUTCARs
+small, since per-step projection and occupancy tables are useless for
+force/energy labels and easily push a spin-polarised MD OUTCAR past 1 GB:
+
+- forces `NWRITE = 1` and `LDAUPRINT = 0`;
+- strips `LORBIT` and the slab dipole correction (`LDIPOL`, `IDIPOL`,
+  `DIPOL`) — for training data the dipole error on forces is negligible;
+  use a large vacuum (≥15 Å) instead;
+- the audit adds `over-converged for training` **notes** (not `FAIL`) for
+  `LREAL=.FALSE.`, `PREC=Accurate/High`, `EDIFF≤1E-6`, `ADDGRID=.TRUE.`
+  that a training trajectory does not need. Keep the tight settings for a
+  final publication run.
+
+Add `gzip -f OUTCAR` to the end of your Step1 `runvasp.sh` (it propagates
+verbatim into every Step2 run) — a gzipped OUTCAR is ~10–20× smaller and
+`iface collect` / `iface leaf-collect` now discover `OUTCAR.gz` transparently.
 
 After the Step2 jobs finish, select the frames:
 

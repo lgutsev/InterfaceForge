@@ -52,6 +52,19 @@ STEP2_NSW = 3000
 STEP2_NBLOCK = 4
 STEP2_TRAINING_FRAMES = STEP2_NSW // STEP2_NBLOCK
 
+# Active spin/electronic tags copied verbatim from each Step1 INCAR (like the
+# LDAU* set) so a fixed-temperature Step2 MD keeps the same magnetic ground
+# state. MAGMOM is per-atom and Step2's POSCAR is Step1's CONTCAR, so the
+# atom order matches; ISTART is not set because Step2 does not inherit a
+# WAVECAR, so the moments must still be initialised from MAGMOM.
+STEP2_INHERITED_ELECTRONIC_TAGS = ("ISPIN", "MAGMOM", "LASPH", "LNONCOLLINEAR")
+
+# training protocol only: trim per-step OUTCAR bloat that is useless for
+# force/energy training labels, and drop the slab dipole correction (add
+# vacuum instead). academic leaves the template untouched.
+STEP2_TRAINING_FORCED_TAGS = {"NWRITE": "1", "LDAUPRINT": "0"}
+STEP2_TRAINING_STRIPPED_TAGS = ("LORBIT", "LDIPOL", "IDIPOL", "DIPOL")
+
 
 def _step2_sampling_block(protocol: str) -> dict[str, Any]:
     """Sampling summary recorded in the Step2 manifest and audit.
@@ -126,6 +139,10 @@ def _is_step2_hubbard_tag(tag: str) -> bool:
     return normalized.startswith(STEP2_HUBBARD_TAG_PREFIX) or normalized in STEP2_HUBBARD_TAGS
 
 
+def _is_step2_electronic_tag(tag: str) -> bool:
+    return tag.upper() in STEP2_INHERITED_ELECTRONIC_TAGS
+
+
 def _temperature_label(temperature: float) -> str:
     value = float(temperature)
     if not value > 0:
@@ -135,30 +152,63 @@ def _temperature_label(temperature: float) -> str:
     return f"{value:g}".replace(".", "p")
 
 
-def _render_step2_incar(source_text: str, template_text: str, temperature: float) -> dict[str, Any]:
-    """Render a Step2 INCAR with a deliberately narrow precedence rule.
-
-    The Step2 template is authoritative for every ordinary setting. Every
-    active source tag beginning with ``LDAU`` plus ``LMAXMIX`` is instead
-    copied byte-for-byte from that source INCAR. This avoids rebuilding
-    species-length DFT+U arrays when different runs use different element
-    orders.
-    """
-
-    inherited_lines: list[str] = []
-    inherited_values: dict[str, str] = {}
+def _collect_verbatim_source_tags(
+    source_text: str, predicate: Callable[[str], bool], kind: str
+) -> tuple[list[str], dict[str, str]]:
+    lines: list[str] = []
+    values: dict[str, str] = {}
     for line in source_text.splitlines():
         assignment = _incar_assignment(line)
-        if assignment is None or not _is_step2_hubbard_tag(assignment[0]):
+        if assignment is None or not predicate(assignment[0]):
             continue
         tag, value = assignment
-        if tag in inherited_values:
+        if tag in values:
             raise SafetyError(
-                f"Source INCAR contains duplicate active Hubbard tag {tag}; "
+                f"Source INCAR contains duplicate active {kind} tag {tag}; "
                 "refusing an ambiguous Step2 inheritance"
             )
-        inherited_values[tag] = value
-        inherited_lines.append(line)
+        values[tag] = value
+        lines.append(line)
+    return lines, values
+
+
+def _render_step2_incar(
+    source_text: str,
+    template_text: str,
+    temperature: float,
+    *,
+    protocol: str = "academic",
+) -> dict[str, Any]:
+    """Render a Step2 INCAR with a deliberately narrow precedence rule.
+
+    The Step2 template is authoritative for every ordinary setting, except:
+
+    * every active ``LDAU*`` / ``LMAXMIX`` line is copied byte-for-byte from
+      that Step1 run (avoids rebuilding species-length DFT+U arrays);
+    * every active spin/electronic tag in
+      :data:`STEP2_INHERITED_ELECTRONIC_TAGS` (``ISPIN``, ``MAGMOM``,
+      ``LASPH``, ``LNONCOLLINEAR``) is likewise copied verbatim, so a Step2
+      MD keeps Step1's magnetic ground state instead of silently running
+      non-spin-polarised;
+    * the requested temperature overrides ``SYSTEM`` / ``TEBEG`` / ``TEEND``
+      and sampling is pinned to ``NSW`` / ``NBLOCK``.
+
+    Under ``protocol="training"`` the render additionally forces
+    :data:`STEP2_TRAINING_FORCED_TAGS` (``NWRITE=1``, ``LDAUPRINT=0``) and
+    drops :data:`STEP2_TRAINING_STRIPPED_TAGS` (``LORBIT`` and the slab
+    dipole correction) to keep OUTCAR small; academic leaves the template
+    untouched.
+    """
+
+    hubbard_lines, hubbard_values = _collect_verbatim_source_tags(
+        source_text, _is_step2_hubbard_tag, "Hubbard"
+    )
+    electronic_lines, electronic_values = _collect_verbatim_source_tags(
+        source_text, _is_step2_electronic_tag, "spin/electronic"
+    )
+
+    training = protocol == "training"
+    stripped = set(STEP2_TRAINING_STRIPPED_TAGS) if training else set()
 
     temperature_text = _temperature_label(float(temperature)).replace("p", ".")
     replacements = {
@@ -168,6 +218,9 @@ def _render_step2_incar(source_text: str, template_text: str, temperature: float
         "NSW": str(STEP2_NSW),
         "NBLOCK": str(STEP2_NBLOCK),
     }
+    if training:
+        replacements.update(STEP2_TRAINING_FORCED_TAGS)
+
     found: set[str] = set()
     output: list[str] = []
     template_active: set[str] = set()
@@ -184,8 +237,11 @@ def _render_step2_incar(source_text: str, template_text: str, temperature: float
             )
         template_active.add(tag)
         if _is_step2_hubbard_tag(tag):
-            # The source run is the only authority for Hubbard settings.
-            continue
+            continue  # the source run is the only authority for Hubbard settings
+        if tag in electronic_values:
+            continue  # replaced by the verbatim Step1 value below
+        if tag in stripped:
+            continue  # dropped for the training protocol
         if tag in replacements:
             prefix = line[: len(line) - len(line.lstrip())]
             output.append(f"{prefix}{tag} = {replacements[tag]}")
@@ -197,27 +253,47 @@ def _render_step2_incar(source_text: str, template_text: str, temperature: float
         if tag not in found:
             output.extend(("", f"{tag} = {value}"))
 
-    if inherited_lines:
+    if hubbard_lines:
+        output.extend(
+            ("", "# DFT+U settings inherited verbatim from this run's Step1 INCAR", *hubbard_lines)
+        )
+    if electronic_lines:
         output.extend(
             (
                 "",
-                "# DFT+U settings inherited verbatim from this run's Step1 INCAR",
-                *inherited_lines,
+                "# Spin/electronic settings inherited verbatim from this run's Step1 INCAR",
+                *electronic_lines,
             )
         )
+    if training:
+        output.extend(
+            (
+                "",
+                "# training protocol: LORBIT and the slab dipole correction are dropped;"
+                " use a large vacuum instead",
+            )
+        )
+
     text = "\n".join(output).rstrip() + "\n"
     rendered_values: dict[str, str] = {}
     for line in text.splitlines():
         assignment = _incar_assignment(line)
         if assignment is not None:
             rendered_values[assignment[0]] = assignment[1]
-    for tag, value in inherited_values.items():
+    for tag, value in {**hubbard_values, **electronic_values}.items():
         if rendered_values.get(tag) != value:
             raise SafetyError(f"Internal error: Step2 did not preserve source {tag} exactly")
     return {
         "text": text,
-        "hubbard_tags": inherited_values,
-        "template_tags": sorted(tag for tag in rendered_values if not _is_step2_hubbard_tag(tag)),
+        "hubbard_tags": hubbard_values,
+        "electronic_tags": electronic_values,
+        "stripped_tags": sorted(stripped & template_active),
+        "forced_tags": dict(STEP2_TRAINING_FORCED_TAGS) if training else {},
+        "template_tags": sorted(
+            tag
+            for tag in rendered_values
+            if not _is_step2_hubbard_tag(tag) and not _is_step2_electronic_tag(tag)
+        ),
     }
 
 
@@ -349,10 +425,13 @@ def prepare_step2_series(
         if not ({"runvasp.sh", "run.slurm"} & resolved_inputs.keys()):
             raise SafetyError(f"No runvasp.sh or run.slurm found for Step1 run {run}")
         source_text = source_incar.read_text(encoding="utf-8", errors="ignore")
+        ion_count = _poscar_ion_count(structure)
         for temperature, label, output in zip(
             normalized_temperatures, labels, output_roots, strict=True
         ):
-            rendered = _render_step2_incar(source_text, template_text, temperature)
+            rendered = _render_step2_incar(
+                source_text, template_text, temperature, protocol=protocol
+            )
             for tag in ("LDAUL", "LDAUU", "LDAUJ"):
                 value = rendered["hubbard_tags"].get(tag)
                 if value is not None and _vasp_list_length(value) != len(elements):
@@ -360,6 +439,12 @@ def prepare_step2_series(
                         f"{source_incar}: {tag} has {_vasp_list_length(value)} entries but "
                         f"{source_structure} has {len(elements)} species ({' '.join(elements)})"
                     )
+            magmom = rendered["electronic_tags"].get("MAGMOM")
+            if magmom is not None and _vasp_list_length(magmom) != ion_count:
+                raise SafetyError(
+                    f"{source_incar}: MAGMOM has {_vasp_list_length(magmom)} entries but "
+                    f"{source_structure} has {ion_count} ions"
+                )
             plans.append(
                 {
                     "source": run,
@@ -372,6 +457,8 @@ def prepare_step2_series(
                     "inputs": resolved_inputs,
                     "incar_text": rendered["text"],
                     "hubbard_tags": rendered["hubbard_tags"],
+                    "electronic_tags": rendered["electronic_tags"],
+                    "stripped_tags": rendered["stripped_tags"],
                 }
             )
 
@@ -405,6 +492,8 @@ def prepare_step2_series(
                         "elements": plan["elements"],
                         "source_structure": source_structure,
                         "hubbard_tags": plan["hubbard_tags"],
+                        "electronic_tags": plan["electronic_tags"],
+                        "stripped_tags": plan["stripped_tags"],
                         "inherited_files": sorted(plan["inputs"]),
                         "source_incar_sha256": _sha256_file(plan["source"] / "INCAR"),
                         "step2_incar_sha256": _sha256_file(destination / "INCAR"),
@@ -423,10 +512,23 @@ def prepare_step2_series(
                     "precedence": {
                         "ordinary_incar_tags": "Step2 template",
                         "hubbard_tags": "exact active LDAU* and LMAXMIX lines from each Step1 INCAR",
+                        "electronic_tags": (
+                            "exact active "
+                            + ", ".join(STEP2_INHERITED_ELECTRONIC_TAGS)
+                            + " lines from each Step1 INCAR (no MAGMOM re-init, no ISTART)"
+                        ),
                         "temperature_tags": "requested temperature overrides SYSTEM, TEBEG, and TEEND",
                         "sampling_tags": (
                             f"Step2 fixes NSW={STEP2_NSW} and NBLOCK={STEP2_NBLOCK}; "
                             f"the {protocol} retention policy governs which frames are kept"
+                        ),
+                        "training_trim": (
+                            "training strips "
+                            + ", ".join(STEP2_TRAINING_STRIPPED_TAGS)
+                            + " and forces "
+                            + ", ".join(f"{k}={v}" for k, v in STEP2_TRAINING_FORCED_TAGS.items())
+                            if protocol == "training"
+                            else "n/a (academic leaves the template untouched)"
                         ),
                     },
                     "sampling": _step2_sampling_block(protocol),
@@ -481,6 +583,7 @@ def prepare_step2_series(
                 "temperature_k": plan["temperature_k"],
                 "elements": plan["elements"],
                 "hubbard_tags": plan["hubbard_tags"],
+                "electronic_tags": plan["electronic_tags"],
                 "inherited_files": sorted(plan["inputs"]),
             }
             for plan in plans
@@ -714,7 +817,7 @@ def _audit_step2_plans(
 ) -> dict[str, Any]:
     """Independently verify prepared Step2 inputs and write human-readable audits."""
 
-    from .aimd import preheat_ps, resolve_protocol
+    from .aimd import _overconverged_notes, preheat_ps, resolve_protocol
 
     def _num(value: str | None) -> float | None:
         try:
@@ -772,7 +875,7 @@ def _audit_step2_plans(
         ):
             if parsed.get(tag) != expected:
                 issues.append(f"{tag}={parsed.get(tag)!r}, expected {expected!r}")
-        for tag, expected in plan["hubbard_tags"].items():
+        for tag, expected in {**plan["hubbard_tags"], **plan["electronic_tags"]}.items():
             if parsed.get(tag) != expected:
                 issues.append(f"{tag} changed from Step1")
         for tag in ("LDAUL", "LDAUU", "LDAUJ"):
@@ -781,6 +884,24 @@ def _audit_step2_plans(
                 issues.append(
                     f"{tag} has {_vasp_list_length(value)} values for {len(plan['elements'])} species"
                 )
+        # Spin coherence: a spin-polarised Step1 must not become a
+        # non-spin-polarised Step2 (silently wrong for AFM oxides).
+        if source_incar.get("ISPIN") == "2" and parsed.get("ISPIN") != "2":
+            issues.append("Step1 is spin-polarised (ISPIN=2) but Step2 INCAR is not")
+        magmom = parsed.get("MAGMOM")
+        if magmom is not None and _vasp_list_length(magmom) != _poscar_ion_count(plan["structure"]):
+            issues.append(
+                f"MAGMOM has {_vasp_list_length(magmom)} values for "
+                f"{_poscar_ion_count(plan['structure'])} ions"
+            )
+        if protocol == "training":
+            for tag, forced in STEP2_TRAINING_FORCED_TAGS.items():
+                if parsed.get(tag) != forced:
+                    issues.append(f"training protocol requires {tag}={forced}, found {parsed.get(tag)!r}")
+            still_present = [tag for tag in STEP2_TRAINING_STRIPPED_TAGS if tag in parsed]
+            if still_present:
+                issues.append("training protocol should strip: " + ", ".join(still_present))
+            notes.extend(_overconverged_notes(parsed))
         if not poscar_path.is_file():
             issues.append("missing POSCAR")
         elif _sha256_file(poscar_path) != _sha256_file(plan["structure"]):
@@ -814,6 +935,8 @@ def _audit_step2_plans(
                 "step1_preheat_ps": round(source_ps, 3) if source_ps is not None else None,
                 "elements": plan["elements"],
                 "hubbard_tags": plan["hubbard_tags"],
+                "electronic_tags": plan["electronic_tags"],
+                "stripped_tags": plan["stripped_tags"],
                 "inherited_files": sorted(plan["inputs"]),
                 "inherited_sha256": inherited_hashes,
                 "issues": issues,
@@ -855,6 +978,7 @@ def _audit_step2_plans(
                     "LDAUL",
                     "LDAUU",
                     "LDAUJ",
+                    "ISPIN",
                     "inherited_files",
                     "issues",
                     "notes",
@@ -875,6 +999,7 @@ def _audit_step2_plans(
                         "LDAUL": row["hubbard_tags"].get("LDAUL", ""),
                         "LDAUU": row["hubbard_tags"].get("LDAUU", ""),
                         "LDAUJ": row["hubbard_tags"].get("LDAUJ", ""),
+                        "ISPIN": row["electronic_tags"].get("ISPIN", ""),
                         "inherited_files": ",".join(row["inherited_files"]),
                         "issues": "; ".join(row["issues"]),
                         "notes": "; ".join(row.get("notes", [])),
@@ -891,10 +1016,18 @@ def _audit_step2_plans(
             f"- Runs: {len(output_rows)}",
             f"- Protocol: **{protocol}**",
             _step2_sampling_markdown(sampling_block),
+            (
+                "- Spin/electronic tags inherited verbatim from Step1: "
+                + (
+                    ", ".join(sorted(output_rows[0]["electronic_tags"]))
+                    if output_rows and output_rows[0]["electronic_tags"]
+                    else "none in this Step1 tree"
+                )
+            ),
             "- Submission: **not performed**",
             "",
-            "| Status | Run | Species | LDAUU | Inherited inputs | Issues | Notes |",
-            "|---|---|---|---|---|---|---|",
+            "| Status | Run | Species | LDAUU | ISPIN | Inherited inputs | Issues | Notes |",
+            "|---|---|---|---|---|---|---|---|",
         ]
         for row in output_rows:
             markdown_lines.append(
@@ -905,6 +1038,7 @@ def _audit_step2_plans(
                         row["relative_path"],
                         " ".join(row["elements"]),
                         row["hubbard_tags"].get("LDAUU", "—"),
+                        row["electronic_tags"].get("ISPIN", "—"),
                         ", ".join(row["inherited_files"]),
                         "; ".join(row["issues"]) or "—",
                         "; ".join(row.get("notes", [])) or "—",
@@ -1434,6 +1568,20 @@ def _poscar_elements(poscar: Path) -> list[str]:
     if len(counts) != len(symbols) or not all(re.fullmatch(r"\d+", token) for token in counts):
         raise SafetyError(f"POSCAR element and count lines are inconsistent: {poscar}")
     return symbols
+
+
+def _poscar_ion_count(poscar: Path) -> int:
+    """Total number of ions from a VASP 5+ or legacy POSCAR counts line."""
+
+    lines = poscar.read_text(encoding="utf-8", errors="ignore").splitlines()
+    if len(lines) < 7:
+        raise SafetyError(f"POSCAR is too short: {poscar}")
+    counts = lines[5].split()
+    if not all(re.fullmatch(r"\d+", token) for token in counts):
+        counts = lines[6].split()
+    if not counts or not all(re.fullmatch(r"\d+", token) for token in counts):
+        raise SafetyError(f"POSCAR has no valid ion-count line: {poscar}")
+    return sum(int(token) for token in counts)
 
 
 def assemble_potcar(

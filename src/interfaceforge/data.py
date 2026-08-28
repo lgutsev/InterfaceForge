@@ -171,7 +171,7 @@ def _deduplicate_run_ids(discovered: list[SourceTrajectory]) -> list[SourceTraje
 def discover_outcars(
     root: str | Path,
     *,
-    patterns: Sequence[str] = ("OUTCAR",),
+    patterns: Sequence[str] = ("OUTCAR", "OUTCAR.gz"),
     exclude: Sequence[str] = (
         "*/.interfaceforge/*",
         "*/archive/*",
@@ -186,6 +186,10 @@ def discover_outcars(
     discovered: list[SourceTrajectory] = []
     for path in sorted(source_root.rglob("*")):
         if not path.is_file() or not any(fnmatch.fnmatch(path.name, pattern) for pattern in patterns):
+            continue
+        # A directory with both OUTCAR and OUTCAR.gz would otherwise be
+        # collected twice; prefer the uncompressed file when both exist.
+        if path.name.endswith(".gz") and path.with_name(path.name[:-3]).is_file():
             continue
         relative = path.relative_to(source_root).as_posix()
         wrapped = f"/{relative}"

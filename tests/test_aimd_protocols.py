@@ -14,6 +14,7 @@ from interfaceforge.aimd import (
     switch_step1_protocol,
 )
 from interfaceforge.cli import main
+from interfaceforge.errors import SafetyError
 from interfaceforge.vasp import parse_incar, prepare_step2_series
 
 
@@ -169,6 +170,99 @@ def _step1_tree(root: Path, *, nsw: int) -> Path:
     )
     (run / "POTCAR").write_text("licensed fixture Ni O\n", encoding="utf-8")
     return step1
+
+
+def _step1_tree_spin(root: Path, *, magmom: str = "2.0 -2.0") -> Path:
+    step1 = root / "Step1"
+    step1.mkdir()
+    (step1 / "KPOINTS").write_text("Gamma\n0\nGamma\n1 1 1\n0 0 0\n", encoding="utf-8")
+    launcher = step1 / "runvasp.sh"
+    launcher.write_text("#!/usr/bin/env bash\nsbatch payload\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    run = step1 / "NiO_m110_Big_U46"
+    run.mkdir()
+    (run / "INCAR").write_text(
+        "IBRION = 0\nNSW = 400\nPOTIM = 1.0\nSMASS = -1\nTEBEG = 300\nTEEND = 300\n"
+        "ISPIN = 2\nLASPH = .TRUE.\n"
+        f"MAGMOM = {magmom}\n"
+        "LWAVE = .TRUE.\nLDAU = .TRUE.\nLDAUL = 2 -1\nLDAUU = 4.6 0.0\n"
+        "LDAUJ = 0.0 0.0\nLMAXMIX = 4\n",
+        encoding="utf-8",
+    )
+    (run / "CONTCAR").write_text(
+        "step1\n1.0\n10 0 0\n0 10 0\n0 0 10\nNi O\n1 1\nDirect\n0 0 0\n0.5 0.5 0.5\n",
+        encoding="utf-8",
+    )
+    (run / "POTCAR").write_text("licensed fixture Ni O\n", encoding="utf-8")
+    return step1
+
+
+# A deliberately heavy custom Step2 template (publication-grade output).
+_HEAVY_TEMPLATE = (
+    "ENCUT = 520\nPREC = Accurate\nLREAL = .FALSE.\nEDIFF = 1E-6\nADDGRID = .TRUE.\n"
+    "ISMEAR = 0\nSIGMA = 0.05\nIBRION = 0\nNSW = 1\nNBLOCK = 1\nPOTIM = 1.0\n"
+    "MDALGO = 2\nSMASS = 1.0\nTEBEG = 1\nTEEND = 1\nISIF = 2\n"
+    "LORBIT = 11\nLDAUPRINT = 1\nLDIPOL = .TRUE.\nIDIPOL = 3\nDIPOL = 0.5 0.5 0.5\n"
+    "NWRITE = 2\nLWAVE = .FALSE.\nLCHARG = .FALSE.\nNCORE = 4\n"
+)
+
+
+class Step2SpinInheritanceTests(unittest.TestCase):
+    def _template(self, root: Path) -> Path:
+        path = root / "INCAR_STEP2"
+        path.write_text(_HEAVY_TEMPLATE, encoding="utf-8")
+        return path
+
+    def test_academic_inherits_spin_verbatim_and_keeps_template_otherwise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            step1 = _step1_tree_spin(root)
+
+            prepare_step2_series(
+                step1, temperatures=[300], template=self._template(root)
+            )  # academic default
+
+            incar = parse_incar(root / "Step2_300K" / "NiO_m110_Big_U46" / "INCAR")
+            self.assertEqual(incar["ISPIN"], "2")
+            self.assertEqual(incar["MAGMOM"], "2.0 -2.0")
+            self.assertEqual(incar["LASPH"], ".TRUE.")
+            # academic does not trim the template.
+            self.assertEqual(incar["LORBIT"], "11")
+            self.assertEqual(incar["LDIPOL"], ".TRUE.")
+
+    def test_training_inherits_spin_but_trims_output_and_dipole(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            step1 = _step1_tree_spin(root)
+
+            prepare_step2_series(
+                step1, temperatures=[300], protocol="training", template=self._template(root)
+            )
+
+            incar = parse_incar(root / "Step2_300K" / "NiO_m110_Big_U46" / "INCAR")
+            self.assertEqual(incar["ISPIN"], "2")
+            self.assertEqual(incar["MAGMOM"], "2.0 -2.0")
+            self.assertNotIn("LORBIT", incar)
+            self.assertNotIn("LDIPOL", incar)
+            self.assertNotIn("IDIPOL", incar)
+            self.assertNotIn("DIPOL", incar)
+            self.assertEqual(incar["LDAUPRINT"], "0")
+            self.assertEqual(incar["NWRITE"], "1")
+            audit = json.loads(
+                (root / "Step2_300K" / "step2_audit.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(audit["status"], "PASS")  # over-convergence is a note, not a fail
+            notes = " ".join(n for row in audit["runs"] for n in row["notes"])
+            self.assertIn("over-converged for training", notes)
+            self.assertIn("LREAL", notes)
+
+    def test_magmom_length_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            step1 = _step1_tree_spin(root, magmom="2.0 -2.0 0.0")  # 3 for 2 ions
+
+            with self.assertRaises(SafetyError):
+                prepare_step2_series(step1, temperatures=[300])
 
 
 class Step2ProtocolTests(unittest.TestCase):
