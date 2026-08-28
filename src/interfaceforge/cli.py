@@ -640,7 +640,55 @@ def cmd_geom(args: argparse.Namespace) -> int:
         payload = structure_summary(args.source)
     write_summary(payload, getattr(args, "summary", None))
     _json(payload)
+    if args.geometry == "vacuum" and "rows" in payload:
+        _print_vacuum_summary(payload, args)
     return 0
+
+
+def _print_vacuum_summary(payload: dict[str, Any], args: argparse.Namespace) -> None:
+    """Human-readable recap of a directory `geom vacuum` run (to stderr)."""
+
+    rows = payload["rows"]
+    thin = [r for r in rows if r["status"] == "THIN"]
+    name_w = max((len(r["path"]) for r in rows), default=4)
+    axis = rows[0]["axis"] if rows else "?"
+    lines = [
+        "",
+        f"Slab vacuum  {payload['root']}   (min {payload['min_vacuum_a']:.0f} A, axis {axis})",
+        f"  {'run'.ljust(name_w)}   vacuum_A   would_be",
+    ]
+    for r in rows:
+        if r.get("extended"):
+            would = "-> done"
+        elif "would_be_a" in r:
+            would = f"-> {r['would_be_a']:.1f}"
+        else:
+            would = ""
+        flag = "  THIN" if (r["status"] == "THIN" and not r.get("extended")) else ""
+        lines.append(f"  {r['path'].ljust(name_w)}   {r['vacuum_a']:>7.1f}   {would}{flag}")
+    lines.append("")
+
+    def _run(path: str) -> str:
+        return path.replace("\\", "/").split("/")[0]
+
+    who = ", ".join(_run(r["path"]) for r in thin)
+    if not thin:
+        lines.append(f"All {len(rows)} clear {payload['min_vacuum_a']:.0f} A - nothing to do.")
+    elif payload["mode"] == "audit":
+        lines.append(
+            f"{len(thin)} of {len(rows)} thin: {who}. "
+            f"Preview a fix:  iface vasp geom vacuum {args.source} --extend 18"
+        )
+    elif payload["mode"] == "dry-run":
+        lines.append(
+            f"{len(thin)} of {len(rows)} thin: {who} -> would stretch to {args.extend:.0f} A. "
+            f"Dry run, nothing written. Re-run with --execute to apply."
+        )
+    else:  # extended
+        lines.append(
+            f"Stretched {payload['extended']} structure(s) to {args.extend:.0f} A in place: {who}."
+        )
+    print("\n".join(lines), file=sys.stderr)
 
 
 def cmd_workfunction(args: argparse.Namespace) -> int:
