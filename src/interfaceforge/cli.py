@@ -599,95 +599,106 @@ def cmd_geom(args: argparse.Namespace) -> int:
             args.source, args.output, cutoff=args.cutoff, force=args.force
         )
     elif args.geometry == "vacuum":
-        if Path(args.source).is_dir():
-            payload = batch_slab_vacuum(
-                args.source,
-                axis=args.axis,
-                min_vacuum=args.min_vacuum,
-                extend=args.extend,
-                execute=args.execute,
-            )
-        elif args.extend is not None:
-            if not (args.execute or args.output):
-                report = slab_vacuum(args.source, axis=args.axis)
-                payload = {
-                    **report,
-                    "mode": "dry-run",
-                    "would_be_a": round(max(report["vacuum_a"], args.extend), 2),
-                    "hint": "pass -o OUT (or --execute to overwrite the source) to write it",
-                }
-            else:
-                output = args.source if args.execute else (args.output or f"{args.source}.extended")
-                payload = extend_slab_vacuum(
-                    args.source,
-                    output,
-                    axis=args.axis,
-                    vacuum=args.extend,
-                    recenter=not args.no_recenter,
-                    sort_atoms=not args.no_sort,
-                    force=args.force or args.execute,
-                )
-        else:
-            report = slab_vacuum(args.source, axis=args.axis)
-            report["status"] = "PASS" if report["vacuum_a"] >= args.min_vacuum else "THIN"
-            report["min_vacuum_a"] = args.min_vacuum
-            if report["status"] == "THIN":
-                report["fix"] = (
-                    f"iface vasp geom vacuum {args.source} --extend 18 -o {args.source}.extended"
-                )
-            payload = report
+        if args.output and len(args.sources) > 1:
+            raise SafetyError("-o/--output takes a single source; use --execute for many")
+        results = [_vacuum_one(source, args) for source in args.sources]
+        payload = results[0] if len(results) == 1 else {"sources": args.sources, "results": results}
     else:
         payload = structure_summary(args.source)
     write_summary(payload, getattr(args, "summary", None))
     _json(payload)
-    if args.geometry == "vacuum" and "rows" in payload:
-        _print_vacuum_summary(payload, args)
+    if args.geometry == "vacuum":
+        batches = [r for r in (results if len(results) > 1 else [payload]) if "rows" in r]
+        if batches:
+            _print_vacuum_summary(batches, args)
     return 0
 
 
-def _print_vacuum_summary(payload: dict[str, Any], args: argparse.Namespace) -> None:
-    """Human-readable recap of a directory `geom vacuum` run (to stderr)."""
+def _vacuum_one(source: str, args: argparse.Namespace) -> dict[str, Any]:
+    if Path(source).is_dir():
+        return batch_slab_vacuum(
+            source,
+            axis=args.axis,
+            min_vacuum=args.min_vacuum,
+            extend=args.extend,
+            execute=args.execute,
+        )
+    if args.extend is not None:
+        if args.execute or args.output:
+            output = source if args.execute else (args.output or f"{source}.extended")
+            return extend_slab_vacuum(
+                source,
+                output,
+                axis=args.axis,
+                vacuum=args.extend,
+                recenter=not args.no_recenter,
+                sort_atoms=not args.no_sort,
+                force=args.force or args.execute,
+            )
+        report = slab_vacuum(source, axis=args.axis)
+        return {
+            **report,
+            "mode": "dry-run",
+            "would_be_a": round(max(report["vacuum_a"], args.extend), 2),
+            "hint": "pass -o OUT (or --execute to overwrite the source) to write it",
+        }
+    report = slab_vacuum(source, axis=args.axis)
+    report["status"] = "PASS" if report["vacuum_a"] >= args.min_vacuum else "THIN"
+    report["min_vacuum_a"] = args.min_vacuum
+    if report["status"] == "THIN":
+        report["fix"] = f"iface vasp geom vacuum {source} --extend 18 -o {source}.extended"
+    return report
 
-    rows = payload["rows"]
-    thin = [r for r in rows if r["status"] == "THIN"]
-    name_w = max((len(r["path"]) for r in rows), default=4)
-    axis = rows[0]["axis"] if rows else "?"
-    lines = [
-        "",
-        f"Slab vacuum  {payload['root']}   (min {payload['min_vacuum_a']:.0f} A, axis {axis})",
-        f"  {'run'.ljust(name_w)}   vacuum_A   would_be",
-    ]
-    for r in rows:
-        if r.get("extended"):
-            would = "-> done"
-        elif "would_be_a" in r:
-            would = f"-> {r['would_be_a']:.1f}"
-        else:
-            would = ""
-        flag = "  THIN" if (r["status"] == "THIN" and not r.get("extended")) else ""
-        lines.append(f"  {r['path'].ljust(name_w)}   {r['vacuum_a']:>7.1f}   {would}{flag}")
-    lines.append("")
+
+def _print_vacuum_summary(batches: list[dict[str, Any]], args: argparse.Namespace) -> None:
+    """Human-readable recap of one or more directory `geom vacuum` runs (stderr)."""
 
     def _run(path: str) -> str:
         return path.replace("\\", "/").split("/")[0]
 
-    who = ", ".join(_run(r["path"]) for r in thin)
+    all_rows = [(b, r) for b in batches for r in b["rows"]]
+    total = len(all_rows)
+    thin = [(b, r) for b, r in all_rows if r["status"] == "THIN"]
+    mode = batches[0]["mode"]
+    lines: list[str] = []
+
+    for b in batches:
+        rows = b["rows"]
+        name_w = max((len(r["path"]) for r in rows), default=4)
+        axis = rows[0]["axis"] if rows else "?"
+        lines += [
+            "",
+            f"Slab vacuum  {b['root']}   (min {b['min_vacuum_a']:.0f} A, axis {axis})",
+            f"  {'run'.ljust(name_w)}   vacuum_A   would_be",
+        ]
+        for r in rows:
+            if r.get("extended"):
+                would = "-> done"
+            elif "would_be_a" in r:
+                would = f"-> {r['would_be_a']:.1f}"
+            else:
+                would = ""
+            flag = "  THIN" if (r["status"] == "THIN" and not r.get("extended")) else ""
+            lines.append(f"  {r['path'].ljust(name_w)}   {r['vacuum_a']:>7.1f}   {would}{flag}")
+    lines.append("")
+
+    who = ", ".join(dict.fromkeys(_run(r["path"]) for _, r in thin))
+    scope = " ".join(args.sources)
     if not thin:
-        lines.append(f"All {len(rows)} clear {payload['min_vacuum_a']:.0f} A - nothing to do.")
-    elif payload["mode"] == "audit":
+        lines.append(f"All {total} clear {batches[0]['min_vacuum_a']:.0f} A - nothing to do.")
+    elif mode == "audit":
         lines.append(
-            f"{len(thin)} of {len(rows)} thin: {who}. "
-            f"Preview a fix:  iface vasp geom vacuum {args.source} --extend 18"
+            f"{len(thin)} of {total} thin: {who}. "
+            f"Preview a fix:  iface vasp geom vacuum {scope} --extend 18"
         )
-    elif payload["mode"] == "dry-run":
+    elif mode == "dry-run":
         lines.append(
-            f"{len(thin)} of {len(rows)} thin: {who} -> would stretch to {args.extend:.0f} A. "
+            f"{len(thin)} of {total} thin: {who} -> would stretch to {args.extend:.0f} A. "
             f"Dry run, nothing written. Re-run with --execute to apply."
         )
     else:  # extended
-        lines.append(
-            f"Stretched {payload['extended']} structure(s) to {args.extend:.0f} A in place: {who}."
-        )
+        done = sum(b["extended"] for b in batches)
+        lines.append(f"Stretched {done} structure(s) to {args.extend:.0f} A in place: {who}.")
     print("\n".join(lines), file=sys.stderr)
 
 
@@ -1653,8 +1664,9 @@ def build_parser() -> argparse.ArgumentParser:
         "vacuum", help="Audit slab vacuum per face; --extend stretches the cell"
     )
     vacuum.add_argument(
-        "source",
-        help="A slab structure, or a directory to audit every POSCAR/CONTCAR below it",
+        "sources",
+        nargs="+",
+        help="One or more slab structures, or directories to audit every POSCAR/CONTCAR below",
     )
     vacuum.add_argument(
         "--axis",

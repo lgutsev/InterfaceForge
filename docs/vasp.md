@@ -242,8 +242,8 @@ drops below 12 Å, with the fix command.
 # report vacuum_a + slab span along the auto-detected normal
 iface vasp geom vacuum Step1/NiO_m110_Big_U46_DCZ-4P/CONTCAR
 
-# audit a whole tree
-iface vasp geom vacuum Step1
+# audit whole trees (several at once)
+iface vasp geom vacuum Step2_300K Step2_450K Step2_600K
 
 # --- extend: dry by default, --execute to write ---
 

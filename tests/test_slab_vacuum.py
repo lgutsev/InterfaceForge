@@ -136,6 +136,35 @@ class SlabVacuumTests(unittest.TestCase):
             )
             self.assertGreaterEqual(slab_vacuum(src)["vacuum_a"], 17.9)
 
+    def test_cli_accepts_multiple_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for temp in ("Step2_300K", "Step2_450K"):
+                (root / temp / "run").mkdir(parents=True)
+                self._write(_slab(6.0), root / temp / "run" / "POSCAR")
+            out = root / "combined.json"
+            rc = main(
+                [
+                    "vasp", "geom", "vacuum",
+                    str(root / "Step2_300K"), str(root / "Step2_450K"),
+                    "--summary", str(out),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            payload = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(len(payload["results"]), 2)
+            self.assertEqual(sum(r["thin"] for r in payload["results"]), 2)
+
+            # -o with many sources is refused
+            rc = main(
+                [
+                    "vasp", "geom", "vacuum",
+                    str(root / "Step2_300K"), str(root / "Step2_450K"),
+                    "--extend", "18", "-o", str(root / "x"),
+                ]
+            )
+            self.assertEqual(rc, 2)
+
     def test_cli_extend_to_named_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             src = self._write(_slab(6.0), Path(tmp) / "POSCAR")
