@@ -152,6 +152,31 @@ def _temperature_label(temperature: float) -> str:
     return f"{value:g}".replace(".", "p")
 
 
+def _preflight_step2_reprotocol(plans: list[dict[str, Any]], output_roots: list[Path]) -> None:
+    """Refuse to rewrite an INCAR under a Step2 run that has already started."""
+
+    runtime_markers = ("OUTCAR", "OSZICAR", "vasprun.xml", "WAVECAR", "XDATCAR")
+    for output in output_roots:
+        launch = output / "step2_launch.json"
+        if launch.is_file():
+            payload = json.loads(launch.read_text(encoding="utf-8"))
+            if any(row.get("status") == "SUBMITTED" for row in payload.get("runs", [])):
+                raise SafetyError(
+                    f"{output} records submitted jobs in step2_launch.json; "
+                    "refusing to change a launched run's INCAR"
+                )
+    for plan in plans:
+        destination: Path = plan["destination"]
+        if not (destination / "INCAR").is_file():
+            raise SafetyError(f"{destination} has no INCAR to re-protocol; run step2-prepare first")
+        present = [name for name in runtime_markers if (destination / name).exists()]
+        if present:
+            raise SafetyError(
+                f"{destination} already has runtime output ({', '.join(present)}); "
+                "re-protocol before launching, then gzip the finished OUTCAR instead"
+            )
+
+
 def _collect_verbatim_source_tags(
     source_text: str, predicate: Callable[[str], bool], kind: str
 ) -> tuple[list[str], dict[str, str]]:
@@ -210,6 +235,19 @@ def _render_step2_incar(
     training = protocol == "training"
     stripped = set(STEP2_TRAINING_STRIPPED_TAGS) if training else set()
 
+    if training:
+        # A forced training tag (e.g. LDAUPRINT, which matches the LDAU
+        # prefix) overrides any inherited copy without touching the real
+        # DFT+U parameters.
+        for tag in STEP2_TRAINING_FORCED_TAGS:
+            hubbard_values.pop(tag, None)
+            electronic_values.pop(tag, None)
+        hubbard_lines = [
+            line
+            for line in hubbard_lines
+            if (_incar_assignment(line) or ("",))[0] not in STEP2_TRAINING_FORCED_TAGS
+        ]
+
     temperature_text = _temperature_label(float(temperature)).replace("p", ".")
     replacements = {
         "SYSTEM": f"Step2_DFT_MD_{_temperature_label(float(temperature))}K",
@@ -236,18 +274,19 @@ def _render_step2_incar(
                 "refusing ambiguous template precedence"
             )
         template_active.add(tag)
+        if tag in replacements:
+            # SYSTEM/TEBEG/TEEND/NSW/NBLOCK, plus the training-forced tags.
+            prefix = line[: len(line) - len(line.lstrip())]
+            output.append(f"{prefix}{tag} = {replacements[tag]}")
+            found.add(tag)
+            continue
         if _is_step2_hubbard_tag(tag):
             continue  # the source run is the only authority for Hubbard settings
         if tag in electronic_values:
             continue  # replaced by the verbatim Step1 value below
         if tag in stripped:
             continue  # dropped for the training protocol
-        if tag in replacements:
-            prefix = line[: len(line) - len(line.lstrip())]
-            output.append(f"{prefix}{tag} = {replacements[tag]}")
-            found.add(tag)
-        else:
-            output.append(line)
+        output.append(line)
 
     for tag, value in replacements.items():
         if tag not in found:
@@ -341,6 +380,7 @@ def prepare_step2_series(
     protocol: str = "academic",
     dry_run: bool = False,
     audit_only: bool = False,
+    reprotocol: bool = False,
 ) -> dict[str, Any]:
     """Promote a recursive Step1 tree into fixed-temperature Step2 DFT-MD runs.
 
@@ -392,13 +432,17 @@ def prepare_step2_series(
             f"No Step1 runs with nonempty INCAR and {source_structure} found below {source_root}"
         )
 
+    if audit_only and reprotocol:
+        raise SafetyError("--audit-only and --set-protocol cannot be combined")
+
     output_roots = [destination_parent / f"Step2_{label}K" for label in labels]
     existing = [path for path in output_roots if path.exists()]
-    if audit_only:
+    if audit_only or reprotocol:
+        verb = "audit" if audit_only else "re-protocol"
         missing_outputs = [path for path in output_roots if not path.is_dir()]
         if missing_outputs:
             raise SafetyError(
-                "Cannot audit missing Step2 destination(s): "
+                f"Cannot {verb} missing Step2 destination(s): "
                 + ", ".join(str(path) for path in missing_outputs)
             )
     elif existing:
@@ -462,26 +506,31 @@ def prepare_step2_series(
                 }
             )
 
+    if reprotocol and not dry_run:
+        _preflight_step2_reprotocol(plans, output_roots)
+
     manifest_rows: list[dict[str, Any]] = []
-    if not dry_run and not audit_only:
+    if not dry_run and (not audit_only or reprotocol):
         created_roots: list[Path] = []
         try:
-            for output in output_roots:
-                output.mkdir(parents=True, exist_ok=False)
-                created_roots.append(output)
+            if not reprotocol:
+                for output in output_roots:
+                    output.mkdir(parents=True, exist_ok=False)
+                    created_roots.append(output)
             for plan in plans:
                 destination: Path = plan["destination"]
-                if destination not in output_roots:
-                    destination.mkdir(parents=True, exist_ok=False)
-                shutil.copy2(plan["structure"], destination / "POSCAR")
-                for name, source_path in plan["inputs"].items():
-                    target = destination / name
-                    shutil.copy2(source_path, target)
-                    if name in {"runvasp.sh", "run.slurm"}:
-                        # Guarantee the inherited launcher is executable even if the
-                        # Step1 copy never had its execute bit set; the auditor and
-                        # sbatch both require this.
-                        target.chmod(target.stat().st_mode | 0o111)
+                if not reprotocol:
+                    if destination not in output_roots:
+                        destination.mkdir(parents=True, exist_ok=False)
+                    shutil.copy2(plan["structure"], destination / "POSCAR")
+                    for name, source_path in plan["inputs"].items():
+                        target = destination / name
+                        shutil.copy2(source_path, target)
+                        if name in {"runvasp.sh", "run.slurm"}:
+                            # Guarantee the inherited launcher is executable even if the
+                            # Step1 copy never had its execute bit set; the auditor and
+                            # sbatch both require this.
+                            target.chmod(target.stat().st_mode | 0o111)
                 (destination / "INCAR").write_text(plan["incar_text"], encoding="utf-8")
                 manifest_rows.append(
                     {
@@ -565,7 +614,15 @@ def prepare_step2_series(
             )
 
     return {
-        "mode": "dry-run" if dry_run else "audited" if audit_only else "prepared-and-audited",
+        "mode": (
+            "dry-run"
+            if dry_run
+            else "audited"
+            if audit_only
+            else "reprotocoled-and-audited"
+            if reprotocol
+            else "prepared-and-audited"
+        ),
         "source_root": str(source_root),
         "template": template_label,
         "temperatures_k": normalized_temperatures,

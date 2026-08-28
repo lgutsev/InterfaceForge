@@ -376,6 +376,7 @@ def cmd_vasp_step2_series(args: argparse.Namespace) -> int:
             protocol=args.protocol,
             dry_run=args.dry_run,
             audit_only=args.audit_only,
+            reprotocol=args.set_protocol,
         )
     )
     return 0
@@ -1213,6 +1214,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--audit-only",
         action="store_true",
         help="Re-audit existing Step2_<T>K trees without preparing or submitting anything",
+    )
+    step2.add_argument(
+        "--set-protocol",
+        action="store_true",
+        help=(
+            "Rewrite the INCAR of every run in existing Step2_<T>K trees to the "
+            "given --protocol (re-inherits LDAU*/spin from Step1, refreshes the "
+            "manifest + audit); refuses once a run has started. Combine with "
+            "--dry-run to preview"
+        ),
     )
     step2.set_defaults(func=cmd_vasp_step2_series)
 

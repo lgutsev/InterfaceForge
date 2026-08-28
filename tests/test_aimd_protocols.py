@@ -186,7 +186,7 @@ def _step1_tree_spin(root: Path, *, magmom: str = "2.0 -2.0") -> Path:
         "ISPIN = 2\nLASPH = .TRUE.\n"
         f"MAGMOM = {magmom}\n"
         "LWAVE = .TRUE.\nLDAU = .TRUE.\nLDAUL = 2 -1\nLDAUU = 4.6 0.0\n"
-        "LDAUJ = 0.0 0.0\nLMAXMIX = 4\n",
+        "LDAUJ = 0.0 0.0\nLDAUPRINT = 1\nLMAXMIX = 4\n",
         encoding="utf-8",
     )
     (run / "CONTCAR").write_text(
@@ -226,7 +226,9 @@ class Step2SpinInheritanceTests(unittest.TestCase):
             self.assertEqual(incar["ISPIN"], "2")
             self.assertEqual(incar["MAGMOM"], "2.0 -2.0")
             self.assertEqual(incar["LASPH"], ".TRUE.")
-            # academic does not trim the template.
+            # DFT+U inherited verbatim; academic does not trim the template.
+            self.assertEqual(incar["LDAUU"], "4.6 0.0")
+            self.assertEqual(incar["LDAUPRINT"], "1")
             self.assertEqual(incar["LORBIT"], "11")
             self.assertEqual(incar["LDIPOL"], ".TRUE.")
 
@@ -242,12 +244,17 @@ class Step2SpinInheritanceTests(unittest.TestCase):
             incar = parse_incar(root / "Step2_300K" / "NiO_m110_Big_U46" / "INCAR")
             self.assertEqual(incar["ISPIN"], "2")
             self.assertEqual(incar["MAGMOM"], "2.0 -2.0")
+            # real DFT+U parameters are still inherited untouched...
+            self.assertEqual(incar["LDAUU"], "4.6 0.0")
+            self.assertEqual(incar["LDAUL"], "2 -1")
+            self.assertEqual(incar["LMAXMIX"], "4")
+            # ...only print verbosity / output tags are forced or stripped.
+            self.assertEqual(incar["LDAUPRINT"], "0")  # Step1 had LDAUPRINT=1
+            self.assertEqual(incar["NWRITE"], "1")
             self.assertNotIn("LORBIT", incar)
             self.assertNotIn("LDIPOL", incar)
             self.assertNotIn("IDIPOL", incar)
             self.assertNotIn("DIPOL", incar)
-            self.assertEqual(incar["LDAUPRINT"], "0")
-            self.assertEqual(incar["NWRITE"], "1")
             audit = json.loads(
                 (root / "Step2_300K" / "step2_audit.json").read_text(encoding="utf-8")
             )
@@ -255,6 +262,57 @@ class Step2SpinInheritanceTests(unittest.TestCase):
             notes = " ".join(n for row in audit["runs"] for n in row["notes"])
             self.assertIn("over-converged for training", notes)
             self.assertIn("LREAL", notes)
+
+    def test_set_protocol_rewrites_existing_incar_and_keeps_hubbards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            step1 = _step1_tree_spin(root)
+            tmpl = self._template(root)
+
+            # Prepared once in academic mode.
+            prepare_step2_series(step1, temperatures=[300], template=tmpl)
+            before = parse_incar(root / "Step2_300K" / "NiO_m110_Big_U46" / "INCAR")
+            self.assertEqual(before["LORBIT"], "11")
+            self.assertEqual(before["LDAUPRINT"], "1")
+
+            # Convert the existing tree to training in place.
+            result = prepare_step2_series(
+                step1, temperatures=[300], template=tmpl, protocol="training",
+                reprotocol=True,
+            )
+            self.assertEqual(result["mode"], "reprotocoled-and-audited")
+
+            after = parse_incar(root / "Step2_300K" / "NiO_m110_Big_U46" / "INCAR")
+            self.assertNotIn("LORBIT", after)
+            self.assertNotIn("LDIPOL", after)
+            self.assertEqual(after["LDAUPRINT"], "0")
+            self.assertEqual(after["NWRITE"], "1")
+            # DFT+U and spin untouched.
+            self.assertEqual(after["LDAUU"], "4.6 0.0")
+            self.assertEqual(after["LDAUL"], "2 -1")
+            self.assertEqual(after["LMAXMIX"], "4")
+            self.assertEqual(after["ISPIN"], "2")
+            self.assertEqual(after["MAGMOM"], "2.0 -2.0")
+            manifest = json.loads(
+                (root / "Step2_300K" / "step2_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["sampling"]["protocol"], "training")
+            # POSCAR / inputs are left alone.
+            self.assertTrue((root / "Step2_300K" / "NiO_m110_Big_U46" / "POTCAR").is_file())
+
+    def test_set_protocol_refuses_after_a_run_started(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            step1 = _step1_tree_spin(root)
+            tmpl = self._template(root)
+            prepare_step2_series(step1, temperatures=[300], template=tmpl)
+            (root / "Step2_300K" / "NiO_m110_Big_U46" / "OSZICAR").write_text("1 T= 300\n")
+
+            with self.assertRaises(SafetyError):
+                prepare_step2_series(
+                    step1, temperatures=[300], template=tmpl, protocol="training",
+                    reprotocol=True,
+                )
 
     def test_magmom_length_mismatch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

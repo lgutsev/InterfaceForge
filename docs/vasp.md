@@ -175,6 +175,22 @@ Add `gzip -f OUTCAR` to the end of your Step1 `runvasp.sh` (it propagates
 verbatim into every Step2 run) — a gzipped OUTCAR is ~10–20× smaller and
 `iface collect` / `iface leaf-collect` now discover `OUTCAR.gz` transparently.
 
+To switch an **already-prepared** tree without deleting it, add
+`--set-protocol`:
+
+```bash
+iface vasp step2-prepare Step1 --temperatures 300 --protocol training --set-protocol --dry-run
+iface vasp step2-prepare Step1 --temperatures 300 --protocol training --set-protocol
+```
+
+This re-renders every run's INCAR at the new protocol — **re-inheriting
+`LDAU*`/`LMAXMIX` and the spin tags verbatim from Step1**, so the DFT+U
+parameters are untouched (only print/output tags change) — and refreshes
+`step2_manifest.json` / `step2_audit.*`. `POSCAR`, `KPOINTS`, `POTCAR`, and
+the launcher are left alone. It refuses once a run has produced any runtime
+output or recorded a submitted job; at that point the INCAR change is moot,
+so just `gzip` the finished OUTCAR.
+
 After the Step2 jobs finish, select the frames:
 
 ```bash
