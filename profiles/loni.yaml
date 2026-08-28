@@ -1,6 +1,8 @@
 name: loni
 scheduler: slurm
 
+# VASP 6.6.1 is the default for new work. Explicit *_651 jobs are retained
+# for legacy campaigns and exact reproduction of data generated with 6.5.1.
 ai2kit:
   commands:
     ai2kit: /project/YOUR_PROJECT/envs/mace/bin/ai2-kit
@@ -36,6 +38,34 @@ jobs:
     time: "48:00:00"
     modules:
       - vasp6/6.6.1-cpu
+    environment:
+      OMP_NUM_THREADS: "1"
+      SINGULARITYENV_OMP_NUM_THREADS: "1"
+    command: "srun -n {ntasks} vasp_gam"
+
+  vasp_workq_651:
+    partition: workq
+    account: YOUR_LONI_ACCOUNT
+    nodes: 1
+    ntasks: 64
+    cpus_per_task: 1
+    time: "72:00:00"
+    modules:
+      - vasp6/6.5.1-cpu
+    environment:
+      OMP_NUM_THREADS: "1"
+      SINGULARITYENV_OMP_NUM_THREADS: "1"
+    command: "srun -n {ntasks} vasp_gam"
+
+  vasp_bigmem_651:
+    partition: bigmem
+    account: YOUR_LONI_ACCOUNT
+    nodes: 2
+    ntasks: 128
+    cpus_per_task: 1
+    time: "48:00:00"
+    modules:
+      - vasp6/6.5.1-cpu
     environment:
       OMP_NUM_THREADS: "1"
       SINGULARITYENV_OMP_NUM_THREADS: "1"
