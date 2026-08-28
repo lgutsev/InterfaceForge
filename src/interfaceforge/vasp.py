@@ -1172,6 +1172,423 @@ def _audit_step2_plans(
     }
 
 
+STEP1_INHERITED_FILES = ("KPOINTS", "POTCAR", "runvasp.sh", "run.slurm")
+STEP1_EXTRA_INHERITED_TAGS = ("GGA", "ISPIN", "LASPH", "LNONCOLLINEAR", "MAGMOM")
+
+
+def _is_step1_inherited_tag(tag: str) -> bool:
+    normalized = tag.upper()
+    if normalized == "LDAUPRINT":
+        return False
+    return (
+        normalized.startswith("LDAU")
+        or normalized in {"LMAXMIX", *STEP1_EXTRA_INHERITED_TAGS}
+    )
+
+
+def _verified_hardlink(source: Path, target: Path) -> str:
+    """Hard-link ``source`` to ``target``; fall back to copy if the FS refuses.
+
+    Returns ``"hardlink"`` or ``"copy"``. A hard link that silently became a
+    copy (some network filesystems) is detected by device/inode identity and
+    reported as ``"copy"`` rather than pretended to be a link.
+    """
+
+    if target.exists():
+        target.unlink()
+    try:
+        os.link(source, target)
+    except (OSError, NotImplementedError, AttributeError):
+        shutil.copy2(source, target)
+        return "copy"
+    if (source.stat().st_dev, source.stat().st_ino) != (
+        target.stat().st_dev,
+        target.stat().st_ino,
+    ):
+        return "copy"
+    return "hardlink"
+
+
+def _render_step1_incar(
+    opt_incar_text: str, template_text: str, *, temperature: float, nsw: int
+) -> dict[str, Any]:
+    """Render a Step1 preheat INCAR from an OPT run.
+
+    The packaged template owns every ordinary tag (electronic convergence,
+    the preheat MD block, output). ``GGA``, ``ISPIN``, ``LASPH``,
+    ``LNONCOLLINEAR``, ``MAGMOM`` and the full active ``LDAU*`` / ``LMAXMIX``
+    set are copied byte-for-byte from the OPT INCAR; the requested
+    temperature overrides ``SYSTEM`` / ``TEBEG`` / ``TEEND`` and ``NSW`` is
+    set from the protocol. ``ISTART=1`` stays (the OPT WAVECAR is inherited).
+    """
+
+    inherited_lines, inherited_values = _collect_verbatim_source_tags(
+        opt_incar_text, _is_step1_inherited_tag, "OPT"
+    )
+    label = _temperature_label(float(temperature))
+    text_temp = label.replace("p", ".")
+    replacements = {
+        "SYSTEM": f"Step1_preheat_{label}K",
+        "TEBEG": text_temp,
+        "TEEND": text_temp,
+        "NSW": str(int(nsw)),
+    }
+
+    found: set[str] = set()
+    output: list[str] = []
+    seen: set[str] = set()
+    for line in template_text.splitlines():
+        assignment = _incar_assignment(line)
+        if assignment is None:
+            output.append(line)
+            continue
+        tag = assignment[0]
+        if tag in seen:
+            raise SafetyError(f"Step1 template has a duplicate active tag {tag}")
+        seen.add(tag)
+        if tag in replacements:
+            prefix = line[: len(line) - len(line.lstrip())]
+            output.append(f"{prefix}{tag} = {replacements[tag]}")
+            found.add(tag)
+            continue
+        if _is_step1_inherited_tag(tag):
+            continue  # the OPT run is the only authority for these
+        output.append(line)
+
+    for tag, value in replacements.items():
+        if tag not in found:
+            output.extend(("", f"{tag} = {value}"))
+    if inherited_lines:
+        output.extend(
+            ("", "# Inherited verbatim from this run's OPT INCAR", *inherited_lines)
+        )
+
+    rendered_text = "\n".join(output).rstrip() + "\n"
+    rendered = {
+        assignment[0]: assignment[1]
+        for line in rendered_text.splitlines()
+        if (assignment := _incar_assignment(line)) is not None
+    }
+    for tag, value in inherited_values.items():
+        if rendered.get(tag) != value:
+            raise SafetyError(f"Internal error: Step1 did not preserve OPT {tag} exactly")
+    return {"text": rendered_text, "inherited_tags": inherited_values}
+
+
+def prepare_step1_series(
+    source: str | Path,
+    *,
+    temperature: float = 300.0,
+    output_root: str | Path | None = None,
+    template: str | Path | None = None,
+    source_structure: str = "CONTCAR",
+    protocol: str = "academic",
+    dry_run: bool = False,
+    audit_only: bool = False,
+) -> dict[str, Any]:
+    """Promote a recursive OPT tree into a sibling ``Step1`` preheat tree.
+
+    Each finished OPT run (local ``INCAR`` + nonempty ``CONTCAR`` + nonempty
+    ``WAVECAR``) becomes a fixed-temperature preheat MD: ``CONTCAR`` is
+    promoted to ``POSCAR``, the OPT ``WAVECAR`` is hard-linked in for the
+    ``ISTART=1`` restart, ``GGA``/spin/``LDAU*`` are inherited verbatim, and
+    the rest comes from the packaged ``INCAR.step1_preheat`` template.
+    """
+
+    from .aimd import resolve_protocol
+
+    nsw = int(resolve_protocol(protocol)["step1"]["nsw"])
+    source_root = Path(source).expanduser().resolve()
+    if not source_root.is_dir():
+        raise FileNotFoundError(source_root)
+    if audit_only and dry_run:
+        raise SafetyError("--audit-only and --dry-run cannot be combined")
+    destination_parent = (
+        Path(output_root).expanduser().resolve() if output_root is not None else source_root.parent
+    )
+    if template is None:
+        template_label = "packaged INCAR.step1_preheat"
+        template_text = (
+            resources.files("interfaceforge")
+            .joinpath("templates/INCAR.step1_preheat")
+            .read_text(encoding="utf-8")
+        )
+    else:
+        template_path = Path(template).expanduser().resolve()
+        if not template_path.is_file() or not template_path.stat().st_size:
+            raise FileNotFoundError(template_path)
+        template_label = str(template_path)
+        template_text = template_path.read_text(encoding="utf-8", errors="ignore")
+
+    output_root_path = destination_parent / "Step1"
+    if audit_only:
+        if not output_root_path.is_dir():
+            raise SafetyError(f"Cannot audit missing Step1 tree: {output_root_path}")
+    elif output_root_path.exists():
+        raise SafetyError(f"Refusing to overwrite existing Step1 tree: {output_root_path}")
+
+    runs: list[Path] = []
+    for incar in sorted(source_root.rglob("INCAR")):
+        relative = incar.parent.relative_to(source_root)
+        if _step2_excluded(relative):
+            continue
+        structure = incar.parent / source_structure
+        if structure.is_file() and structure.stat().st_size:
+            runs.append(incar.parent)
+    if not runs:
+        raise SafetyError(
+            f"No OPT runs with a nonempty INCAR and {source_structure} found below {source_root}"
+        )
+
+    plans: list[dict[str, Any]] = []
+    for run in runs:
+        relative = run.relative_to(source_root)
+        structure = run / source_structure
+        elements = _poscar_elements(structure)
+        ion_count = _poscar_ion_count(structure)
+        wavecar = run / "WAVECAR"
+        if not (wavecar.is_file() and wavecar.stat().st_size):
+            raise SafetyError(
+                f"OPT run {run} has no nonempty WAVECAR for the ISTART=1 restart"
+            )
+        resolved_inputs = {
+            name: path
+            for name in STEP1_INHERITED_FILES
+            if (path := _resolve_step2_input(run, source_root, name)) is not None
+        }
+        for required in ("KPOINTS", "POTCAR"):
+            if required not in resolved_inputs:
+                raise SafetyError(f"No nonempty {required} found for OPT run {run}")
+        if not ({"runvasp.sh", "run.slurm"} & resolved_inputs.keys()):
+            raise SafetyError(f"No runvasp.sh or run.slurm found for OPT run {run}")
+
+        rendered = _render_step1_incar(
+            (run / "INCAR").read_text(encoding="utf-8", errors="ignore"),
+            template_text,
+            temperature=temperature,
+            nsw=nsw,
+        )
+        for tag in ("LDAUL", "LDAUU", "LDAUJ"):
+            value = rendered["inherited_tags"].get(tag)
+            if value is not None and _vasp_list_length(value) != len(elements):
+                raise SafetyError(
+                    f"{run}/INCAR: {tag} has {_vasp_list_length(value)} entries but "
+                    f"{source_structure} has {len(elements)} species"
+                )
+        magmom = rendered["inherited_tags"].get("MAGMOM")
+        if magmom is not None and _vasp_list_length(magmom) != ion_count:
+            raise SafetyError(
+                f"{run}/INCAR: MAGMOM has {_vasp_list_length(magmom)} entries but "
+                f"{source_structure} has {ion_count} ions"
+            )
+        plans.append(
+            {
+                "source": run,
+                "relative": relative,
+                "destination": output_root_path / relative,
+                "structure": structure,
+                "wavecar": wavecar,
+                "elements": elements,
+                "inputs": resolved_inputs,
+                "incar_text": rendered["text"],
+                "inherited_tags": rendered["inherited_tags"],
+            }
+        )
+
+    link_modes: dict[str, str] = {}
+    if not dry_run and not audit_only:
+        try:
+            output_root_path.mkdir(parents=True, exist_ok=False)
+            for plan in plans:
+                destination: Path = plan["destination"]
+                destination.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(plan["structure"], destination / "POSCAR")
+                link_modes[plan["relative"].as_posix() or "."] = _verified_hardlink(
+                    plan["wavecar"], destination / "WAVECAR"
+                )
+                for name, path in plan["inputs"].items():
+                    target = destination / name
+                    shutil.copy2(path, target)
+                    if name in {"runvasp.sh", "run.slurm"}:
+                        target.chmod(target.stat().st_mode | 0o111)
+                (destination / "INCAR").write_text(plan["incar_text"], encoding="utf-8")
+            manifest = {
+                "format": "interfaceforge-step1-series",
+                "schema_version": 1,
+                "source_root": str(source_root),
+                "template": template_label,
+                "protocol": protocol,
+                "temperature_k": float(temperature),
+                "nsw": nsw,
+                "wavecar_link_mode": link_modes,
+                "precedence": {
+                    "ordinary_incar_tags": "Step1 template",
+                    "inherited_tags": (
+                        "exact active LDAU*/LMAXMIX plus "
+                        + ", ".join(STEP1_EXTRA_INHERITED_TAGS)
+                        + " from each OPT INCAR; ISTART=1 restart from the OPT WAVECAR"
+                    ),
+                },
+                "runs": [
+                    {
+                        "source": str(plan["source"]),
+                        "relative_path": plan["relative"].as_posix() or ".",
+                        "destination": str(plan["destination"]),
+                        "elements": plan["elements"],
+                        "inherited_tags": plan["inherited_tags"],
+                        "source_incar_sha256": _sha256_file(plan["source"] / "INCAR"),
+                        "step1_incar_sha256": _sha256_file(plan["destination"] / "INCAR"),
+                        "step1_poscar_sha256": _sha256_file(plan["destination"] / "POSCAR"),
+                    }
+                    for plan in plans
+                ],
+            }
+            (output_root_path / "step1_manifest.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        except Exception:
+            shutil.rmtree(output_root_path, ignore_errors=True)
+            raise
+
+    audit_payload = None
+    if not dry_run:
+        audit_payload = _audit_step1_plans(plans, output_root_path, protocol, source_structure)
+        if audit_payload["status"] != "PASS":
+            raise SafetyError(
+                f"Step1 preparation audit is {audit_payload['status']}; review "
+                f"{output_root_path / 'step1_audit.md'}"
+            )
+
+    return {
+        "mode": "dry-run" if dry_run else "audited" if audit_only else "prepared-and-audited",
+        "source_root": str(source_root),
+        "output_root": str(output_root_path),
+        "template": template_label,
+        "protocol": protocol,
+        "temperature_k": float(temperature),
+        "nsw": nsw,
+        "prepared_runs": len(plans),
+        "wavecar_link_mode": link_modes,
+        "audit": audit_payload,
+    }
+
+
+def _audit_step1_plans(
+    plans: list[dict[str, Any]], output_root: Path, protocol: str, source_structure: str
+) -> dict[str, Any]:
+    """Independently verify a prepared Step1 tree and write the audit files."""
+
+    from .aimd import audit_step1_incar
+
+    rows: list[dict[str, Any]] = []
+    for plan in plans:
+        destination: Path = plan["destination"]
+        issues: list[str] = []
+        notes: list[str] = []
+        incar_path = destination / "INCAR"
+        if not incar_path.is_file():
+            issues.append("missing INCAR")
+        elif incar_path.read_text(encoding="utf-8", errors="ignore") != plan["incar_text"]:
+            issues.append("INCAR differs from the deterministic render")
+        parsed = parse_incar(incar_path)
+        for tag, value in plan["inherited_tags"].items():
+            if parsed.get(tag) != value:
+                issues.append(f"{tag} not inherited from OPT")
+        if parsed.get("IBRION") != "0" or parsed.get("SMASS") != "-1":
+            issues.append("Step1 INCAR is not a velocity-rescaled preheat (IBRION=0, SMASS=-1)")
+        if parsed.get("ISTART") != "1":
+            issues.append("ISTART is not 1 (WAVECAR restart)")
+        poscar = destination / "POSCAR"
+        if not poscar.is_file() or _sha256_file(poscar) != _sha256_file(plan["structure"]):
+            issues.append(f"POSCAR does not match OPT {source_structure}")
+        wavecar = destination / "WAVECAR"
+        if not (wavecar.is_file() and wavecar.stat().st_size):
+            issues.append("missing WAVECAR")
+        for name in plan["inputs"]:
+            target = destination / name
+            if not target.is_file() or _sha256_file(target) != _sha256_file(plan["inputs"][name]):
+                issues.append(f"inherited {name} missing or altered")
+            elif name in {"runvasp.sh", "run.slurm"} and not os.access(target, os.X_OK):
+                issues.append(f"inherited launcher {name} is not executable")
+
+        step1_audit = audit_step1_incar(incar_path, protocol)
+        notes.extend(step1_audit["notes"])
+        vacuum = _step2_slab_vacuum(plan["structure"])
+        if vacuum is not None and vacuum["vacuum_a"] < STEP2_MIN_VACUUM_A:
+            notes.append(
+                f"thin vacuum: {vacuum['vacuum_a']:.1f} A to the {vacuum['axis']}-image; "
+                f"iface vasp geom vacuum {plan['source'] / source_structure} --extend 18"
+            )
+        rows.append(
+            {
+                "status": "FAIL" if issues else ("WARN" if notes else "PASS"),
+                "relative_path": plan["relative"].as_posix() or ".",
+                "preheat_ps": step1_audit["preheat_ps"],
+                "ISPIN": plan["inherited_tags"].get("ISPIN", ""),
+                "LDAUU": plan["inherited_tags"].get("LDAUU", ""),
+                "issues": issues,
+                "notes": notes,
+            }
+        )
+
+    status = (
+        "FAIL"
+        if any(r["status"] == "FAIL" for r in rows)
+        else "WARN"
+        if any(r["status"] == "WARN" for r in rows)
+        else "PASS"
+    )
+    payload = {
+        "format": "interfaceforge-step1-preparation-audit",
+        "schema_version": 1,
+        "status": status,
+        "output_root": str(output_root),
+        "protocol": protocol,
+        "runs": rows,
+    }
+    (output_root / "step1_audit.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    header = "| Status | Run | Preheat ps | ISPIN | LDAUU | Issues | Notes |\n|---|---|---|---|---|---|---|"
+    body = "\n".join(
+        "| "
+        + " | ".join(
+            (
+                r["status"],
+                r["relative_path"],
+                str(r["preheat_ps"]),
+                r["ISPIN"] or "—",
+                r["LDAUU"] or "—",
+                "; ".join(r["issues"]) or "—",
+                "; ".join(r["notes"]) or "—",
+            )
+        )
+        + " |"
+        for r in rows
+    )
+    (output_root / "step1_audit.md").write_text(
+        f"# Step1 preparation audit\n\n**Status:** {status}  ·  protocol **{protocol}**\n\n"
+        f"{header}\n{body}\n",
+        encoding="utf-8",
+    )
+    with (output_root / "step1_audit.tsv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=("status", "relative_path", "preheat_ps", "ISPIN", "LDAUU", "issues", "notes"),
+            delimiter="\t",
+        )
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(
+                {
+                    **{k: r[k] for k in ("status", "relative_path", "preheat_ps", "ISPIN", "LDAUU")},
+                    "issues": "; ".join(r["issues"]),
+                    "notes": "; ".join(r["notes"]),
+                }
+            )
+    return payload
+
+
 def update_incar(
     path: str | Path,
     changes: Mapping[str, Any],

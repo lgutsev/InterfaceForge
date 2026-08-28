@@ -72,6 +72,7 @@ from .vasp import (
     prepare_band_run,
     prepare_recovery,
     prepare_standard_restart,
+    prepare_step1_series,
     prepare_step2_series,
     resolve_potcar_root,
     submit_run,
@@ -380,6 +381,22 @@ def cmd_vasp_step2_series(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             audit_only=args.audit_only,
             reprotocol=args.set_protocol,
+        )
+    )
+    return 0
+
+
+def cmd_vasp_step1_prepare(args: argparse.Namespace) -> int:
+    _json(
+        prepare_step1_series(
+            args.source,
+            temperature=args.temperature,
+            output_root=args.output_root,
+            template=args.template,
+            source_structure=args.source_structure,
+            protocol=args.protocol,
+            dry_run=args.dry_run,
+            audit_only=args.audit_only,
         )
     )
     return 0
@@ -1325,6 +1342,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     step2.set_defaults(func=cmd_vasp_step2_series)
+
+    step1_prepare = vasp_commands.add_parser(
+        "step1-prepare",
+        help="Promote a recursive OPT tree into a sibling Step1 preheat tree",
+    )
+    step1_prepare.add_argument("source", help="OPT root with per-run INCAR, CONTCAR, WAVECAR")
+    step1_prepare.add_argument("--temperature", type=float, default=300.0)
+    step1_prepare.add_argument("--output-root", help="Parent for Step1/ (default: parent of OPT root)")
+    step1_prepare.add_argument("--template", help="Step1 INCAR template (default: packaged)")
+    step1_prepare.add_argument("--source-structure", default="CONTCAR")
+    step1_prepare.add_argument(
+        "--protocol",
+        choices=sorted(AIMD_PROTOCOLS),
+        default="academic",
+        help="academic: NSW=2000 (~2 ps); training: NSW=400 (~0.4 ps)",
+    )
+    step1_prepare.add_argument("--dry-run", action="store_true")
+    step1_prepare.add_argument("--audit-only", action="store_true")
+    step1_prepare.set_defaults(func=cmd_vasp_step1_prepare)
 
     step1_protocol = vasp_commands.add_parser(
         "step1-protocol",

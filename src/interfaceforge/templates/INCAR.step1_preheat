@@ -1,0 +1,55 @@
+# ============================================================
+# Step 1: Preheat / forced thermalization
+# Restart from an optimized AFM electronic state (OPT WAVECAR)
+# ============================================================
+
+SYSTEM = Step1_preheat_300K
+
+# Restart the wavefunction from the inherited OPT WAVECAR
+ISTART = 1
+
+# ----------------------------
+# Electronic structure
+# ----------------------------
+ISMEAR = 0
+SIGMA  = 0.05
+ENCUT  = 400
+PREC   = Med
+EDIFF  = 1E-4
+NELM   = 100
+NELMIN = 4
+ALGO   = Fast
+LREAL  = Auto
+IVDW   = 11
+ISYM   = 0
+
+# ----------------------------
+# Molecular dynamics (forced thermalization)
+# ----------------------------
+IBRION = 0
+NSW    = 2000
+POTIM  = 1.0
+
+# Rescale velocities to the target temperature every NBLOCK steps
+SMASS  = -1
+NBLOCK = 4
+TEBEG  = 300
+TEEND  = 300
+
+# Fixed cell; calculate stress
+ISIF = 2
+
+# ----------------------------
+# Output
+# ----------------------------
+NWRITE = 1
+LWAVE  = .TRUE.
+LCHARG = .FALSE.
+
+# ----------------------------
+# Parallelization
+# ----------------------------
+NCORE = 1
+
+# GGA, ISPIN, LASPH, MAGMOM and the full LDAU* / LMAXMIX block are inherited
+# verbatim from each OPT run's INCAR by `iface vasp step1-prepare`.

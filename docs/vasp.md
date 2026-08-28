@@ -7,6 +7,46 @@
 InterfaceForge separates three concerns: generating new stages, auditing
 existing runs, and mutating a failed/finished run for recovery.
 
+## Promote an OPT tree into a Step1 preheat tree
+
+`iface vasp step1-prepare <OPT_root>` recursively discovers finished
+geometry optimizations (a local `INCAR`, nonempty `CONTCAR`, **nonempty
+`WAVECAR`**) and builds a sibling `Step1/` tree of forced-thermalization MD
+runs:
+
+```bash
+iface vasp step1-prepare OPT --dry-run
+iface vasp step1-prepare OPT --protocol training     # NSW=400 (~0.4 ps)
+iface vasp step1-prepare OPT                         # academic, NSW=2000 (~2 ps)
+```
+
+Per OPT run:
+
+- `CONTCAR` → `POSCAR`;
+- the OPT `WAVECAR` is **hard-linked** in (verified by device/inode; falls
+  back to a copy on filesystems that refuse the link) so the preheat can
+  `ISTART=1` from the converged AFM electronic state — no `MAGMOM` re-init;
+- `GGA`, `ISPIN`, `LASPH`, `LNONCOLLINEAR`, `MAGMOM`, and the full active
+  `LDAU*` / `LMAXMIX` block are copied **byte-for-byte** from the OPT
+  `INCAR` (`LDAUPRINT` is not — it is print verbosity, not a U parameter);
+- every other tag — electronic convergence (a cheaper `ENCUT=400`,
+  `PREC=Med`, `EDIFF=1E-4`), the preheat MD block (`IBRION=0`, `SMASS=-1`,
+  `NBLOCK=4`, `NSW` from the protocol), and output — comes from the packaged
+  `INCAR.step1_preheat` template (override with `--template`);
+- `--temperature` (default 300) sets `SYSTEM` / `TEBEG` / `TEEND`;
+- `KPOINTS`, `POTCAR`, and the launcher are copied from the nearest
+  run-specific or shared ancestor.
+
+`LDAU*` array lengths and `MAGMOM` length are checked against the species /
+ion count in the `CONTCAR`. `Step1/` receives `step1_manifest.json` plus
+`step1_audit.{json,tsv,md}`; the audit re-derives the render, checks the
+inherited tags survived, confirms `IBRION=0`/`SMASS=-1`/`ISTART=1`, runs the
+[protocol preheat-length check](#step1-switch-and-audit-the-preheat), and
+notes a thin [slab vacuum](#slab-vacuum-check). Existing `Step1/` is never
+overwritten; re-audit with `--audit-only`.
+
+Then feed `Step1/` to `step2-prepare` as usual.
+
 ## Promote Step1 into a Step2 temperature series
 
 `iface vasp step2-prepare` recursively discovers finished Step1 runs (a local
