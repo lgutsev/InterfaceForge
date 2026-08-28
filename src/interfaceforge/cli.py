@@ -32,6 +32,7 @@ from .data import collect_dataset
 from .errors import InterfaceForgeError, SafetyError
 from .exploration import generate_exploration
 from .geometry import (
+    batch_slab_vacuum,
     build_slab,
     build_supercell,
     clean_duplicates,
@@ -598,7 +599,21 @@ def cmd_geom(args: argparse.Namespace) -> int:
             args.source, args.output, cutoff=args.cutoff, force=args.force
         )
     elif args.geometry == "vacuum":
-        if args.extend is not None:
+        if Path(args.source).is_dir():
+            if args.extend is not None and not args.force:
+                raise SafetyError(
+                    "Extending a directory rewrites every thin POSCAR/CONTCAR in place; "
+                    "pass --force to confirm"
+                )
+            payload = batch_slab_vacuum(
+                args.source,
+                axis=args.axis,
+                min_vacuum=args.min_vacuum,
+                extend=args.extend,
+                keep_position=args.keep_position,
+                force=True,
+            )
+        elif args.extend is not None:
             output = args.output or f"{args.source}.extended"
             payload = extend_slab_vacuum(
                 args.source,
@@ -1586,7 +1601,10 @@ def build_parser() -> argparse.ArgumentParser:
     vacuum = geom_commands.add_parser(
         "vacuum", help="Audit slab vacuum per face; --extend stretches the cell"
     )
-    vacuum.add_argument("source", help="POSCAR/CONTCAR/xyz slab structure")
+    vacuum.add_argument(
+        "source",
+        help="A slab structure, or a directory to audit every POSCAR/CONTCAR below it",
+    )
     vacuum.add_argument(
         "--axis",
         default="auto",

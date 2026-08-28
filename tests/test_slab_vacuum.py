@@ -99,6 +99,27 @@ class SlabVacuumTests(unittest.TestCase):
             self.assertEqual(payload["status"], "THIN")
             self.assertIn("--extend", payload["fix"])
 
+    def test_batch_audit_and_extend_over_a_tree(self) -> None:
+        from interfaceforge.geometry import batch_slab_vacuum
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, split in (("ok", (15.0, 15.0)), ("thin", (15.0, 2.0)), ("skew", (1.5, 20.0))):
+                (root / "Step2_300K" / name).mkdir(parents=True)
+                self._write(_slab(*split), root / "Step2_300K" / name / "POSCAR")
+
+            report = batch_slab_vacuum(root, min_vacuum=12.0)
+            self.assertEqual(report["structures"], 3)
+            self.assertEqual(report["thin"], 2)
+            row = {r["path"].replace("\\", "/"): r for r in report["rows"]}
+            self.assertAlmostEqual(
+                row["Step2_300K/skew/POSCAR"]["vacuum_total_a"], 21.5, places=1
+            )  # generous total, but skewed -> still THIN on min_side
+
+            fixed = batch_slab_vacuum(root, min_vacuum=12.0, extend=13.0, keep_position=True, force=True)
+            self.assertEqual(fixed["extended"], 2)
+            self.assertEqual(batch_slab_vacuum(root, min_vacuum=12.0)["thin"], 0)
+
     def test_cli_extend_writes_structure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             src = self._write(_slab(10.0, 3.0), Path(tmp) / "POSCAR")

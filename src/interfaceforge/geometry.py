@@ -399,6 +399,73 @@ def extend_slab_vacuum(
     return summary
 
 
+_VACUUM_BATCH_NAMES = ("POSCAR", "CONTCAR")
+_VACUUM_BATCH_SKIP = ("archive", "backup")
+
+
+def _discover_structures(root: Path) -> list[Path]:
+    found: list[Path] = []
+    for name in _VACUUM_BATCH_NAMES:
+        for path in sorted(root.rglob(name)):
+            parts = {p.lower() for p in path.relative_to(root).parts}
+            if parts & set(_VACUUM_BATCH_SKIP) or any(p.startswith("x") for p in parts):
+                continue
+            # one file per directory: POSCAR wins over CONTCAR
+            if name == "CONTCAR" and (path.parent / "POSCAR").is_file():
+                continue
+            found.append(path)
+    return sorted(found)
+
+
+def batch_slab_vacuum(
+    root: str | Path,
+    *,
+    axis: int | str = "auto",
+    min_vacuum: float = 12.0,
+    extend: float | None = None,
+    keep_position: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Audit (and optionally extend in place) every slab under a directory tree."""
+
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.is_dir():
+        raise SafetyError(f"Not a directory: {root_path}")
+    structures = _discover_structures(root_path)
+    if not structures:
+        raise SafetyError(f"No POSCAR/CONTCAR found below {root_path}")
+
+    rows: list[dict[str, Any]] = []
+    for path in structures:
+        report = slab_vacuum(path, axis=axis)
+        thin = report["min_side_a"] < min_vacuum
+        row: dict[str, Any] = {
+            "path": str(path.relative_to(root_path)),
+            "axis": report["axis"],
+            "slab_span_a": round(report["slab_span_a"], 2),
+            "vacuum_total_a": round(report["vacuum_total_a"], 2),
+            "vacuum_low_a": round(report["vacuum_low_a"], 2),
+            "vacuum_high_a": round(report["vacuum_high_a"], 2),
+            "min_side_a": round(report["min_side_a"], 2),
+            "status": "THIN" if thin else "PASS",
+        }
+        if extend is not None and thin:
+            result = extend_slab_vacuum(
+                path, path, axis=axis, vacuum_per_side=extend,
+                keep_position=keep_position, force=force,
+            )
+            row["extended_to"] = result["vacuum_after_a"]
+        rows.append(row)
+    return {
+        "root": str(root_path),
+        "min_vacuum_a": float(min_vacuum),
+        "structures": len(rows),
+        "thin": sum(r["status"] == "THIN" for r in rows),
+        "extended": sum("extended_to" in r for r in rows),
+        "rows": rows,
+    }
+
+
 def structure_summary(
     atoms_or_path: Any,
     *,
