@@ -1,8 +1,8 @@
 name: loni
 scheduler: slurm
 jobs:
-  # Matches the maintainer's production runvasp.sh convention exactly:
-  # workq, 2 nodes / 128 MPI tasks, vasp6/6.6.1-cpu, vasp_std.
+  # Default for new MLFF work: VASP 6.6.1 CPU.
+  # workq, 2 nodes / 128 MPI tasks, vasp_std.
   vasp_train:
     partition: workq
     account: loni_perovsk27
@@ -16,9 +16,24 @@ jobs:
       SECONDS=0
       srun -n{ntasks} vasp_std
       echo "took $SECONDS sec."
-  # Optional resource override. The array launcher executes vasp_train's
-  # command directly in each leaf and inherits its modules/environment;
-  # this entry therefore only controls the Slurm resource request.
+  # Legacy/reproducibility option for campaigns whose labels were generated
+  # with VASP 6.5.1. Select profile_name=vasp_train_651.
+  vasp_train_651:
+    partition: workq
+    account: loni_perovsk27
+    nodes: 2
+    ntasks: 128
+    cpus_per_task: 1
+    time: "72:00:00"
+    modules: [vasp6/6.5.1-cpu]
+    environment: {SINGULARITYENV_OMP_NUM_THREADS: "1"}
+    command: |
+      SECONDS=0
+      srun -n{ntasks} vasp_std
+      echo "took $SECONDS sec."
+  # Optional resource override. The array launcher executes the selected
+  # stage profile's command directly in each leaf and inherits its
+  # modules/environment; this entry therefore only controls Slurm resources.
   vasp_train_array:
     partition: workq
     account: loni_perovsk27
