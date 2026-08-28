@@ -49,6 +49,6 @@ jobs:
     ntasks: 64
     cpus_per_task: 1
     time: "24:00:00"
-    modules: [vasp6/6.5.1-cpu]
+    modules: [vasp6/6.6.1-cpu]
     environment: {OMP_NUM_THREADS: "1"}
     command: srun -n {ntasks} vasp_gam
