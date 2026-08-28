@@ -410,9 +410,10 @@ def batch_slab_vacuum(
     axis: int | str = "auto",
     min_vacuum: float = 12.0,
     extend: float | None = None,
-    force: bool = False,
+    execute: bool = False,
 ) -> dict[str, Any]:
-    """Audit (and optionally extend in place) every slab under a directory tree."""
+    """Audit every slab under a tree; with ``extend`` plan (or, if ``execute``,
+    apply) an in-place cell stretch for each one below ``min_vacuum``."""
 
     root_path = Path(root).expanduser().resolve()
     if not root_path.is_dir():
@@ -433,12 +434,17 @@ def batch_slab_vacuum(
             "status": "THIN" if thin else "PASS",
         }
         if extend is not None and thin:
-            result = extend_slab_vacuum(path, path, axis=axis, vacuum=extend, force=force)
-            row["vacuum_a"] = result["vacuum_after_a"]
-            row["extended"] = True
+            row["would_be_a"] = round(max(report["vacuum_a"], float(extend)), 2)
+            if execute:
+                extend_slab_vacuum(path, path, axis=axis, vacuum=extend, force=True)
+                row["vacuum_a"] = row.pop("would_be_a")
+                row["extended"] = True
         rows.append(row)
+
+    mode = "audit" if extend is None else ("extended" if execute else "dry-run")
     return {
         "root": str(root_path),
+        "mode": mode,
         "min_vacuum_a": float(min_vacuum),
         "structures": len(rows),
         "thin": sum(r["status"] == "THIN" for r in rows),

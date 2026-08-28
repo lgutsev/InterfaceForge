@@ -600,29 +600,33 @@ def cmd_geom(args: argparse.Namespace) -> int:
         )
     elif args.geometry == "vacuum":
         if Path(args.source).is_dir():
-            if args.extend is not None and not args.force:
-                raise SafetyError(
-                    "Extending a directory rewrites every thin POSCAR/CONTCAR in place; "
-                    "pass --force to confirm"
-                )
             payload = batch_slab_vacuum(
                 args.source,
                 axis=args.axis,
                 min_vacuum=args.min_vacuum,
                 extend=args.extend,
-                force=True,
+                execute=args.execute,
             )
         elif args.extend is not None:
-            output = args.output or f"{args.source}.extended"
-            payload = extend_slab_vacuum(
-                args.source,
-                output,
-                axis=args.axis,
-                vacuum=args.extend,
-                recenter=not args.no_recenter,
-                sort_atoms=not args.no_sort,
-                force=args.force,
-            )
+            if not (args.execute or args.output):
+                report = slab_vacuum(args.source, axis=args.axis)
+                payload = {
+                    **report,
+                    "mode": "dry-run",
+                    "would_be_a": round(max(report["vacuum_a"], args.extend), 2),
+                    "hint": "pass -o OUT (or --execute to overwrite the source) to write it",
+                }
+            else:
+                output = args.source if args.execute else (args.output or f"{args.source}.extended")
+                payload = extend_slab_vacuum(
+                    args.source,
+                    output,
+                    axis=args.axis,
+                    vacuum=args.extend,
+                    recenter=not args.no_recenter,
+                    sort_atoms=not args.no_sort,
+                    force=args.force or args.execute,
+                )
         else:
             report = slab_vacuum(args.source, axis=args.axis)
             report["status"] = "PASS" if report["vacuum_a"] >= args.min_vacuum else "THIN"
@@ -1621,9 +1625,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         const=18.0,
         metavar="VACUUM",
-        help="Grow the normal cell vector to this slab-to-image gap (default 18 A if bare)",
+        help=(
+            "Plan a cell stretch to this slab-to-image gap (default 18 A). Without "
+            "--execute this only reports what would change"
+        ),
     )
-    vacuum.add_argument("-o", "--output", help="Output path for --extend (default: <source>.extended)")
+    vacuum.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually apply --extend, overwriting each thin structure in place",
+    )
+    vacuum.add_argument(
+        "-o", "--output", help="Single-file --extend: write here instead of overwriting"
+    )
     vacuum.add_argument(
         "--no-recenter",
         action="store_true",

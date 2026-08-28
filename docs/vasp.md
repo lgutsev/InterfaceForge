@@ -245,19 +245,27 @@ iface vasp geom vacuum Step1/NiO_m110_Big_U46_DCZ-4P/CONTCAR
 # audit a whole tree
 iface vasp geom vacuum Step1
 
-# grow the normal cell vector so vacuum_a = 18 Å (relaxed geometry unchanged)
+# --- extend: dry by default, --execute to write ---
+
+# one file -> what would change (writes nothing)
+iface vasp geom vacuum <CONTCAR> --extend 18
+
+# one file -> a named copy
 iface vasp geom vacuum <CONTCAR> --extend 18 -o POSCAR
 
-# fix every thin structure below a tree in place
-iface vasp geom vacuum Step1 --extend 18 --force
+# whole tree -> plan every thin structure (writes nothing)
+iface vasp geom vacuum Step1 --extend 18
+
+# whole tree -> actually stretch each thin structure in place
+iface vasp geom vacuum Step1 --extend 18 --execute
 ```
 
 `--extend` only adds empty space along the normal — every atomic position
 and bond is unchanged — then re-centres the slab in the enlarged cell
 (`--no-recenter` to skip; it is cosmetic and does not change `vacuum_a`). A
 Step1 CONTCAR can be stretched and reused directly; the MD re-settles the
-first ~50 fs anyway. A cell that already has more vacuum than the target is
-left alone. `--axis a|b|c` overrides the auto-detected normal.
+first ~50 fs anyway. A cell that already clears the target is left alone.
+`--axis a|b|c` overrides the auto-detected normal.
 
 ## Preparation
 

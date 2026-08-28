@@ -94,8 +94,18 @@ class SlabVacuumTests(unittest.TestCase):
             self.assertEqual(rows["Step2_300K/tight/POSCAR"]["status"], "THIN")
             self.assertEqual(report["thin"], 1)
 
-            fixed = batch_slab_vacuum(root, min_vacuum=12.0, extend=18.0, force=True)
-            self.assertEqual(fixed["extended"], 1)
+            # dry run: plans the stretch, writes nothing
+            dry = batch_slab_vacuum(root, min_vacuum=12.0, extend=18.0)
+            self.assertEqual(dry["mode"], "dry-run")
+            self.assertEqual(dry["extended"], 0)
+            tight = next(r for r in dry["rows"] if "tight" in r["path"])
+            self.assertEqual(tight["would_be_a"], 18.0)
+            self.assertEqual(batch_slab_vacuum(root, min_vacuum=12.0)["thin"], 1)
+
+            # execute
+            done = batch_slab_vacuum(root, min_vacuum=12.0, extend=18.0, execute=True)
+            self.assertEqual(done["mode"], "extended")
+            self.assertEqual(done["extended"], 1)
             self.assertEqual(batch_slab_vacuum(root, min_vacuum=12.0)["thin"], 0)
 
     def test_cli_audit_flags_thin_and_suggests_fix(self) -> None:
@@ -108,12 +118,31 @@ class SlabVacuumTests(unittest.TestCase):
             self.assertEqual(payload["status"], "THIN")
             self.assertIn("--extend", payload["fix"])
 
-    def test_cli_extend_writes_structure(self) -> None:
+    def test_cli_extend_dry_run_then_execute(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self._write(_slab(6.0), Path(tmp) / "POSCAR")
+            out = Path(tmp) / "dry.json"
+
+            # bare --extend on one file = dry run, no write
+            self.assertEqual(
+                main(["vasp", "geom", "vacuum", str(src), "--extend", "18", "--summary", str(out)]), 0
+            )
+            self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["mode"], "dry-run")
+            self.assertAlmostEqual(slab_vacuum(src)["vacuum_a"], 6.0, places=2)
+
+            # --execute overwrites in place
+            self.assertEqual(
+                main(["vasp", "geom", "vacuum", str(src), "--extend", "18", "--execute"]), 0
+            )
+            self.assertGreaterEqual(slab_vacuum(src)["vacuum_a"], 17.9)
+
+    def test_cli_extend_to_named_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             src = self._write(_slab(6.0), Path(tmp) / "POSCAR")
             out = Path(tmp) / "POSCAR.big"
-            rc = main(["vasp", "geom", "vacuum", str(src), "--extend", "18", "-o", str(out)])
-            self.assertEqual(rc, 0)
+            self.assertEqual(
+                main(["vasp", "geom", "vacuum", str(src), "--extend", "18", "-o", str(out)]), 0
+            )
             self.assertGreaterEqual(slab_vacuum(out)["vacuum_a"], 17.9)
 
 
