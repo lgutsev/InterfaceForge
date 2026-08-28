@@ -300,6 +300,26 @@ class Step2SpinInheritanceTests(unittest.TestCase):
             # POSCAR / inputs are left alone.
             self.assertTrue((root / "Step2_300K" / "NiO_m110_Big_U46" / "POTCAR").is_file())
 
+    def test_set_protocol_round_trips_back_to_academic_byte_for_byte(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            step1 = _step1_tree_spin(root)
+            tmpl = self._template(root)
+            incar = root / "Step2_300K" / "NiO_m110_Big_U46" / "INCAR"
+
+            prepare_step2_series(step1, temperatures=[300], template=tmpl)
+            original = incar.read_text(encoding="utf-8")
+
+            prepare_step2_series(
+                step1, temperatures=[300], template=tmpl, protocol="training", reprotocol=True
+            )
+            self.assertNotEqual(incar.read_text(encoding="utf-8"), original)
+
+            prepare_step2_series(
+                step1, temperatures=[300], template=tmpl, protocol="academic", reprotocol=True
+            )
+            self.assertEqual(incar.read_text(encoding="utf-8"), original)
+
     def test_set_protocol_refuses_after_a_run_started(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
