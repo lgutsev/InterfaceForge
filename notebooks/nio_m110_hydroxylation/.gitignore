@@ -1,0 +1,18 @@
+generated/
+__pycache__/
+.ipynb_checkpoints/
+
+# bundled inputs ARE tracked (the repo-root .gitignore excludes CONTCAR/OUTCAR/…;
+# re-include the ones we ship for reproducibility):
+!inputs/CONTCAR
+!inputs/*.xyz
+!inputs/vasp_template/INCAR
+!inputs/vasp_template/KPOINTS
+
+# ...but never the licensed / large VASP files:
+inputs/vasp_template/POTCAR
+inputs/vasp_template/WAVECAR
+inputs/vasp_template/CHGCAR
+inputs/vasp_template/CONTCAR
+inputs/vasp_template/OUTCAR
+inputs/vasp_template/vasprun.xml

@@ -1,0 +1,10 @@
+# NiO(110) hydroxylation notebooks -- plain-pip installable on Windows
+ase>=3.22,<4
+pymatgen>=2024.1
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+jupyterlab>=4
+nbformat>=5
+# optional interactive viewer (NOT required; static plots use ase.visualize.plot):
+# nglview>=3.1

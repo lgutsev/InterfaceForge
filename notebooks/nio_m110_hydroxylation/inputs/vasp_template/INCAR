@@ -1,0 +1,58 @@
+SYSTEM = Phosphonate on NiO(110) AFM-II relaxation
+
+# Electronic structure
+GGA     = PE
+ENCUT   = 520
+PREC    = Accurate
+EDIFF   = 1E-6
+NELM    = 150
+ALGO    = Normal
+LREAL   = .FALSE.
+LASPH   = .TRUE.
+ADDGRID = .TRUE.
+
+# Occupations
+ISMEAR = 0
+SIGMA  = 0.05
+
+# Magnetism
+ISPIN = 2
+
+# C18 H22 N1 | Ni30-up Ni30-down | O63 P1
+MAGMOM = 41*0.0 30*2.0 30*-2.0 64*0.0
+
+ISYM   = 0
+LORBIT = 11
+
+# Dudarev DFT+U: species order C H N Ni O P
+LDAU      = .TRUE.
+LDAUTYPE  = 2
+LDAUL     = -1 -1 -1 2 -1 -1
+LDAUU     = 0.0 0.0 0.0 4.6 0.0 0.0
+LDAUJ     = 0.0 0.0 0.0 0.0 0.0 0.0
+LDAUPRINT = 1
+LMAXMIX   = 4
+
+# Grimme D3
+IVDW = 11
+
+# Fixed-cell ionic relaxation
+IBRION = 2
+ISIF   = 2
+NSW    = 500
+EDIFFG = -0.02
+POTIM  = 0.3
+
+# Dipole correction: adsorbate is on one side
+LDIPOL = .TRUE.
+IDIPOL = 3
+DIPOL  = 0.5 0.5 0.5
+
+# Output
+LWAVE  = .TRUE.
+LCHARG = .FALSE.
+NWRITE = 1
+
+# Parallelization
+NCORE = 4
+
