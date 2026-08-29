@@ -123,7 +123,7 @@ def test_ligand_binding_oxygen_is_placed_over_target_ni(utils):
 def test_steric_search_keeps_binding_oxygen_fixed(utils):
     slab = Atoms(
         ["Ni", "O"],
-        positions=[[5.0, 5.0, 5.0], [7.0, 5.0, 7.05]],
+        positions=[[5.0, 5.0, 5.0], [7.5, 5.0, 7.05]],
         cell=[15.0, 15.0, 20.0],
         pbc=True,
     )
@@ -152,6 +152,43 @@ def test_steric_search_keeps_binding_oxygen_fixed(utils):
     assert contact_tilt == 0.0  # an azimuth adjustment is sufficient
     assert np.allclose(ligand[1], [5.0, 5.0, 7.05])
     assert utils._min_gap(ligand, slab.positions, slab.cell) >= 1.25
+    assert utils.chemical_contact_diagnostic(structure, len(slab)).ok
+
+
+def test_contact_audit_rejects_forced_phosphonate_oh_against_ni(utils):
+    """Regression for the 1.56 Å H--Ni / 1.30 Å O--Ni generated failure."""
+    slab = Atoms(
+        ["Ni", "Ni", "O"],
+        positions=[[0.0, 0.0, 5.0], [2.8, 0.0, 5.0], [5.0, 5.0, 5.0]],
+        cell=[15.0, 15.0, 20.0],
+        pbc=True,
+    )
+    ligand = Atoms(
+        ["O", "P"],
+        positions=[[1.30, 0.0, 5.0], [1.30, 0.0, 6.62]],
+        cell=slab.cell,
+        pbc=True,
+    )
+    structure = slab + ligand
+
+    diagnostic = utils.chemical_contact_diagnostic(structure, len(slab))
+
+    assert not diagnostic.ok
+    assert diagnostic.ligand_symbol == "O"
+    assert diagnostic.slab_symbol == "Ni"
+    assert diagnostic.distance == pytest.approx(1.30)
+    assert diagnostic.cutoff == pytest.approx(1.75)
+
+
+def test_contact_audit_has_specific_h_ni_floor(utils):
+    slab = Atoms("Ni", positions=[[0.0, 0.0, 5.0]], cell=[15, 15, 20], pbc=True)
+    ligand = Atoms("H", positions=[[1.56, 0.0, 5.0]], cell=slab.cell, pbc=True)
+
+    diagnostic = utils.chemical_contact_diagnostic(slab + ligand, len(slab))
+
+    assert not diagnostic.ok
+    assert diagnostic.distance == pytest.approx(1.56)
+    assert diagnostic.cutoff == pytest.approx(2.10)
 
 
 def test_slab_incar_overrides_never_relax_vacuum_cell(utils):

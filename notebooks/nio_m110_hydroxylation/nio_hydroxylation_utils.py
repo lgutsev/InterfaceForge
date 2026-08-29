@@ -42,6 +42,27 @@ HH_CLASH = 1.50               # Ang, H...H steric clash threshold
 DEFAULT_H_TILT_DEG = 25.0     # isolated hydroxyl: modest outward tilt from +z
 D_NI_OP = 2.05                # Ang, target surface-Ni ... phosphonate-O distance
 
+# Hard lower bounds for unintended ligand--slab contacts. These are rejection
+# floors, not target bond lengths. Dissociative and multidentate products must
+# be constructed explicitly rather than created by a steric-search accident.
+CONTACT_MINIMA = {
+    ("C", "H"): 1.45,
+    ("C", "Ni"): 1.80,
+    ("C", "O"): 1.65,
+    ("H", "H"): 1.60,
+    ("H", "N"): 1.35,
+    ("H", "Ni"): 2.10,
+    ("H", "O"): 1.45,  # permits a strong O--H...O hydrogen bond
+    ("H", "P"): 1.55,
+    ("N", "Ni"): 1.75,
+    ("N", "O"): 1.55,
+    ("Ni", "O"): 1.75,
+    ("Ni", "P"): 2.00,
+    ("O", "O"): 2.30,
+    ("O", "P"): 1.80,
+}
+DEFAULT_CONTACT_MIN = 1.25
+
 
 # ==========================================================================
 # minimum-image geometry (in-plane periodic, any cell shape)
@@ -642,6 +663,81 @@ def _min_gap(a_pos: np.ndarray, b_pos: np.ndarray, cell) -> float:
     return float(np.linalg.norm(d, axis=-1).min())
 
 
+@dataclass(frozen=True)
+class ContactDiagnostic:
+    """Most limiting ligand--slab atom pair relative to its chemical floor."""
+
+    ok: bool
+    min_margin: float
+    distance: float
+    cutoff: float
+    ligand_index: int
+    slab_index: int
+    ligand_symbol: str
+    slab_symbol: str
+
+
+def _contact_cutoff(ligand_symbol: str, slab_symbol: str,
+                    default_min: float = DEFAULT_CONTACT_MIN) -> float:
+    key = tuple(sorted((str(ligand_symbol), str(slab_symbol))))
+    return float(CONTACT_MINIMA.get(key, default_min))
+
+
+def _chemical_contact_diagnostic(
+    ligand_positions: np.ndarray,
+    ligand_symbols: Sequence[str],
+    slab_positions: np.ndarray,
+    slab_symbols: Sequence[str],
+    cell,
+    *,
+    default_min: float = DEFAULT_CONTACT_MIN,
+) -> ContactDiagnostic:
+    """Evaluate every ligand--slab pair using species-aware rejection floors."""
+    delta = mic_delta(
+        np.asarray(ligand_positions)[:, None, :],
+        np.asarray(slab_positions)[None, :, :],
+        cell,
+    )
+    distances = np.linalg.norm(delta, axis=-1)
+    cutoffs = np.array(
+        [
+            [_contact_cutoff(ls, ss, default_min) for ss in slab_symbols]
+            for ls in ligand_symbols
+        ],
+        dtype=float,
+    )
+    margins = distances - cutoffs
+    ligand_i, slab_i = np.unravel_index(int(np.argmin(margins)), margins.shape)
+    margin = float(margins[ligand_i, slab_i])
+    return ContactDiagnostic(
+        ok=margin >= -1e-8,
+        min_margin=margin,
+        distance=float(distances[ligand_i, slab_i]),
+        cutoff=float(cutoffs[ligand_i, slab_i]),
+        ligand_index=int(ligand_i),
+        slab_index=int(slab_i),
+        ligand_symbol=str(ligand_symbols[ligand_i]),
+        slab_symbol=str(slab_symbols[slab_i]),
+    )
+
+
+def chemical_contact_diagnostic(structure: Atoms, n_slab: int, *,
+                                default_min: float = DEFAULT_CONTACT_MIN
+                                ) -> ContactDiagnostic:
+    """Public chemistry-aware contact audit for an assembled slab + ligand."""
+    if not 0 < int(n_slab) < len(structure):
+        raise ValueError("n_slab must split a nonempty slab from a nonempty ligand")
+    symbols = structure.get_chemical_symbols()
+    return _chemical_contact_diagnostic(
+        structure.positions[n_slab:],
+        symbols[n_slab:],
+        structure.positions[:n_slab],
+        symbols[:n_slab],
+        structure.cell,
+        default_min=default_min,
+    )
+
+
 def binding_oxygen(anchor: PhosphonateAnchor) -> int:
     """Choose the neutral phosphonate O used for initial molecular Ni binding.
 
@@ -655,9 +751,9 @@ def binding_oxygen(anchor: PhosphonateAnchor) -> int:
 def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateAnchor,
                  xy: Sequence[float], *, ni_plane_z: float, oh_height: float = D_NI_OP,
                  anchor_o_index: int | None = None,
-                 min_clearance: float = 1.25,
-                 max_azimuth_adjust_deg: float = 60.0,
-                 max_contact_tilt_deg: float = 25.0) -> tuple[Atoms, float]:
+                 min_clearance: float = DEFAULT_CONTACT_MIN,
+                 max_azimuth_adjust_deg: float = 180.0,
+                 max_contact_tilt_deg: float = 40.0) -> tuple[Atoms, float]:
     """Dock an oriented molecule with one chosen anchor O directly over ``xy``.
 
     The selected O is placed ``oh_height`` Å above the exposed-Ni plane, so a
@@ -666,9 +762,12 @@ def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateA
     nominally bound cases with actual Ni--O distances of 2.3--3.7 Å.
 
     Steric clashes are resolved by a deterministic rigid-body orientation
-    search about the *fixed binding O*, first in azimuth and then with modest
-    contact tilts.  The Ni--O bond is never destroyed by lifting the entire
-    molecule.  If no clean bound orientation exists, generation stops.
+    search about the *fixed binding O*, first through the full azimuth and then
+    with modest contact tilts. Candidate structures are accepted using
+    species-aware contact floors, so accidental 1.5 Å Ni--H or 1.3 Å Ni--O
+    contacts cannot pass a generic overlap test. The Ni--O anchor is never
+    destroyed by lifting the molecule. If no chemically clean bound
+    orientation exists, generation stops.
 
     The molecule is brought into the cell as a rigid body (whole lattice
     vectors only) -- never ``wrap()``, which would tear it across the boundary.
@@ -681,10 +780,16 @@ def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateA
     mol.positions[:, 2] += (ni_plane_z + oh_height) - mol.positions[bind_o, 2]
 
     slab_pos = built_surface.positions
+    slab_symbols = built_surface.get_chemical_symbols()
+    mol_symbols = mol.get_chemical_symbols()
     pivot = mol.positions[bind_o].copy()
     base = mol.positions.copy()
     best_positions = base
     best_clearance = _min_gap(base, slab_pos, built_surface.cell)
+    best_contact = _chemical_contact_diagnostic(
+        base, mol_symbols, slab_pos, slab_symbols, built_surface.cell,
+        default_min=min_clearance,
+    )
     best_tilt = 0.0
 
     az_step = 15.0
@@ -693,21 +798,26 @@ def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateA
         azimuths.extend([float(angle), -float(angle)])
 
     def consider(positions: np.ndarray, tilt: float) -> None:
-        nonlocal best_positions, best_clearance, best_tilt
+        nonlocal best_positions, best_clearance, best_contact, best_tilt
         clearance = _min_gap(positions, slab_pos, built_surface.cell)
-        if clearance > best_clearance:
+        contact = _chemical_contact_diagnostic(
+            positions, mol_symbols, slab_pos, slab_symbols, built_surface.cell,
+            default_min=min_clearance,
+        )
+        if (contact.min_margin, clearance) > (best_contact.min_margin, best_clearance):
             best_positions = positions
             best_clearance = clearance
+            best_contact = contact
             best_tilt = tilt
 
     for azimuth in azimuths:
         rz = _rot_about_z(np.radians(azimuth))
         spun = (rz @ (base - pivot).T).T + pivot
         consider(spun, 0.0)
-        if best_clearance >= min_clearance:
+        if best_contact.ok:
             break
 
-    if best_clearance < min_clearance:
+    if not best_contact.ok:
         # Tilt directions span the in-plane circle; every rotation is about the
         # binding O, so its requested Ni--O distance remains exactly fixed.
         for tilt in np.arange(5.0, max_contact_tilt_deg + 0.1, 5.0):
@@ -719,13 +829,17 @@ def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateA
                     rz = _rot_about_z(np.radians(azimuth))
                     candidate = (rt @ (rz @ (base - pivot).T)).T + pivot
                     consider(candidate, float(tilt))
-            if best_clearance >= min_clearance:
+            if best_contact.ok:
                 break
 
-    if best_clearance < min_clearance:
+    if not best_contact.ok:
         raise ValueError(
-            f"no bound ligand orientation reaches {min_clearance:.2f} Å slab "
-            f"clearance; best is {best_clearance:.3f} Å with the binding O fixed"
+            "no chemically valid bound ligand orientation found with the binding O "
+            f"fixed; limiting contact is ligand {best_contact.ligand_symbol}"
+            f"[{best_contact.ligand_index}]--slab {best_contact.slab_symbol}"
+            f"[{best_contact.slab_index}] at {best_contact.distance:.3f} Å "
+            f"(minimum {best_contact.cutoff:.3f} Å, margin "
+            f"{best_contact.min_margin:.3f} Å)"
         )
     mol.positions = best_positions
 

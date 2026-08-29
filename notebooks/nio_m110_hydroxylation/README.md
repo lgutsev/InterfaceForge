@@ -120,8 +120,16 @@ parameters; the manifest has an `n_frozen` column.
   placed directly over the target exposed Ni at `OH_HEIGHT` (≈2.05 Å). This
   guarantees that the requested starting Ni–O distance is real rather than
   placing P over Ni and leaving every anchor O laterally displaced. Steric
-  clashes are resolved by an azimuth/contact-tilt search about that fixed O;
-  the final Ni–O distance is audited and never sacrificed to a vertical lift.
+  clashes are resolved by a full-azimuth/contact-tilt search about that fixed
+  O; the final Ni–O distance is audited and never sacrificed to a vertical
+  lift. Every candidate must also pass species-aware hard contact floors
+  (`H–Ni ≥ 2.10 Å`, `O–Ni ≥ 1.75 Å`, `O–O ≥ 2.30 Å`, plus pair-specific
+  floors for C/N/P). This prevents a protonated P–OH group from being forced
+  into an artificial Ni–H or compressed second Ni–O bond. If no valid rigid
+  orientation exists, generation stops and exports nothing for that case.
+  The contact search permits up to a 40° rigid SAM tilt about the bound O,
+  consistent with tilted phosphonate layers, but it never relaxes a chemical
+  distance floor merely to make a case pass.
 - **Vacuum / cell**: the slab sits in the *middle* of its cell, so the real
   headroom is the gap to the slab's **periodic image** (`slab_bottom + c`), not
   the distance to the `c` plane. `vacuum_fit` reports `vacuum_gap` (to the image);
@@ -154,7 +162,8 @@ separate chemical states rather than expected to appear during local relaxation.
 Set `RUN_BATCH = True`. Loops `SURFACES × BATCH_LIGANDS × BATCH_CASES ×
 BATCH_POSITIONS`, re-deriving the exposed-Ni inventory and coverage pattern per
 surface, docking each ligand, checking overlaps + vacuum, exporting, and writing
-`generated/manifest_batch.csv`.
+`generated/manifest_batch.csv`. The manifest and provenance include the
+limiting chemical-contact pair and its margin above the applicable floor.
 
 ## Naming
 
