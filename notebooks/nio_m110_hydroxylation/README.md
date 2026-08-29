@@ -164,6 +164,13 @@ BATCH_POSITIONS`, re-deriving the exposed-Ni inventory and coverage pattern per
 surface, docking each ligand, checking overlaps + vacuum, exporting, and writing
 `generated/manifest_batch.csv`. The manifest and provenance include the
 limiting chemical-contact pair and its margin above the applicable floor.
+The default `BATCH_CASES` is derived from the complete bindable sweep: pristine
+plus clustered/scattered × capped/dissociated at 25%, 50%, and 75% OH. With the
+four bundled ligands this produces 100 passivated structures (one pristine
+position and two positions for each intermediate-OH surface). The two 100%-OH
+surfaces remain reference-only because all exposed Ni sites are already capped;
+adding a phosphonate there would require an explicit, stoichiometrically
+balanced OH-displacement/substitution model rather than neutral docking.
 
 ## Naming
 

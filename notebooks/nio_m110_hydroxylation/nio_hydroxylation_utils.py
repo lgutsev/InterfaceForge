@@ -251,6 +251,31 @@ def select_sites(surface: SurfaceModel, fraction: float, arrangement: str, *,
     return np.array(sorted(exposed[k] for k in chosen), dtype=int)
 
 
+def bindable_ligand_case_grid(
+    fractions: Sequence[float],
+) -> list[tuple[float, str, str]]:
+    """Return every hydroxylation case that retains a bare Ni anchor.
+
+    The clean surface contributes one pristine case. Every intermediate
+    coverage contributes clustered/scattered x capped/dissociated cases.
+    Fully hydroxylated surfaces are intentionally excluded: they contain no
+    bare Ni and require an explicit OH-displacement/substitution reaction,
+    rather than neutral molecular docking onto an already occupied Ni site.
+    """
+    grid: list[tuple[float, str, str]] = []
+    for fraction in map(float, fractions):
+        if fraction <= 0.0:
+            if not any(item[0] == 0.0 for item in grid):
+                grid.append((0.0, "", ""))
+            continue
+        if fraction >= 1.0:
+            continue
+        for pattern in ("clustered", "scattered"):
+            for motif in ("capped", "dissoc"):
+                grid.append((fraction, pattern, motif))
+    return grid
+
+
 # ==========================================================================
 # hydroxylation motifs
 # ==========================================================================

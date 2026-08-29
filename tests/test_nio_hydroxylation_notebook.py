@@ -74,6 +74,25 @@ def test_dissociated_pair_rejects_incomplete_water_stoichiometry(utils):
         )
 
 
+def test_default_ligand_grid_covers_every_bindable_surface_case(utils):
+    grid = utils.bindable_ligand_case_grid([0.0, 0.25, 0.50, 0.75, 1.0])
+
+    assert grid[0] == (0.0, "", "")
+    assert len(grid) == 13
+    for fraction in (0.25, 0.50, 0.75):
+        assert {
+            (pattern, motif)
+            for frac, pattern, motif in grid
+            if frac == fraction
+        } == {
+            ("clustered", "capped"),
+            ("clustered", "dissoc"),
+            ("scattered", "capped"),
+            ("scattered", "dissoc"),
+        }
+    assert not any(frac == 1.0 for frac, _pattern, _motif in grid)
+
+
 def test_full_real_surface_has_one_lattice_proton_per_selected_ni(utils):
     slab = utils.load_structure(NOTEBOOK_DIR / "inputs" / "CONTCAR").repeat((2, 2, 1))
     surface = utils.analyse_surface(slab)

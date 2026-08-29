@@ -107,6 +107,51 @@ def synchronize_workflow_cells(payload: dict) -> None:
                 "checks species-aware contacts + overlaps + vacuum",
             )
             cell["source"] = source_lines(source)
+        if ("BATCH_CASES     = [(0.0" in source
+                and "bindable_ligand_case_grid" not in source):
+            source = replace_once(
+                source,
+                "BATCH_CASES     = [(0.0,  \"\",          \"\"),        # pristine (no OH) + ligand -> OH0/\n"
+                "                   (0.50, \"clustered\", \"capped\"),\n"
+                "                   (0.50, \"scattered\", \"dissoc\"),\n"
+                "                   (0.75, \"clustered\", \"capped\")]\n",
+                "# Complete production grid for every surface that retains a bare Ni.\n"
+                "BATCH_CASES = bindable_ligand_case_grid(FRACTIONS)\n"
+                "# Full-OH references have no free Ni anchor; passivating them requires an\n"
+                "# explicit OH-displacement reaction and is not neutral molecular docking.\n"
+                "BATCH_REFERENCE_ONLY = [(1.0, \"full\", motif) for motif in (\"capped\", \"dissoc\")]\n",
+                label="complete ligand batch grid",
+            )
+            source = replace_once(
+                source,
+                "    return pd.DataFrame(out)\n",
+                "    expected = len(SURFACES) * len(BATCH_LIGANDS) * sum(\n"
+                "        1 if frac == 0.0 else len(BATCH_POSITIONS)\n"
+                "        for frac, _pattern, _motif in BATCH_CASES)\n"
+                "    if len(out) != expected:\n"
+                "        raise RuntimeError(f\"incomplete ligand grid: generated {len(out)}/{expected} cases\")\n"
+                "    return pd.DataFrame(out)\n",
+                label="batch completeness assertion",
+            )
+            source = replace_once(
+                source,
+                "if RUN_BATCH:\n",
+                "if BATCH_REFERENCE_ONLY:\n"
+                "    print(\"Reference-only full-OH cases (no bare Ni anchor):\", BATCH_REFERENCE_ONLY)\n"
+                "\n"
+                "if RUN_BATCH:\n",
+                label="full coverage explanation",
+            )
+            cell["source"] = source_lines(source)
+        if ("Keep the lists short and skim the table first." in source
+                and "complete bindable" not in source):
+            source = source.replace(
+                "Keep the lists short and skim the table first.",
+                "The default is the complete bindable surface grid. Fully hydroxylated "
+                "references remain ligand-free because every exposed Ni is already occupied; "
+                "they require a separate, stoichiometrically explicit OH-displacement model.",
+            )
+            cell["source"] = source_lines(source)
 
 
 def main() -> None:
