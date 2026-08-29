@@ -238,6 +238,46 @@ The template `INCAR` is the **passivated-case** relaxation
 
 `manifest.csv` / `manifest_ligands.csv` carry a **`path`** column.
 
+### Batch POTCAR, audit, and launch on LONI
+
+Use `manifest_batch.csv` as the allowlist when the OH-free pilot runs are being
+launched separately. From the InterfaceForge repository root:
+
+```bash
+iface vasp opt-prepare notebooks/nio_m110_hydroxylation/generated \
+  --manifest notebooks/nio_m110_hydroxylation/generated/manifest_batch.csv \
+  --exclude-prefix OH0 \
+  --launcher-template launch_scripts/runvasp.sh \
+  --dry-run
+
+iface vasp opt-prepare notebooks/nio_m110_hydroxylation/generated \
+  --manifest notebooks/nio_m110_hydroxylation/generated/manifest_batch.csv \
+  --exclude-prefix OH0 \
+  --launcher-template launch_scripts/runvasp.sh
+```
+
+The second command runs the local `POTCAR_gen` inside each selected leaf only
+when its POTCAR is absent or empty. Existing nonempty POTCAR files are never
+replaced. It installs the production VASP 6.5.1 launcher, audits the complete selected
+batch, and writes `opt_manifest.json` plus `opt_audit.{json,tsv,md}` without
+submitting anything.
+
+`--exclude-prefix OH0` is essential here because `manifest_batch.csv` includes
+the pristine ligand cases; it keeps the manually launched OH-free branch out
+of this audited batch. The exclusion is remembered for later `--audit-only`
+runs.
+
+After reviewing `generated/opt_audit.md`:
+
+```bash
+iface vasp opt-launch notebooks/nio_m110_hydroxylation/generated
+iface vasp opt-launch notebooks/nio_m110_hydroxylation/generated --execute
+```
+
+The first command is another full preflight and dry run. `--execute` is the
+only form that submits; it records every Slurm job ID and blocks duplicate
+batch launches.
+
 ## Magnetism
 
 The slab is AFM-II (NiO type-II order: Ni-O-Ni 180° superexchange pairs

@@ -182,6 +182,10 @@ iface vasp geom convert structure.xyz POSCAR --cell-from trusted.vasp
 iface vasp geom slab bulk.vasp slab.vasp --miller 1 1 1 --layers 8
 iface vasp geom freeze slab.vasp POSCAR --axis z --upper 5 --region inside
 iface vasp restart run/ --clean-electronic
+iface vasp opt-prepare generated --manifest generated/manifest_batch.csv --exclude-prefix OH0 --dry-run
+iface vasp opt-prepare generated --manifest generated/manifest_batch.csv --exclude-prefix OH0 --launcher-template runvasp.sh
+iface vasp opt-launch generated                 # full preflight; no submission
+iface vasp opt-launch generated --execute       # submit the unchanged PASS-audited batch
 iface vasp ml-recover continue run/ --temperature 450 --nsw 3000
 iface vasp submit run/ --ml-continue --temperature 450 --nsw 3000
 iface vasp ml-recover expand run/ --ml-mb 12000

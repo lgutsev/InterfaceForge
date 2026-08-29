@@ -1,7 +1,7 @@
 name: loni
 scheduler: slurm
-# VASP 6.6.1 is the default for new work. Explicit *_651 jobs are retained
-# for legacy campaigns and exact reproduction of data generated with 6.5.1.
+# VASP 6.5.1 remains the production default while 6.6.1 licensing/runtime
+# behavior is evaluated. Explicit *_661 jobs are retained for controlled tests.
 ai2kit:
   commands:
     controller_python: /project/YOUR_PROJECT/envs/ai2kit-controller/bin/python
@@ -21,7 +21,7 @@ jobs:
     ntasks: 64
     cpus_per_task: 1
     time: "72:00:00"
-    modules: [vasp6/6.6.1-cpu]
+    modules: [vasp6/6.5.1-cpu]
     environment: {OMP_NUM_THREADS: "1", SINGULARITYENV_OMP_NUM_THREADS: "1"}
     command: "srun -n {ntasks} vasp_gam"
   vasp_bigmem:
@@ -31,27 +31,27 @@ jobs:
     ntasks: 128
     cpus_per_task: 1
     time: "48:00:00"
-    modules: [vasp6/6.6.1-cpu]
+    modules: [vasp6/6.5.1-cpu]
     environment: {OMP_NUM_THREADS: "1", SINGULARITYENV_OMP_NUM_THREADS: "1"}
     command: "srun -n {ntasks} vasp_gam"
-  vasp_workq_651:
+  vasp_workq_661:
     partition: workq
     account: YOUR_LONI_ACCOUNT
     nodes: 1
     ntasks: 64
     cpus_per_task: 1
     time: "72:00:00"
-    modules: [vasp6/6.5.1-cpu]
+    modules: [vasp6/6.6.1-cpu]
     environment: {OMP_NUM_THREADS: "1", SINGULARITYENV_OMP_NUM_THREADS: "1"}
     command: "srun -n {ntasks} vasp_gam"
-  vasp_bigmem_651:
+  vasp_bigmem_661:
     partition: bigmem
     account: YOUR_LONI_ACCOUNT
     nodes: 2
     ntasks: 128
     cpus_per_task: 1
     time: "48:00:00"
-    modules: [vasp6/6.5.1-cpu]
+    modules: [vasp6/6.6.1-cpu]
     environment: {OMP_NUM_THREADS: "1", SINGULARITYENV_OMP_NUM_THREADS: "1"}
     command: "srun -n {ntasks} vasp_gam"
   mace_gpu:

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -79,6 +80,19 @@ STEP2_TRAINING_STRIPPED_TAGS = ("LORBIT", "LDIPOL", "IDIPOL", "DIPOL")
 # much vacuum between the slab+adsorbate stack and its periodic image -- a
 # tall passivant eats headroom that the bare-slab cell had to spare.
 STEP2_MIN_VACUUM_A = 12.0
+
+OPT_REQUIRED_FILES = ("INCAR", "POSCAR", "KPOINTS", "POTCAR")
+OPT_RUNTIME_FILES = (
+    "OUTCAR",
+    "OSZICAR",
+    "WAVECAR",
+    "CHGCAR",
+    "CHG",
+    "XDATCAR",
+    "vasprun.xml",
+    "REPORT",
+)
+OPT_DEFAULT_VASP_MODULE = "vasp6/6.5.1-cpu"
 
 
 def _step2_slab_vacuum(structure: Path) -> dict[str, Any] | None:
@@ -892,6 +906,696 @@ def launch_step2_runs(
         "preflight": "PASS",
         "submitted": len(rows),
         "reports": report_paths,
+        "jobs": rows,
+    }
+
+
+def _opt_relative_path(root: Path, value: str, *, manifest_dir: Path) -> tuple[Path, Path]:
+    """Resolve one notebook-manifest path while keeping it below ``root``."""
+
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute():
+        run = candidate.resolve()
+    else:
+        root_candidate = (root / candidate).resolve()
+        manifest_candidate = (manifest_dir / candidate).resolve()
+        run = root_candidate if root_candidate.is_dir() or not manifest_candidate.is_dir() else manifest_candidate
+    if not run.is_relative_to(root):
+        raise SafetyError(f"OPT manifest path escapes the selected root: {value}")
+    relative = run.relative_to(root)
+    return run, relative
+
+
+def _discover_opt_runs(
+    root: Path, manifest: str | Path | None
+) -> tuple[list[dict[str, Any]], Path | None]:
+    """Discover OPT leaves from an explicit notebook CSV or recursively from POSCAR files."""
+
+    rows: list[dict[str, Any]] = []
+    manifest_path: Path | None = None
+    if manifest is not None:
+        manifest_path = Path(manifest).expanduser().resolve()
+        if not manifest_path.is_file():
+            raise FileNotFoundError(manifest_path)
+        with manifest_path.open(newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames or "path" not in reader.fieldnames:
+                raise SafetyError(f"OPT manifest has no 'path' column: {manifest_path}")
+            for source_row in reader:
+                value = str(source_row.get("path") or "").strip()
+                if not value:
+                    raise SafetyError(f"OPT manifest contains an empty path: {manifest_path}")
+                run, relative = _opt_relative_path(
+                    root, value, manifest_dir=manifest_path.parent
+                )
+                rows.append(
+                    {
+                        "run": run,
+                        "relative": relative,
+                        "source": {
+                            key: value
+                            for key, value in source_row.items()
+                            if key and value not in (None, "")
+                        },
+                    }
+                )
+    else:
+        candidates = [root / "POSCAR"] if (root / "POSCAR").is_file() else root.rglob("POSCAR")
+        for poscar in candidates:
+            run = poscar.parent.resolve()
+            relative = run.relative_to(root)
+            if any(
+                part.startswith(".")
+                or part.startswith("X")
+                or "archive" in part.casefold()
+                or "backup" in part.casefold()
+                for part in relative.parts
+            ):
+                continue
+            rows.append({"run": run, "relative": relative, "source": {}})
+
+    unique: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = row["relative"].as_posix() or "."
+        if key in unique:
+            raise SafetyError(f"Duplicate OPT manifest path: {key}")
+        unique[key] = row
+    if not unique:
+        label = f" in {manifest_path}" if manifest_path else f" below {root}"
+        raise SafetyError(f"No OPT run directories found{label}")
+    return [unique[key] for key in sorted(unique)], manifest_path
+
+
+def _poscar_selective_dynamics(poscar: Path) -> dict[str, Any]:
+    """Return selective-dynamics accounting without requiring ASE."""
+
+    lines = poscar.read_text(encoding="utf-8", errors="ignore").splitlines()
+    if len(lines) < 8:
+        raise SafetyError(f"POSCAR is too short: {poscar}")
+    counts_index = 5 if all(re.fullmatch(r"\d+", token) for token in lines[5].split()) else 6
+    counts = lines[counts_index].split()
+    if not counts or not all(re.fullmatch(r"\d+", token) for token in counts):
+        raise SafetyError(f"POSCAR has no valid ion-count line: {poscar}")
+    nions = sum(int(value) for value in counts)
+    cursor = counts_index + 1
+    selective = cursor < len(lines) and lines[cursor].strip().casefold().startswith("s")
+    if selective:
+        cursor += 1
+    cursor += 1  # Direct / Cartesian
+    coordinates = lines[cursor : cursor + nions]
+    if len(coordinates) != nions:
+        raise SafetyError(f"POSCAR has {len(coordinates)} coordinate rows for {nions} ions: {poscar}")
+    frozen = 0
+    if selective:
+        for line in coordinates:
+            fields = line.split()
+            if len(fields) < 6:
+                raise SafetyError(f"Selective-dynamics row has no F/T flags in {poscar}: {line}")
+            if all(flag.upper().startswith("F") for flag in fields[3:6]):
+                frozen += 1
+    return {
+        "enabled": selective,
+        "ions": nions,
+        "frozen": frozen,
+        "mobile": nions - frozen,
+    }
+
+
+def _potcar_elements(potcar: Path) -> list[str]:
+    """Read dataset order from the standard VRHFIN records in a POTCAR."""
+
+    elements: list[str] = []
+    pattern = re.compile(r"VRHFIN\s*=\s*([A-Z][a-z]?)\s*:")
+    with potcar.open(encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            if match := pattern.search(line):
+                elements.append(match.group(1))
+    return elements
+
+
+def _truthy_vasp(value: str | None) -> bool:
+    return str(value or "").strip().strip(".").upper() in {"T", "TRUE"}
+
+
+def _audit_opt_run(
+    run: Path,
+    relative: Path,
+    *,
+    launcher: str | None,
+    required_module: str | None,
+    preparation_issues: Iterable[str] = (),
+    source: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    issues = list(preparation_issues)
+    notes: list[str] = []
+    hashes: dict[str, str] = {}
+    for name in OPT_REQUIRED_FILES:
+        path = run / name
+        if not path.is_file() or not path.stat().st_size:
+            issues.append(f"missing or empty {name}")
+        else:
+            hashes[name] = _sha256_file(path)
+
+    elements: list[str] = []
+    selective: dict[str, Any] | None = None
+    if "POSCAR" in hashes:
+        try:
+            elements = _poscar_elements(run / "POSCAR")
+            selective = _poscar_selective_dynamics(run / "POSCAR")
+        except (OSError, SafetyError) as exc:
+            issues.append(str(exc))
+        else:
+            if not selective["enabled"]:
+                issues.append("POSCAR has no Selective Dynamics block")
+            elif selective["frozen"] == 0:
+                issues.append("POSCAR has no fully frozen atoms")
+            elif selective["mobile"] == 0:
+                issues.append("POSCAR has no mobile atoms")
+
+    parsed = parse_incar(run / "INCAR") if "INCAR" in hashes else {}
+    try:
+        ibrion = int(float(parsed.get("IBRION", "nan")))
+    except ValueError:
+        ibrion = None
+    if ibrion not in {1, 2, 3}:
+        issues.append(f"IBRION={parsed.get('IBRION')!r}; expected an ionic optimizer (1, 2, or 3)")
+    try:
+        nsw = int(float(parsed.get("NSW", "nan")))
+    except ValueError:
+        nsw = 0
+    if nsw <= 0:
+        issues.append(f"NSW={parsed.get('NSW')!r}; expected a positive optimization length")
+    if parsed.get("ISIF") != "2":
+        issues.append(f"ISIF={parsed.get('ISIF')!r}; expected fixed-cell slab relaxation ISIF=2")
+    for tag in ("LDAUL", "LDAUU", "LDAUJ"):
+        value = parsed.get(tag)
+        if value is not None and elements and _vasp_list_length(value) != len(elements):
+            issues.append(
+                f"{tag} has {_vasp_list_length(value)} values for {len(elements)} POSCAR species"
+            )
+    if parsed.get("ISPIN") == "2":
+        magmom = parsed.get("MAGMOM")
+        if not magmom:
+            issues.append("ISPIN=2 but MAGMOM is missing")
+        elif selective is not None and _vasp_list_length(magmom) != selective["ions"]:
+            issues.append(
+                f"MAGMOM has {_vasp_list_length(magmom)} values for {selective['ions']} ions"
+            )
+    if _truthy_vasp(parsed.get("LDIPOL")):
+        if parsed.get("IDIPOL") not in {"1", "2", "3"}:
+            issues.append(f"LDIPOL is enabled but IDIPOL={parsed.get('IDIPOL')!r}")
+        if _vasp_list_length(parsed.get("DIPOL", "")) != 3:
+            issues.append("LDIPOL is enabled but DIPOL does not have three coordinates")
+
+    if "POTCAR" in hashes and elements:
+        potcar_elements = _potcar_elements(run / "POTCAR")
+        if potcar_elements and potcar_elements != elements:
+            issues.append(
+                "POTCAR dataset order "
+                + " ".join(potcar_elements)
+                + " does not match POSCAR species "
+                + " ".join(elements)
+            )
+        elif not potcar_elements:
+            notes.append("POTCAR species order could not be read from VRHFIN records")
+
+    launcher_path: Path | None = None
+    try:
+        launcher_path = resolve_launcher(run, launcher)
+    except FileNotFoundError as exc:
+        issues.append(str(exc))
+    if launcher_path is not None:
+        hashes[launcher_path.name] = _sha256_file(launcher_path)
+        if not os.access(launcher_path, os.X_OK):
+            issues.append(f"launcher is not executable: {launcher_path.name}")
+        launcher_text = launcher_path.read_text(encoding="utf-8", errors="ignore")
+        if required_module and required_module not in launcher_text:
+            issues.append(
+                f"launcher does not declare required VASP module {required_module}"
+            )
+
+    runtime = [name for name in OPT_RUNTIME_FILES if (run / name).exists()]
+    if runtime:
+        issues.append("runtime outputs present: " + ", ".join(runtime))
+    return {
+        "status": "PASS" if not issues else "FAIL",
+        "relative_path": relative.as_posix() or ".",
+        "directory": str(run),
+        "elements": elements,
+        "ions": selective["ions"] if selective else None,
+        "frozen": selective["frozen"] if selective else None,
+        "mobile": selective["mobile"] if selective else None,
+        "ibrion": ibrion,
+        "isif": parsed.get("ISIF"),
+        "nsw": nsw,
+        "ispin": parsed.get("ISPIN"),
+        "launcher": launcher_path.name if launcher_path else None,
+        "required_module": required_module,
+        "sha256": hashes,
+        "source": dict(source or {}),
+        "issues": issues,
+        "notes": notes,
+    }
+
+
+def _write_opt_audit(
+    root: Path,
+    rows: list[dict[str, Any]],
+    *,
+    source_manifest: Path | None,
+    potcar_command: str,
+    required_module: str | None,
+    excluded_prefixes: Iterable[str] = (),
+) -> dict[str, Any]:
+    status = "PASS" if rows and all(row["status"] == "PASS" for row in rows) else "FAIL"
+    source_manifest_sha256 = _sha256_file(source_manifest) if source_manifest else None
+    manifest_payload = {
+        "format": "interfaceforge-opt-manifest",
+        "schema_version": 1,
+        "root": str(root),
+        "source_manifest": str(source_manifest) if source_manifest else None,
+        "source_manifest_sha256": source_manifest_sha256,
+        "potcar_command": potcar_command,
+        "required_module": required_module,
+        "excluded_prefixes": list(excluded_prefixes),
+        "runs": [
+            {
+                "relative_path": row["relative_path"],
+                "directory": row["directory"],
+                "launcher": row["launcher"],
+                "sha256": row["sha256"],
+                "source": row["source"],
+            }
+            for row in rows
+        ],
+    }
+    audit_payload = {
+        "format": "interfaceforge-opt-audit",
+        "schema_version": 1,
+        "status": status,
+        "root": str(root),
+        "source_manifest": str(source_manifest) if source_manifest else None,
+        "source_manifest_sha256": source_manifest_sha256,
+        "required_module": required_module,
+        "excluded_prefixes": list(excluded_prefixes),
+        "runs": rows,
+    }
+    manifest_json = root / "opt_manifest.json"
+    audit_json = root / "opt_audit.json"
+    audit_tsv = root / "opt_audit.tsv"
+    audit_md = root / "opt_audit.md"
+    manifest_json.write_text(
+        json.dumps(manifest_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    audit_json.write_text(
+        json.dumps(audit_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    with audit_tsv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=(
+                "status",
+                "relative_path",
+                "elements",
+                "ions",
+                "frozen",
+                "mobile",
+                "ibrion",
+                "isif",
+                "nsw",
+                "ispin",
+                "launcher",
+                "issues",
+                "notes",
+            ),
+            delimiter="\t",
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    **{key: row.get(key, "") for key in writer.fieldnames},
+                    "elements": " ".join(row["elements"]),
+                    "issues": "; ".join(row["issues"]),
+                    "notes": "; ".join(row["notes"]),
+                }
+            )
+    markdown = [
+        "# VASP OPT batch audit",
+        "",
+        f"**Status:** {status}",
+        "",
+        f"- Root: `{root}`",
+        f"- Source manifest: `{source_manifest or 'recursive POSCAR discovery'}`",
+        f"- Runs: {len(rows)}",
+        f"- Required VASP module: `{required_module or 'not enforced'}`",
+        "- Existing nonempty POTCAR files: preserved",
+        "- Submission: **not performed**",
+        "",
+        "| Status | Run | Species | Ions | Frozen/mobile | IBRION/ISIF/NSW | Launcher | Issues | Notes |",
+        "|---|---|---|---:|---:|---|---|---|---|",
+    ]
+    for row in rows:
+        markdown.append(
+            "| "
+            + " | ".join(
+                (
+                    row["status"],
+                    row["relative_path"],
+                    " ".join(row["elements"]) or "—",
+                    str(row["ions"] or "—"),
+                    f"{row['frozen']}/{row['mobile']}",
+                    f"{row['ibrion']}/{row['isif']}/{row['nsw']}",
+                    row["launcher"] or "—",
+                    "; ".join(row["issues"]) or "—",
+                    "; ".join(row["notes"]) or "—",
+                )
+            )
+            + " |"
+        )
+    audit_md.write_text("\n".join(markdown) + "\n", encoding="utf-8")
+    return {
+        "status": status,
+        "runs": len(rows),
+        "passed": sum(row["status"] == "PASS" for row in rows),
+        "failed": sum(row["status"] == "FAIL" for row in rows),
+        "manifest": str(manifest_json),
+        "json": str(audit_json),
+        "tsv": str(audit_tsv),
+        "markdown": str(audit_md),
+    }
+
+
+def prepare_opt_tree(
+    root: str | Path,
+    *,
+    manifest: str | Path | None = None,
+    launcher_template: str | Path | None = None,
+    launcher: str | None = None,
+    potcar_command: str = "POTCAR_gen",
+    required_module: str | None = OPT_DEFAULT_VASP_MODULE,
+    dry_run: bool = False,
+    audit_only: bool = False,
+    force_launcher: bool = False,
+    exclude_prefixes: Iterable[str] = (),
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Prepare and audit a notebook-generated slab-optimization tree.
+
+    Existing nonempty POTCAR files are immutable inputs. Missing POTCAR files are
+    generated by running ``potcar_command`` with each leaf as its working directory.
+    """
+
+    if dry_run and audit_only:
+        raise SafetyError("--dry-run and --audit-only are mutually exclusive")
+    emit = progress or (lambda _message: None)
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.is_dir():
+        raise FileNotFoundError(root_path)
+    normalized_excludes = [value.strip().strip("/") for value in exclude_prefixes if value.strip("/")]
+    if audit_only and (root_path / "opt_manifest.json").is_file():
+        previous = json.loads((root_path / "opt_manifest.json").read_text(encoding="utf-8"))
+        if manifest is None:
+            manifest = previous.get("source_manifest")
+        if not normalized_excludes:
+            normalized_excludes = list(previous.get("excluded_prefixes") or [])
+    plans, manifest_path = _discover_opt_runs(root_path, manifest)
+    if normalized_excludes:
+        plans = [
+            plan
+            for plan in plans
+            if not any(
+                (plan["relative"].as_posix() or ".") == prefix
+                or (plan["relative"].as_posix() or ".").startswith(prefix + "/")
+                for prefix in normalized_excludes
+            )
+        ]
+        if not plans:
+            raise SafetyError("Every discovered OPT run was removed by --exclude-prefix")
+    template_path = Path(launcher_template).expanduser().resolve() if launcher_template else None
+    if template_path is not None and not template_path.is_file():
+        raise FileNotFoundError(template_path)
+    command = shlex.split(potcar_command)
+    if not command:
+        raise SafetyError("POTCAR command is empty")
+
+    preview = []
+    for plan in plans:
+        run: Path = plan["run"]
+        potcar_exists = (run / "POTCAR").is_file() and (run / "POTCAR").stat().st_size > 0
+        target_launcher = run / template_path.name if template_path else None
+        preview.append(
+            {
+                "relative_path": plan["relative"].as_posix() or ".",
+                "directory": str(run),
+                "potcar": "preserve" if potcar_exists else "generate",
+                "launcher": (
+                    f"install {template_path.name}"
+                    if target_launcher is not None and not target_launcher.exists()
+                    else "preserve"
+                ),
+            }
+        )
+    if dry_run:
+        return {
+            "mode": "dry-run",
+            "root": str(root_path),
+            "source_manifest": str(manifest_path) if manifest_path else None,
+            "runs": len(plans),
+            "potcar_command": potcar_command,
+            "excluded_prefixes": normalized_excludes,
+            "planned": preview,
+            "submission": "not performed",
+        }
+
+    preparation_issues: dict[str, list[str]] = {}
+    for index, plan in enumerate(plans, start=1):
+        run = plan["run"]
+        relative = plan["relative"].as_posix() or "."
+        preparation_issues[relative] = []
+        emit(f"[{index}/{len(plans)}] preparing {relative}")
+        if not run.is_dir():
+            preparation_issues[relative].append("run directory does not exist")
+            continue
+        if template_path is not None and not audit_only:
+            target = run / template_path.name
+            if target.exists() and target.stat().st_size:
+                if _sha256_file(target) != _sha256_file(template_path):
+                    if not force_launcher:
+                        preparation_issues[relative].append(
+                            f"existing {target.name} differs from launcher template; use --force-launcher intentionally"
+                        )
+                    else:
+                        shutil.copy2(template_path, target)
+            else:
+                shutil.copy2(template_path, target)
+        potcar = run / "POTCAR"
+        if (not potcar.is_file() or not potcar.stat().st_size) and not audit_only:
+            emit(f"    running {potcar_command} in {run}")
+            try:
+                result = subprocess.run(
+                    command,
+                    cwd=run,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            except OSError as exc:
+                preparation_issues[relative].append(f"POTCAR generator failed to start: {exc}")
+            else:
+                if result.returncode != 0:
+                    detail = (result.stderr or result.stdout).strip()
+                    preparation_issues[relative].append(
+                        f"POTCAR generator exited {result.returncode}: {detail}"
+                    )
+                elif not potcar.is_file() or not potcar.stat().st_size:
+                    preparation_issues[relative].append(
+                        "POTCAR generator reported success but did not create a nonempty POTCAR"
+                    )
+
+    rows = [
+        _audit_opt_run(
+            plan["run"],
+            plan["relative"],
+            launcher=launcher,
+            required_module=required_module,
+            preparation_issues=preparation_issues[plan["relative"].as_posix() or "."],
+            source=plan["source"],
+        )
+        for plan in plans
+    ]
+    audit = _write_opt_audit(
+        root_path,
+        rows,
+        source_manifest=manifest_path,
+        potcar_command=potcar_command,
+        required_module=required_module,
+        excluded_prefixes=normalized_excludes,
+    )
+    if audit["status"] != "PASS":
+        raise SafetyError(
+            f"OPT audit FAILED ({audit['failed']}/{audit['runs']} runs); inspect {audit['markdown']}"
+        )
+    return {
+        "mode": "audited" if audit_only else "prepared-and-audited",
+        "root": str(root_path),
+        "source_manifest": str(manifest_path) if manifest_path else None,
+        "runs": len(rows),
+        "potcar_command": potcar_command,
+        "required_module": required_module,
+        "excluded_prefixes": normalized_excludes,
+        "audit": audit,
+        "submission": "not performed; run iface vasp opt-launch after review",
+    }
+
+
+def _load_opt_launch_root(
+    root: Path,
+    launcher: str | None,
+    emit: Callable[[str], None],
+) -> list[dict[str, Any]]:
+    manifest_path = root / "opt_manifest.json"
+    audit_path = root / "opt_audit.json"
+    if not manifest_path.is_file() or not audit_path.is_file():
+        raise SafetyError(f"{root} is missing opt_manifest.json or opt_audit.json; run opt-prepare first")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    if audit.get("status") != "PASS":
+        raise SafetyError(f"{audit_path} is not PASS; refusing to launch")
+    previous = root / "opt_launch.json"
+    if previous.is_file():
+        payload = json.loads(previous.read_text(encoding="utf-8"))
+        submitted = [row for row in payload.get("runs", []) if row.get("status") == "SUBMITTED"]
+        if submitted:
+            raise SafetyError(
+                f"{root} already records {len(submitted)} submitted OPT job(s); refusing a duplicate launch"
+            )
+    manifest_rows = {row["relative_path"]: row for row in manifest.get("runs", [])}
+    audit_rows = {row["relative_path"]: row for row in audit.get("runs", [])}
+    if not manifest_rows or set(manifest_rows) != set(audit_rows):
+        raise SafetyError(f"OPT manifest/audit run sets do not match in {root}")
+    planned = []
+    for relative in sorted(manifest_rows):
+        audit_row = audit_rows[relative]
+        if audit_row.get("status") != "PASS":
+            raise SafetyError(f"OPT audit row is not PASS: {relative}")
+        run = (root / relative).resolve() if relative != "." else root
+        if not run.is_relative_to(root):
+            raise SafetyError(f"Unsafe OPT path outside launch root: {run}")
+        expected_hashes = manifest_rows[relative].get("sha256") or {}
+        if expected_hashes != (audit_row.get("sha256") or {}):
+            raise SafetyError(
+                f"OPT manifest/audit hashes disagree for {relative}; rerun opt-prepare --audit-only"
+            )
+        for name, expected in expected_hashes.items():
+            path = run / name
+            if not path.is_file() or _sha256_file(path) != expected:
+                raise SafetyError(f"{path} changed after the PASS audit; rerun opt-prepare --audit-only")
+        runtime = [name for name in OPT_RUNTIME_FILES if (run / name).exists()]
+        if runtime:
+            raise SafetyError(
+                f"{run} contains runtime outputs ({', '.join(runtime)}); refusing a possible duplicate launch"
+            )
+        script = resolve_launcher(run, launcher or manifest_rows[relative].get("launcher"))
+        if script.name not in expected_hashes:
+            raise SafetyError(f"Launcher {script.name} was not part of the PASS audit for {relative}")
+        emit(f"preflight OK: {relative} (launcher={script.name})")
+        planned.append(
+            {
+                "root": str(root),
+                "relative_path": relative,
+                "directory": str(run),
+                "launcher": script.name,
+            }
+        )
+    return planned
+
+
+def launch_opt_runs(
+    roots: Iterable[str | Path],
+    *,
+    execute: bool = False,
+    launcher: str | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Preflight every audited OPT leaf before optionally submitting any job."""
+
+    emit = progress or (lambda _message: None)
+    resolved_roots = [Path(value).expanduser().resolve() for value in roots]
+    if not resolved_roots:
+        raise SafetyError("At least one OPT root is required")
+    planned: list[dict[str, Any]] = []
+    for root in resolved_roots:
+        if not root.is_dir():
+            raise FileNotFoundError(root)
+        planned.extend(_load_opt_launch_root(root, launcher, emit))
+    if not planned:
+        raise SafetyError("No PASS-audited OPT runs were found")
+    if not execute:
+        return {
+            "mode": "dry-run",
+            "roots": [str(root) for root in resolved_roots],
+            "runs": len(planned),
+            "preflight": "PASS",
+            "submission": "not performed; pass --execute after review",
+            "planned": planned,
+        }
+
+    rows: list[dict[str, Any]] = []
+    failure: str | None = None
+    for index, item in enumerate(planned, start=1):
+        emit(f"[{index}/{len(planned)}] sbatch {item['relative_path']}")
+        try:
+            job_id = submit_run(item["directory"], item["launcher"])
+            rows.append({**item, "status": "SUBMITTED", "job_id": job_id, "detail": ""})
+        except Exception as exc:
+            failure = f"{item['directory']}: {exc}"
+            rows.append({**item, "status": "FAILED", "job_id": "", "detail": str(exc)})
+            break
+
+    reports: list[str] = []
+    for root in resolved_roots:
+        root_rows = [row for row in rows if row["root"] == str(root)]
+        status = (
+            "FAILED"
+            if any(row["status"] == "FAILED" for row in root_rows)
+            else "SUBMITTED"
+            if root_rows
+            else "NOT_SUBMITTED"
+        )
+        payload = {
+            "format": "interfaceforge-opt-launch",
+            "schema_version": 1,
+            "status": status,
+            "root": str(root),
+            "preflight": "PASS",
+            "runs": root_rows,
+        }
+        json_path = root / "opt_launch.json"
+        tsv_path = root / "opt_launch.tsv"
+        json_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with tsv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=("status", "job_id", "relative_path", "directory", "launcher", "detail"),
+                delimiter="\t",
+            )
+            writer.writeheader()
+            writer.writerows(
+                {key: row.get(key, "") for key in writer.fieldnames} for row in root_rows
+            )
+        reports.extend((str(json_path), str(tsv_path)))
+    if failure is not None:
+        raise SafetyError(
+            f"OPT launch stopped after a submission failure ({failure}); review {', '.join(reports)}"
+        )
+    return {
+        "mode": "submitted",
+        "roots": [str(root) for root in resolved_roots],
+        "runs": len(rows),
+        "preflight": "PASS",
+        "submitted": len(rows),
+        "reports": reports,
         "jobs": rows,
     }
 

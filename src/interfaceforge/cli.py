@@ -67,9 +67,11 @@ from .vasp import (
     archive_mlff_models,
     assemble_potcar,
     ensure_run_potcar,
+    launch_opt_runs,
     launch_step2_runs,
     package_outputs,
     prepare_band_run,
+    prepare_opt_tree,
     prepare_recovery,
     prepare_standard_restart,
     prepare_step1_series,
@@ -550,6 +552,37 @@ def cmd_vasp_submit(args: argparse.Namespace) -> int:
                 potcar_mapping=args.potcar_map,
             ),
         }
+    )
+    return 0
+
+
+def cmd_vasp_opt_prepare(args: argparse.Namespace) -> int:
+    _json(
+        prepare_opt_tree(
+            args.root,
+            manifest=args.manifest,
+            launcher_template=args.launcher_template,
+            launcher=args.launcher,
+            potcar_command=args.potcar_command,
+            required_module=args.require_module,
+            dry_run=args.dry_run,
+            audit_only=args.audit_only,
+            force_launcher=args.force_launcher,
+            exclude_prefixes=args.exclude_prefix,
+            progress=print,
+        )
+    )
+    return 0
+
+
+def cmd_vasp_opt_launch(args: argparse.Namespace) -> int:
+    _json(
+        launch_opt_runs(
+            args.roots,
+            execute=args.execute,
+            launcher=args.launcher,
+            progress=print,
+        )
     )
     return 0
 
@@ -1289,6 +1322,67 @@ def build_parser() -> argparse.ArgumentParser:
     restart.add_argument("--keep-poscar", action="store_true")
     restart.add_argument("--clean-electronic", action="store_true")
     restart.set_defaults(func=cmd_vasp_restart)
+    opt_prepare = vasp_commands.add_parser(
+        "opt-prepare",
+        help="Prepare and audit a notebook-generated VASP slab-optimization batch",
+    )
+    opt_prepare.add_argument("root", help="Generated OPT root containing leaf run directories")
+    opt_prepare.add_argument(
+        "--manifest",
+        help="CSV with a path column (for example generated/manifest_batch.csv); "
+        "without it, discover POSCAR leaves recursively",
+    )
+    opt_prepare.add_argument(
+        "--launcher-template",
+        help="Launcher copied into every selected leaf (existing differing launchers require --force-launcher)",
+    )
+    opt_prepare.add_argument(
+        "--exclude-prefix",
+        action="append",
+        default=[],
+        help="Exclude a manifest path prefix such as OH0; may be repeated and is remembered by --audit-only",
+    )
+    opt_prepare.add_argument(
+        "--launcher",
+        help="Launcher name to audit (default: prefer runvasp.sh, then run.slurm)",
+    )
+    opt_prepare.add_argument(
+        "--potcar-command",
+        default="POTCAR_gen",
+        help="Command run inside leaves with a missing/empty POTCAR (default: POTCAR_gen)",
+    )
+    opt_prepare.add_argument(
+        "--require-module",
+        default="vasp6/6.5.1-cpu",
+        help="Exact VASP module string required in every launcher; pass an empty string to disable",
+    )
+    opt_prepare.add_argument("--dry-run", action="store_true", help="Preview without writing or running POTCAR_gen")
+    opt_prepare.add_argument(
+        "--audit-only",
+        action="store_true",
+        help="Re-audit existing inputs without copying launchers or running POTCAR_gen",
+    )
+    opt_prepare.add_argument(
+        "--force-launcher",
+        action="store_true",
+        help="Replace a differing leaf launcher with --launcher-template",
+    )
+    opt_prepare.set_defaults(func=cmd_vasp_opt_prepare)
+    opt_launch = vasp_commands.add_parser(
+        "opt-launch",
+        help="Launch all unchanged PASS-audited OPT leaves (dry-run by default)",
+    )
+    opt_launch.add_argument("roots", nargs="+", help="Prepared OPT root(s)")
+    opt_launch.add_argument(
+        "--launcher",
+        help="Audited launcher name (default: use the launcher recorded by opt-prepare)",
+    )
+    opt_launch.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually call sbatch; without this flag only print the fully verified plan",
+    )
+    opt_launch.set_defaults(func=cmd_vasp_opt_launch)
     step2 = vasp_commands.add_parser(
         "step2-prepare",
         aliases=["step2-series"],

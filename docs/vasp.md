@@ -7,6 +7,75 @@
 InterfaceForge separates three concerns: generating new stages, auditing
 existing runs, and mutating a failed/finished run for recovery.
 
+## Audit and launch a generated OPT batch
+
+`iface vasp opt-prepare` turns an existing tree of slab-relaxation inputs into
+one immutable, launchable batch. It is designed for generators such as
+`notebooks/nio_m110_hydroxylation`, where every selected leaf already contains
+`POSCAR`, `INCAR`, and `KPOINTS` and LONI's local `POTCAR_gen` must run inside
+that directory.
+
+Use the notebook CSV as the explicit allowlist. This is preferable to recursive
+discovery when some cases (for example OH-free pilot runs) are being submitted
+separately:
+
+```bash
+# No writes and no POTCAR generation.
+iface vasp opt-prepare notebooks/nio_m110_hydroxylation/generated \
+  --manifest notebooks/nio_m110_hydroxylation/generated/manifest_batch.csv \
+  --exclude-prefix OH0 \
+  --launcher-template launch_scripts/runvasp.sh \
+  --dry-run
+
+# Copy the launcher, run POTCAR_gen only where POTCAR is missing, then audit.
+iface vasp opt-prepare notebooks/nio_m110_hydroxylation/generated \
+  --manifest notebooks/nio_m110_hydroxylation/generated/manifest_batch.csv \
+  --exclude-prefix OH0 \
+  --launcher-template launch_scripts/runvasp.sh
+```
+
+Every existing nonempty POTCAR is preserved byte-for-byte. For a missing or
+empty POTCAR, the default command is exactly `POTCAR_gen`, invoked without a
+shell and with the leaf as its working directory. Override the executable or
+arguments with `--potcar-command`, or use `--audit-only` to prohibit both
+POTCAR generation and launcher copying.
+
+`--exclude-prefix OH0` removes the pristine branch even though it is present
+in `manifest_batch.csv`. The selection is recorded in `opt_manifest.json`, so
+a later `opt-prepare ROOT --audit-only` automatically reuses both the source
+CSV and its exclusions.
+
+The audit requires and records:
+
+- nonempty `INCAR`, `POSCAR`, `KPOINTS`, and `POTCAR`;
+- a fixed-cell ionic optimization (`IBRION` 1/2/3, `ISIF=2`, `NSW>0`);
+- `LDAUL`, `LDAUU`, and `LDAUJ` lengths matching the POSCAR species;
+- a full-length `MAGMOM` whenever `ISPIN=2`;
+- both frozen and mobile Selective Dynamics atoms;
+- coherent `LDIPOL` / `IDIPOL` / three-component `DIPOL` settings;
+- POTCAR/POSCAR species order when standard `VRHFIN` records are readable;
+- an executable launcher declaring the production `vasp6/6.5.1-cpu` module by default;
+- absence of VASP runtime outputs that would indicate a started calculation.
+
+It writes `opt_manifest.json` and `opt_audit.{json,tsv,md}` at the selected
+root and never submits. Review `opt_audit.md`, then preflight the complete
+batch again:
+
+```bash
+iface vasp opt-launch notebooks/nio_m110_hydroxylation/generated
+```
+
+The default is a dry run. Only the explicit execution form calls `sbatch`:
+
+```bash
+iface vasp opt-launch notebooks/nio_m110_hydroxylation/generated --execute
+```
+
+`opt-launch` re-hashes every audited input and launcher, rejects runtime
+outputs, and preflights every selected leaf before submitting the first job.
+It writes `opt_launch.{json,tsv}` with Slurm job IDs and blocks another launch
+when submitted jobs are already recorded.
+
 ## Promote an OPT tree into a Step1 preheat tree
 
 `iface vasp step1-prepare <OPT_root>` recursively discovers finished

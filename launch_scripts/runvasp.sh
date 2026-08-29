@@ -9,9 +9,9 @@
 #SBATCH -o vasp.cpu.%j.out
 
 module purge
-# New work defaults to 6.6.1. For an old/reproduction campaign submit with,
-# e.g., sbatch --export=ALL,IFACE_VASP_MODULE=vasp6/6.5.1-cpu runvasp.sh
-VASP_MODULE="${IFACE_VASP_MODULE:-vasp6/6.6.1-cpu}"
+# Production work remains on 6.5.1 while 6.6.1 licensing/runtime is evaluated.
+# For an explicit test: sbatch --export=ALL,IFACE_VASP_MODULE=vasp6/6.6.1-cpu runvasp.sh
+VASP_MODULE="${IFACE_VASP_MODULE:-vasp6/6.5.1-cpu}"
 module load "$VASP_MODULE"
 SECONDS=0
 export SINGULARITYENV_OMP_NUM_THREADS=1
