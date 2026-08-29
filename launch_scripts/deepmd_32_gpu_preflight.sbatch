@@ -68,18 +68,21 @@ echo "Checking DeePMD 3.2 PyTorch commands..."
 "$DP_BIN" --pt model-devi --help >/dev/null
 
 echo
-echo "Optional LAMMPS/DeePMD inventory:"
+echo "Incidental PATH LAMMPS inventory (not a compatibility test):"
 LMP_BIN="$(command -v lmp || command -v lmp_mpi || command -v lmp_serial || true)"
 if [[ -n "$LMP_BIN" ]]; then
     echo "LAMMPS executable: $LMP_BIN"
     if "$LMP_BIN" -h 2>&1 | grep -qi deepmd; then
         echo "LAMMPS reports DeePMD pair-style support."
     else
-        echo "WARNING: LAMMPS was found but its help does not report DeePMD support."
+        echo "NOTE: this executable does not report DeePMD support."
     fi
 else
     echo "LAMMPS executable not supplied by this training module (not a preflight failure)."
 fi
+
+echo "Use deepmd_lammps_30_gpu_audit.sbatch to load and test LONI's dedicated"
+echo "LAMMPS/DeePMD 3.0 module."
 
 echo
 echo "DeepMD-kit 3.2 PyTorch GPU preflight passed."

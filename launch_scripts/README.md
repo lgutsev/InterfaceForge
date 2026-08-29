@@ -21,6 +21,11 @@ environment paths, wall time, job name, executable, and resource counts before r
   `deepmd-kit/r9.3-deepmd3.2.0.b.0-gpu` module, DeePMD 3.2 PyTorch commands,
   CUDA visibility, and optional LAMMPS DeePMD support. It does not request
   memory manually.
+- `deepmd_lammps_30_gpu_audit.sbatch`: audits LONI's existing
+  `lammps/29Aug2024-r8.0-deepmd3.0.0-gpu` module without being fooled by an
+  unrelated user-level `lmp`. With a model-list file and one canonical DeePMD
+  system, it performs a one-step inference test and verifies committee model
+  deviation.
 - `restart_daughter_jobs.sh`: one-level campaign helper for immediate VASP daughter
   directories. It can run either `Restart <daughter>` or `TotalRestart <daughter>`,
   copies root `INCAR`, `KPOINTS`, and `runvasp.sh`, verifies the expected restart

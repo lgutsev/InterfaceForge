@@ -94,3 +94,28 @@ sbatch models/deepmd/run_evaluate.slurm
 Wait for each preceding stage to succeed. In particular, do not submit the full
 ensemble until the smoke job has trained, frozen, and tested its short DPA-2
 model. The ensemble manifest records the exact scheduler profile and module.
+
+## Auditing the older LAMMPS/DeePMD module
+
+LONI also supplies `lammps/29Aug2024-r8.0-deepmd3.0.0-gpu`, which has worked
+with DPA-1 models. Audit its compiled pair style independently:
+
+```bash
+sbatch /path/to/InterfaceForge/launch_scripts/deepmd_lammps_30_gpu_audit.sbatch
+```
+
+This confirms that the module exposes `pair_style deepmd`, but it cannot prove
+that a model frozen by DeePMD 3.2 is readable by the older 3.0 runtime. After
+the four-model ensemble is frozen, place one absolute model path per line in
+`committee-models.txt`, select a canonical test system containing `set.000`,
+and submit:
+
+```bash
+sbatch --export=ALL,DEEPMD_MODELS_FILE=/absolute/committee-models.txt,DEEPMD_SYSTEM=/absolute/test/system \
+  /path/to/InterfaceForge/launch_scripts/deepmd_lammps_30_gpu_audit.sbatch
+```
+
+The audit converts the first canonical frame into a temporary LAMMPS data
+file, loads every committee model through `pair_style deepmd`, runs one step,
+and requires model-deviation output. A failure here is a runtime compatibility
+failure even when `dp test` under the 3.2 training module succeeds.
