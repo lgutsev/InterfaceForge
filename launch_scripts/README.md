@@ -10,11 +10,13 @@ environment paths, wall time, job name, executable, and resource counts before r
 - `runvasp.sh`: two-node, 128-rank VASP Gamma launcher for `workq`.
 - `runvasp_bigmem.sh`: two-node, 128-rank VASP Gamma launcher for `bigmem`.
 - `run_mace_gpu2_nomask_v2.sh`: original two-GPU TiN/SiN MACE training launcher.
-- `mace_train_committee.sh`: isolated additional-seed launcher that preserves the
-  original model and writes each new committee member to a seed-specific directory.
+- `mace_train_committee.sh`: isolated, fixed-split launcher that writes each
+  committee member to a seed-specific directory.
   It uses conservative batches (`8` training, `4` validation), expandable CUDA
   segments, and records five-second GPU telemetry in each seed directory as
-  `gpu_usage_<jobid>.log`.
+  `gpu_usage_<jobid>.log`. Canonical InterfaceForge labels default to
+  `REF_energy` and `REF_forces`; legacy datasets can override them through
+  `MACE_ENERGY_KEY` and `MACE_FORCES_KEY`.
 - `restart_daughter_jobs.sh`: one-level campaign helper for immediate VASP daughter
   directories. It can run either `Restart <daughter>` or `TotalRestart <daughter>`,
   copies root `INCAR`, `KPOINTS`, and `runvasp.sh`, verifies the expected restart
@@ -30,17 +32,28 @@ environment paths, wall time, job name, executable, and resource counts before r
 - `collect_leaf_deepmd.py`: collects the same leaf trajectories into native DeePMD
   systems while physically retaining the source directory hierarchy.
 
-Submit the three additional committee members from the directory containing
+Submit four independent committee members from the directory containing
 `train.extxyz`, `valid.extxyz`, and `test.extxyz`:
 
 ```bash
-for seed in 211 307 419; do
+for seed in 11 23 37 53; do
     sbatch --export=ALL,MACE_SEED="$seed" mace_train_committee.sh
 done
 ```
 
-The original `mace_model/TiN_SiN_mace_stagetwo.model` is retained as the first
-committee member. New runs are stored under `mace_committee/seed_<seed>/`.
+Runs are stored under `mace_committee/seed_<seed>/`. The default model prefix is
+`SiN_TiN_TiO_periodic_mace`; set `MACE_MODEL_PREFIX` to use another descriptive
+prefix. For an older extxyz dataset whose labels are named `energy` and `forces`,
+submit with:
+
+```bash
+sbatch \
+    --export=ALL,MACE_SEED=11,MACE_ENERGY_KEY=energy,MACE_FORCES_KEY=forces \
+    mace_train_committee.sh
+```
+
+The preflight reads reference labels directly from `atoms.info` and
+`atoms.arrays`. It does not require an ASE calculator to be attached to frames.
 
 ## Restart immediate daughter calculations
 

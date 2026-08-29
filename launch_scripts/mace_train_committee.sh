@@ -10,14 +10,10 @@
 #SBATCH -o mace.committee.%j.out
 #SBATCH -e mace.committee.%j.err
 
-# Train one additional member of the TiN/SiN MACE committee.
+# Train one member of a MACE committee from a fixed canonical data split.
+# Submit four independent seeds as separate Slurm jobs:
 #
-# The original model is deliberately left untouched at:
-#   mace_model/TiN_SiN_mace_stagetwo.model
-#
-# Submit three new seeds as separate Slurm jobs:
-#
-#   for seed in 211 307 419; do
+#   for seed in 11 23 37 53; do
 #       sbatch --export=ALL,MACE_SEED="$seed" mace_train_committee.sh
 #   done
 
@@ -33,7 +29,18 @@ if [[ ! "$SEED" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-MODEL_NAME="TiN_SiN_mace_seed${SEED}"
+MODEL_PREFIX="${MACE_MODEL_PREFIX:-SiN_TiN_TiO_periodic_mace}"
+ENERGY_KEY="${MACE_ENERGY_KEY:-REF_energy}"
+FORCES_KEY="${MACE_FORCES_KEY:-REF_forces}"
+
+for required_value in MODEL_PREFIX ENERGY_KEY FORCES_KEY; do
+    if [[ -z "${!required_value}" ]]; then
+        echo "ERROR: $required_value must not be empty."
+        exit 1
+    fi
+done
+
+MODEL_NAME="${MODEL_PREFIX}_seed${SEED}"
 RUN_DIR="$BASE_DIR/mace_committee/seed_${SEED}"
 MODEL_DIR="$RUN_DIR/mace_model"
 CHECKPOINTS_DIR="$RUN_DIR/checkpoints"
@@ -123,20 +130,28 @@ echo "Committee member:"
 echo "  seed:       $SEED"
 echo "  model name: $MODEL_NAME"
 echo "  run dir:    $RUN_DIR"
+echo "  energy key: $ENERGY_KEY"
+echo "  forces key: $FORCES_KEY"
 echo
 echo "Training files:"
 ls -lh "$TRAIN_FILE" "$VALID_FILE" "$TEST_FILE"
 echo
 
-ENERGY_KEY="energy"
-FORCES_KEY="forces"
-
 echo "Checking first-frame keys..."
 
-python - <<PY
+DATASET_FILES="$TRAIN_FILE:$VALID_FILE:$TEST_FILE" \
+ENERGY_KEY="$ENERGY_KEY" \
+FORCES_KEY="$FORCES_KEY" \
+python - <<'PY'
+import os
+
+import numpy as np
 from ase.io import read
 
-for fname in ["$TRAIN_FILE", "$VALID_FILE", "$TEST_FILE"]:
+energy_key = os.environ["ENERGY_KEY"]
+forces_key = os.environ["FORCES_KEY"]
+
+for fname in os.environ["DATASET_FILES"].split(os.pathsep):
     atoms = read(fname, index=0)
 
     print()
@@ -144,15 +159,30 @@ for fname in ["$TRAIN_FILE", "$VALID_FILE", "$TEST_FILE"]:
     print("  info keys:  ", sorted(atoms.info.keys()))
     print("  array keys: ", sorted(atoms.arrays.keys()))
 
-    if atoms.calc is not None:
-        print("  calc keys:  ", sorted(atoms.calc.results.keys()))
-    else:
-        print("  calc keys:   None")
+    if energy_key not in atoms.info:
+        raise RuntimeError(
+            f"{fname}: missing energy label {energy_key!r} in atoms.info"
+        )
+    if forces_key not in atoms.arrays:
+        raise RuntimeError(
+            f"{fname}: missing force labels {forces_key!r} in atoms.arrays"
+        )
 
-    energy = atoms.get_potential_energy()
-    forces = atoms.get_forces()
+    energy = np.asarray(atoms.info[energy_key])
+    forces = np.asarray(atoms.arrays[forces_key])
 
-    print("  energy:     ", energy)
+    if energy.size != 1 or not np.isfinite(energy).all():
+        raise RuntimeError(
+            f"{fname}: {energy_key!r} must be one finite scalar; "
+            f"got shape {energy.shape}"
+        )
+    if forces.shape != (len(atoms), 3) or not np.isfinite(forces).all():
+        raise RuntimeError(
+            f"{fname}: {forces_key!r} must be finite with shape "
+            f"({len(atoms)}, 3); got {forces.shape}"
+        )
+
+    print("  energy:     ", energy.item())
     print("  forces:     ", forces.shape)
 PY
 
