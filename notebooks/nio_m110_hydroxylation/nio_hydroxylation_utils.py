@@ -683,6 +683,18 @@ def _contact_cutoff(ligand_symbol: str, slab_symbol: str,
     return float(CONTACT_MINIMA.get(key, default_min))
 
 
+def _contact_cutoff_matrix(ligand_symbols: Sequence[str], slab_symbols: Sequence[str],
+                           default_min: float) -> np.ndarray:
+    """Build the invariant pair-cutoff matrix once per docking search."""
+    return np.array(
+        [
+            [_contact_cutoff(ls, ss, default_min) for ss in slab_symbols]
+            for ls in ligand_symbols
+        ],
+        dtype=float,
+    )
+
+
 def _chemical_contact_diagnostic(
     ligand_positions: np.ndarray,
     ligand_symbols: Sequence[str],
@@ -691,21 +703,21 @@ def _chemical_contact_diagnostic(
     cell,
     *,
     default_min: float = DEFAULT_CONTACT_MIN,
+    cutoffs: np.ndarray | None = None,
+    cell_inverse: np.ndarray | None = None,
 ) -> ContactDiagnostic:
     """Evaluate every ligand--slab pair using species-aware rejection floors."""
-    delta = mic_delta(
-        np.asarray(ligand_positions)[:, None, :],
-        np.asarray(slab_positions)[None, :, :],
-        cell,
+    cell_array = _cell_array(cell)
+    inverse = np.linalg.inv(cell_array) if cell_inverse is None else cell_inverse
+    delta = (
+        np.asarray(ligand_positions)[:, None, :]
+        - np.asarray(slab_positions)[None, :, :]
     )
-    distances = np.linalg.norm(delta, axis=-1)
-    cutoffs = np.array(
-        [
-            [_contact_cutoff(ls, ss, default_min) for ss in slab_symbols]
-            for ls in ligand_symbols
-        ],
-        dtype=float,
-    )
+    fractional = delta @ inverse
+    fractional[..., :2] -= np.round(fractional[..., :2])
+    distances = np.linalg.norm(fractional @ cell_array, axis=-1)
+    if cutoffs is None:
+        cutoffs = _contact_cutoff_matrix(ligand_symbols, slab_symbols, default_min)
     margins = distances - cutoffs
     ligand_i, slab_i = np.unravel_index(int(np.argmin(margins)), margins.shape)
     margin = float(margins[ligand_i, slab_i])
@@ -782,13 +794,17 @@ def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateA
     slab_pos = built_surface.positions
     slab_symbols = built_surface.get_chemical_symbols()
     mol_symbols = mol.get_chemical_symbols()
+    contact_cutoffs = _contact_cutoff_matrix(
+        mol_symbols, slab_symbols, min_clearance
+    )
+    cell_inverse = np.linalg.inv(_cell_array(built_surface.cell))
     pivot = mol.positions[bind_o].copy()
     base = mol.positions.copy()
     best_positions = base
-    best_clearance = _min_gap(base, slab_pos, built_surface.cell)
     best_contact = _chemical_contact_diagnostic(
         base, mol_symbols, slab_pos, slab_symbols, built_surface.cell,
-        default_min=min_clearance,
+        default_min=min_clearance, cutoffs=contact_cutoffs,
+        cell_inverse=cell_inverse,
     )
     best_tilt = 0.0
 
@@ -797,29 +813,29 @@ def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateA
     for angle in np.arange(az_step, max_azimuth_adjust_deg + 0.1, az_step):
         azimuths.extend([float(angle), -float(angle)])
 
-    def consider(positions: np.ndarray, tilt: float) -> None:
-        nonlocal best_positions, best_clearance, best_contact, best_tilt
-        clearance = _min_gap(positions, slab_pos, built_surface.cell)
+    def consider(positions: np.ndarray, tilt: float) -> bool:
+        nonlocal best_positions, best_contact, best_tilt
         contact = _chemical_contact_diagnostic(
             positions, mol_symbols, slab_pos, slab_symbols, built_surface.cell,
-            default_min=min_clearance,
+            default_min=min_clearance, cutoffs=contact_cutoffs,
+            cell_inverse=cell_inverse,
         )
-        if (contact.min_margin, clearance) > (best_contact.min_margin, best_clearance):
+        if contact.min_margin > best_contact.min_margin:
             best_positions = positions
-            best_clearance = clearance
             best_contact = contact
             best_tilt = tilt
+        return contact.ok
 
     for azimuth in azimuths:
         rz = _rot_about_z(np.radians(azimuth))
         spun = (rz @ (base - pivot).T).T + pivot
-        consider(spun, 0.0)
-        if best_contact.ok:
+        if consider(spun, 0.0):
             break
 
     if not best_contact.ok:
         # Tilt directions span the in-plane circle; every rotation is about the
         # binding O, so its requested Ni--O distance remains exactly fixed.
+        found = False
         for tilt in np.arange(5.0, max_contact_tilt_deg + 0.1, 5.0):
             for axis_azimuth in np.arange(0.0, 360.0, 30.0):
                 phi = np.radians(axis_azimuth)
@@ -828,8 +844,12 @@ def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateA
                 for azimuth in azimuths:
                     rz = _rot_about_z(np.radians(azimuth))
                     candidate = (rt @ (rz @ (base - pivot).T)).T + pivot
-                    consider(candidate, float(tilt))
-            if best_contact.ok:
+                    if consider(candidate, float(tilt)):
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
                 break
 
     if not best_contact.ok:
