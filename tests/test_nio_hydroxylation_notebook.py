@@ -93,6 +93,15 @@ def test_default_ligand_grid_covers_every_bindable_surface_case(utils):
     assert not any(frac == 1.0 for frac, _pattern, _motif in grid)
 
 
+def test_full_oh_grid_is_separate_hydrogen_bond_mode(utils):
+    grid = utils.hydrogen_bonded_ligand_case_grid(
+        [0.0, 0.25, 0.50, 0.75, 1.0]
+    )
+
+    assert grid == [(1.0, "full", "capped"), (1.0, "full", "dissoc")]
+    assert utils.hydrogen_bonded_ligand_case_grid([0.0, 0.5]) == []
+
+
 def test_full_real_surface_has_one_lattice_proton_per_selected_ni(utils):
     slab = utils.load_structure(NOTEBOOK_DIR / "inputs" / "CONTCAR").repeat((2, 2, 1))
     surface = utils.analyse_surface(slab)
@@ -171,6 +180,48 @@ def test_steric_search_keeps_binding_oxygen_fixed(utils):
     assert contact_tilt == 0.0  # an azimuth adjustment is sufficient
     assert np.allclose(ligand[1], [5.0, 5.0, 7.05])
     assert utils._min_gap(ligand, slab.positions, slab.cell) >= 1.25
+    assert utils.chemical_contact_diagnostic(structure, len(slab)).ok
+
+
+def test_hbond_docking_is_linear_and_not_ni_o_chemisorption(utils):
+    slab = Atoms(
+        ["Ni", "O", "H"],
+        positions=[[5.0, 5.0, 5.0], [5.0, 5.0, 7.0], [5.0, 5.0, 7.97]],
+        cell=[15.0, 15.0, 25.0],
+        pbc=True,
+    )
+    molecule = Atoms(
+        ["P", "O", "O", "O", "C"],
+        positions=[
+            [0.0, 0.0, 1.5],
+            [0.0, 0.0, 0.0],
+            [-1.0, 0.0, 1.5],
+            [1.0, 0.0, 1.5],
+            [0.0, 0.0, 3.0],
+        ],
+    )
+    anchor = utils.PhosphonateAnchor(0, [1, 2, 3], [2, 3], [1], 4, [0])
+
+    structure, contact_tilt = utils.place_hbonded_ligand(
+        slab,
+        molecule,
+        anchor,
+        slab.positions[1],
+        slab.positions[2],
+        anchor_o_index=1,
+    )
+
+    acceptor = structure.positions[len(slab) + 1]
+    distance, angle = utils.hbond_geometry(
+        slab.positions[1], slab.positions[2], acceptor, slab.cell
+    )
+    ni_o = np.linalg.norm(
+        utils.mic_delta(acceptor, slab.positions[0], slab.cell)
+    )
+    assert contact_tilt == 0.0
+    assert distance == pytest.approx(utils.D_HBOND_HO)
+    assert angle == pytest.approx(180.0)
+    assert ni_o > 4.0
     assert utils.chemical_contact_diagnostic(structure, len(slab)).ok
 
 

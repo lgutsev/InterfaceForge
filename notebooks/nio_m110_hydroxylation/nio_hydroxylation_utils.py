@@ -41,6 +41,7 @@ HBOND_ANGLE_MIN = 140.0       # deg, satisfied O-H...O angle (near linear)
 HH_CLASH = 1.50               # Ang, H...H steric clash threshold
 DEFAULT_H_TILT_DEG = 25.0     # isolated hydroxyl: modest outward tilt from +z
 D_NI_OP = 2.05                # Ang, target surface-Ni ... phosphonate-O distance
+D_HBOND_HO = 1.80             # Ang, target surface-OH ... O=P H-bond distance
 
 # Hard lower bounds for unintended ligand--slab contacts. These are rejection
 # floors, not target bond lengths. Dissociative and multidentate products must
@@ -276,6 +277,20 @@ def bindable_ligand_case_grid(
     return grid
 
 
+def hydrogen_bonded_ligand_case_grid(
+    fractions: Sequence[float],
+) -> list[tuple[float, str, str]]:
+    """Return fully hydroxylated cases for molecular H-bond adsorption.
+
+    These are deliberately separate from :func:`bindable_ligand_case_grid`:
+    the ligand accepts a hydrogen bond from a surface hydroxyl and does not
+    form (or claim) a phosphonate-O--Ni chemisorption bond.
+    """
+    if not any(float(fraction) >= 1.0 for fraction in fractions):
+        return []
+    return [(1.0, "full", motif) for motif in ("capped", "dissoc")]
+
+
 # ==========================================================================
 # hydroxylation motifs
 # ==========================================================================
@@ -415,6 +430,46 @@ def override_hydrogen(hydroxyls: list[Hydroxyl], index: int, *, tilt_deg: float,
     d = np.array([np.cos(az) * np.sin(th), np.sin(az) * np.sin(th), np.cos(th)])
     hydroxyls[index].h_pos = hydroxyls[index].o_pos + d_oh * _unit(d)
     hydroxyls[index].h_assigned = True
+
+
+def expose_hbond_donor(hydroxyls: list[Hydroxyl], *, d_oh: float = D_O_H) -> int:
+    """Point one deterministic ``Ni--OH`` donor out of the surface.
+
+    A fully hydroxylated layer may initially contain an in-plane H-bond
+    network. Molecular adsorption can reorganize one OH so it donates to the
+    phosphonate P=O oxygen. The selected donor remains a neutral surface OH;
+    only its starting O--H direction changes.
+    """
+    candidates = [
+        i for i, hydroxyl in enumerate(hydroxyls)
+        if hydroxyl.kind == "ni_oh"
+    ]
+    if not candidates:
+        raise ValueError("hydrogen-bond docking requires at least one surface Ni--OH")
+    donor = min(
+        candidates,
+        key=lambda i: (
+            int(hydroxyls[i].parent_ni)
+            if hydroxyls[i].parent_ni is not None else np.iinfo(np.int64).max,
+            i,
+        ),
+    )
+    override_hydrogen(
+        hydroxyls, donor, tilt_deg=0.0, azimuth_deg=0.0, d_oh=d_oh
+    )
+    return donor
+
+
+def hbond_geometry(donor_o: np.ndarray, donor_h: np.ndarray,
+                   acceptor_o: np.ndarray, cell) -> tuple[float, float]:
+    """Return H...O distance and conventional donor-O--H...O angle."""
+    oh = mic_delta(donor_h, donor_o, cell)
+    ha = mic_delta(acceptor_o, donor_h, cell)
+    distance = float(np.linalg.norm(ha))
+    angle = float(np.degrees(np.arccos(
+        np.clip(np.dot(-_unit(oh), _unit(ha)), -1.0, 1.0)
+    )))
+    return distance, angle
 
 
 @dataclass
@@ -785,37 +840,18 @@ def binding_oxygen(anchor: PhosphonateAnchor) -> int:
     return int(anchor.eq_o_indices[0] if anchor.eq_o_indices else anchor.o_indices[0])
 
 
-def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateAnchor,
-                 xy: Sequence[float], *, ni_plane_z: float, oh_height: float = D_NI_OP,
-                 anchor_o_index: int | None = None,
-                 min_clearance: float = DEFAULT_CONTACT_MIN,
-                 max_azimuth_adjust_deg: float = 180.0,
-                 max_contact_tilt_deg: float = 40.0) -> tuple[Atoms, float]:
-    """Dock an oriented molecule with one chosen anchor O directly over ``xy``.
-
-    The selected O is placed ``oh_height`` Å above the exposed-Ni plane, so a
-    target exposed Ni at ``xy`` starts with the requested Ni--O distance.  This
-    replaces the old P-over-Ni placement, whose lateral P--O offset produced
-    nominally bound cases with actual Ni--O distances of 2.3--3.7 Å.
-
-    Steric clashes are resolved by a deterministic rigid-body orientation
-    search about the *fixed binding O*, first through the full azimuth and then
-    with modest contact tilts. Candidate structures are accepted using
-    species-aware contact floors, so accidental 1.5 Å Ni--H or 1.3 Å Ni--O
-    contacts cannot pass a generic overlap test. The Ni--O anchor is never
-    destroyed by lifting the molecule. If no chemically clean bound
-    orientation exists, generation stops.
-
-    The molecule is brought into the cell as a rigid body (whole lattice
-    vectors only) -- never ``wrap()``, which would tear it across the boundary.
-    Returns ``(structure, contact_tilt_deg)``; slab constraint preserved."""
-    mol = oriented_mol.copy()
-    bind_o = binding_oxygen(anchor) if anchor_o_index is None else int(anchor_o_index)
-    if bind_o not in anchor.o_indices:
-        raise ValueError(f"anchor_o_index {bind_o} is not one of {anchor.o_indices}")
-    mol.positions[:, :2] += np.asarray(xy) - mol.positions[bind_o, :2]
-    mol.positions[:, 2] += (ni_plane_z + oh_height) - mol.positions[bind_o, 2]
-
+def _search_fixed_binding_oxygen(
+    built_surface: Atoms,
+    mol: Atoms,
+    anchor: PhosphonateAnchor,
+    bind_o: int,
+    *,
+    min_clearance: float,
+    max_azimuth_adjust_deg: float,
+    max_contact_tilt_deg: float,
+    required_contact_margin: float = 0.0,
+) -> tuple[Atoms, float]:
+    """Find a clean rigid-body orientation about an already fixed anchor O."""
     slab_pos = built_surface.positions
     slab_symbols = built_surface.get_chemical_symbols()
     mol_symbols = mol.get_chemical_symbols()
@@ -849,7 +885,7 @@ def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateA
             best_positions = positions
             best_contact = contact
             best_tilt = tilt
-        return contact.ok
+        return contact.min_margin >= required_contact_margin
 
     for azimuth in azimuths:
         rz = _rot_about_z(np.radians(azimuth))
@@ -857,9 +893,7 @@ def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateA
         if consider(spun, 0.0):
             break
 
-    if not best_contact.ok:
-        # Tilt directions span the in-plane circle; every rotation is about the
-        # binding O, so its requested Ni--O distance remains exactly fixed.
+    if best_contact.min_margin < required_contact_margin:
         found = False
         for tilt in np.arange(5.0, max_contact_tilt_deg + 0.1, 5.0):
             for axis_azimuth in np.arange(0.0, 360.0, 30.0):
@@ -877,22 +911,103 @@ def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateA
             if found:
                 break
 
-    if not best_contact.ok:
+    if best_contact.min_margin < required_contact_margin:
         raise ValueError(
             "no chemically valid bound ligand orientation found with the binding O "
             f"fixed; limiting contact is ligand {best_contact.ligand_symbol}"
             f"[{best_contact.ligand_index}]--slab {best_contact.slab_symbol}"
             f"[{best_contact.slab_index}] at {best_contact.distance:.3f} Å "
             f"(minimum {best_contact.cutoff:.3f} Å, margin "
-            f"{best_contact.min_margin:.3f} Å)"
+            f"{best_contact.min_margin:.3f} Å; required safety margin "
+            f"{required_contact_margin:.3f} Å)"
         )
     mol.positions = best_positions
 
-    C = _cell_array(built_surface.cell)
-    pfrac = mol.positions[anchor.p_index] @ np.linalg.inv(C)
-    mol.positions -= np.array([np.floor(pfrac[0]), np.floor(pfrac[1]), 0.0]) @ C
-
+    cell = _cell_array(built_surface.cell)
+    pfrac = mol.positions[anchor.p_index] @ np.linalg.inv(cell)
+    mol.positions -= np.array(
+        [np.floor(pfrac[0]), np.floor(pfrac[1]), 0.0]
+    ) @ cell
     return _extend(built_surface.copy(), mol), round(best_tilt, 2)
+
+
+def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateAnchor,
+                 xy: Sequence[float], *, ni_plane_z: float, oh_height: float = D_NI_OP,
+                 anchor_o_index: int | None = None,
+                 min_clearance: float = DEFAULT_CONTACT_MIN,
+                 max_azimuth_adjust_deg: float = 180.0,
+                 max_contact_tilt_deg: float = 40.0) -> tuple[Atoms, float]:
+    """Dock an oriented molecule with one chosen anchor O directly over ``xy``.
+
+    The selected O is placed ``oh_height`` Å above the exposed-Ni plane, so a
+    target exposed Ni at ``xy`` starts with the requested Ni--O distance.  This
+    replaces the old P-over-Ni placement, whose lateral P--O offset produced
+    nominally bound cases with actual Ni--O distances of 2.3--3.7 Å.
+
+    Steric clashes are resolved by a deterministic rigid-body orientation
+    search about the *fixed binding O*, first through the full azimuth and then
+    with modest contact tilts. Candidate structures are accepted using
+    species-aware contact floors, so accidental 1.5 Å Ni--H or 1.3 Å Ni--O
+    contacts cannot pass a generic overlap test. The Ni--O anchor is never
+    destroyed by lifting the molecule. If no chemically clean bound
+    orientation exists, generation stops.
+
+    The molecule is brought into the cell as a rigid body (whole lattice
+    vectors only) -- never ``wrap()``, which would tear it across the boundary.
+    Returns ``(structure, contact_tilt_deg)``; slab constraint preserved."""
+    mol = oriented_mol.copy()
+    bind_o = binding_oxygen(anchor) if anchor_o_index is None else int(anchor_o_index)
+    if bind_o not in anchor.o_indices:
+        raise ValueError(f"anchor_o_index {bind_o} is not one of {anchor.o_indices}")
+    mol.positions[:, :2] += np.asarray(xy) - mol.positions[bind_o, :2]
+    mol.positions[:, 2] += (ni_plane_z + oh_height) - mol.positions[bind_o, 2]
+    return _search_fixed_binding_oxygen(
+        built_surface, mol, anchor, bind_o,
+        min_clearance=min_clearance,
+        max_azimuth_adjust_deg=max_azimuth_adjust_deg,
+        max_contact_tilt_deg=max_contact_tilt_deg,
+    )
+
+
+def place_hbonded_ligand(
+    built_surface: Atoms,
+    oriented_mol: Atoms,
+    anchor: PhosphonateAnchor,
+    donor_o: Sequence[float],
+    donor_h: Sequence[float],
+    *,
+    h_o_distance: float = D_HBOND_HO,
+    anchor_o_index: int | None = None,
+    min_clearance: float = DEFAULT_CONTACT_MIN,
+    max_azimuth_adjust_deg: float = 180.0,
+    max_contact_tilt_deg: float = 40.0,
+    min_contact_margin: float = 0.10,
+) -> tuple[Atoms, float]:
+    """Place neutral phosphonic acid as ``surface-O--H...O=P``.
+
+    The terminal P=O oxygen is fixed beyond the donor H along the surface O--H
+    direction. This is molecular hydrogen-bond adsorption, not a Ni--O bond.
+    Steric search rotates only about the acceptor oxygen, preserving the
+    requested H...O distance and donor-O--H...O angle.
+    """
+    mol = oriented_mol.copy()
+    bind_o = binding_oxygen(anchor) if anchor_o_index is None else int(anchor_o_index)
+    if bind_o not in anchor.o_indices:
+        raise ValueError(f"anchor_o_index {bind_o} is not one of {anchor.o_indices}")
+    donor_o = np.asarray(donor_o, dtype=float)
+    donor_h = np.asarray(donor_h, dtype=float)
+    direction = _unit(mic_delta(donor_h, donor_o, built_surface.cell))
+    if not np.linalg.norm(direction):
+        raise ValueError("surface H-bond donor has zero O--H direction")
+    target = donor_h + float(h_o_distance) * direction
+    mol.positions += target - mol.positions[bind_o]
+    return _search_fixed_binding_oxygen(
+        built_surface, mol, anchor, bind_o,
+        min_clearance=min_clearance,
+        max_azimuth_adjust_deg=max_azimuth_adjust_deg,
+        max_contact_tilt_deg=max_contact_tilt_deg,
+        required_contact_margin=min_contact_margin,
+    )
 
 
 # ==========================================================================

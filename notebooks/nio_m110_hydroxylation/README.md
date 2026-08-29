@@ -151,11 +151,14 @@ parameters; the manifest has an `n_frozen` column.
   hydroxylated Ni; P=O is oriented toward the adjacent `Ni–OH` H. It is not
   placed at the geometric midpoint, which produced a non-bonded starting state.
 
-Direct placement over an already occupied `Ni–OH` site is intentionally not in
-the default grid. That would be a distinct physisorbed configuration and cannot
-be interpreted as chemisorption. Explicit deprotonated mono-/bidentate
-products and proton-transfer/water-elimination states should be generated as
-separate chemical states rather than expected to appear during local relaxation.
+At 100% OH coverage there is no bare-Ni chemisorption site. Those structures
+therefore use a separately labelled molecular `surface-O–H···O=P` mode: one
+surface OH is directed outward as the donor and the neutral phosphonate P=O is
+placed at a 1.80 Å H···O starting distance. The export audit requires
+H···O = 1.45–2.20 Å, O–H···O ≥ 150°, and Ni···O ≥ 2.80 Å so a hydrogen-bonded
+case cannot be misreported as Ni–O anchoring. Explicit deprotonated
+mono-/bidentate products and proton-transfer/water-elimination states remain
+separate chemical states rather than outcomes assumed during local relaxation.
 
 ### §13 batch
 
@@ -164,13 +167,12 @@ BATCH_POSITIONS`, re-deriving the exposed-Ni inventory and coverage pattern per
 surface, docking each ligand, checking overlaps + vacuum, exporting, and writing
 `generated/manifest_batch.csv`. The manifest and provenance include the
 limiting chemical-contact pair and its margin above the applicable floor.
-The default `BATCH_CASES` is derived from the complete bindable sweep: pristine
-plus clustered/scattered × capped/dissociated at 25%, 50%, and 75% OH. With the
-four bundled ligands this produces 100 passivated structures (one pristine
-position and two positions for each intermediate-OH surface). The two 100%-OH
-surfaces remain reference-only because all exposed Ni sites are already capped;
-adding a phosphonate there would require an explicit, stoichiometrically
-balanced OH-displacement/substitution model rather than neutral docking.
+The default grid combines two explicit modes. `BATCH_CASES` covers bare-Ni
+chemisorption: pristine plus clustered/scattered × capped/dissociated at 25%,
+50%, and 75% OH. `BATCH_HBOND_CASES` covers molecular hydrogen-bond adsorption
+on the capped and dissociated 100%-OH surfaces. With the four bundled ligands
+this produces 108 ligand-decorated structures: 100 Ni–O cases plus eight
+surface-OH···O=P cases.
 
 ## Naming
 
@@ -182,7 +184,8 @@ NiO_m110_Big_U46_OH50_clustered_capped_Me4PACz_boundary      + ligand
 
 `OH<pct>` = coverage fraction of the exposed-Ni inventory; `<pattern-id>` ∈
 {clustered, scattered, full}; `<motif>` ∈ {capped, dissoc}; ligand token has
-hyphens stripped; default anchor position ∈ {bare, boundary}.
+hyphens stripped; default anchor position ∈ {bare, boundary, hbond}. `hbond`
+always denotes the non-chemisorbed OH100 molecular state.
 
 ## Export — runnable VASP optimization folders
 
