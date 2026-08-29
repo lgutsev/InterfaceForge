@@ -3,8 +3,8 @@
 One self-contained notebook that builds **partially hydroxylated NiO(110) slabs**
 (and phosphonate-ligand-decorated variants) as input for VASP+U relaxation / AIMD.
 This is a standalone application notebook — it is *not* part of the
-InterfaceForge package and does not modify it (it only optionally *reuses*
-InterfaceForge's licensed-PAW `assemble_potcar` helper on export).
+InterfaceForge package and does not modify it. It deliberately does **not**
+generate POTCAR files; use the project's normal POTCAR generator after export.
 
 ## Why
 
@@ -21,8 +21,8 @@ proton ordering, and the separate AIMD sampling-policy change.
 
 `NiO_m110_hydroxylation.ipynb`, run top to bottom. It is **self-contained** —
 the helper functions are inlined in the §0 Toolkit cells.
-`nio_hydroxylation_utils.py` is the *build source* for those cells (edit there,
-rerun the builder); the notebook does not import it.
+`nio_hydroxylation_utils.py` is the *build source* for those cells. Edit it and
+run `python sync_notebook_toolkit.py`; the notebook does not import it.
 
 
 | § | what |
@@ -33,7 +33,7 @@ rerun the builder); the notebook does not import it.
 | 4–5 | H-bond diagnostic + manual H-orientation override. |
 | 6–7 | Visualise (incl. frozen/mobile split) + sanity checks. |
 | 8 | Export the hydroxylation cases as runnable VASP folders + manifest. |
-| 9–12 | Phosphonate ligand: anchor detection (P–OH vs P=O) → surface-docked orientation → placement at **pristine (0 % OH) / bare / OH / boundary** → export. |
+| 9–12 | Phosphonate ligand: anchor detection (P–OH vs P=O) → surface-docked orientation → placement at **pristine (0 % OH) / bare / OH-boundary** → export. |
 | 13 | Batch loop over **surfaces × passivants × cases × anchor-positions**. |
 
 ## Setup
@@ -42,11 +42,10 @@ rerun the builder); the notebook does not import it.
 pip install -r requirements.txt
 ```
 
-**Everything is bundled in `inputs/`** (the bare `CONTCAR`, the four passivant
-`.xyz`, and `inputs/vasp_template/` with the working `INCAR` + `KPOINTS`) — the
-notebook is reproducible as-is, just run it top to bottom. Only `POTCAR` is not
-bundled (VASP-licensed): set `POTCAR_ROOT` in §1, or drop a Ni/O `POTCAR` into
-`inputs/vasp_template/`. The sweep cell (§3) is meant to be re-run after you
+**Everything needed for generation is bundled in `inputs/`** (the bare
+`CONTCAR`, four passivant `.xyz` files, and `inputs/vasp_template/` with the
+working `INCAR` + `KPOINTS`). Add POTCAR afterwards with the existing project
+generator. The sweep cell (§3) is meant to be re-run after you
 tweak a parameter, the exposed-Ni inventory (§2), or an `H` orientation (§5).
 
 Geometry note: minimum-image distances use fractional coords + the full cell
@@ -55,13 +54,15 @@ is in-plane only.
 
 ## Two hydroxylation motifs (both generated at every intermediate coverage)
 
-- **capped** (`_capped`) — an `O` placed straight up (+z) from a selected Ni at a
-  2.0 Å placeholder `Ni–O` distance, with its own `H`.
+- **capped** (`_capped`) — an exploratory OH-only fragment placed straight up
+  (+z) from a selected Ni at a 2.0 Å placeholder `Ni–O` distance. It adds OH,
+  not H2O, and must not be compared as a neutral water-dissociation state.
 - **dissoc** (`_dissoc`) — the same `Ni–OH` **plus** a proton on the nearest
-  *free* surface lattice O beyond the Ni's first shell (`acceptor_search_radius`,
-  default 4.0 Å) — a genuine dissociated water pair. If none is free it reduces
-  to a capped hydroxide and prints a warning; `n_lattice_protons` in the manifest
-  records how many true pairs formed.
+  distinct surface lattice O, including valid first-shell acceptors. A
+  deterministic maximum matching assigns one lattice O per selected Ni. If a
+  complete matching is impossible, generation stops rather than silently
+  producing a mixed motif. Thus every `_dissoc` case contains exactly one H2O
+  equivalent per selected Ni.
 
 The generator does **not** presuppose which motif wins — the downstream VASP+U
 stage decides per local environment.
@@ -110,39 +111,43 @@ parameters; the manifest has an `n_frozen` column.
   1. rotate so **P → (centroid of the body atoms) points up (+z)** — the whole
      body stands vertical, anchor O's below P so the head faces the surface;
   2. spin about the vertical through P so the **P=O faces the nearest surface
-     hydroxyl H** (`oh` / `boundary`), leaving the P–OH oxygens toward bare NiO;
+     hydroxyl H** in a boundary case;
   3. only if the upright molecule is taller than the available vacuum does it
      **auto-tilt about a horizontal axis through P** (realistic tilted-SAM
      geometry); `tilt_deg` in the manifest. In practice none of the four
      passivants need this — see the vacuum note below.
-- **Placement** (`place_ligand`): P over the target `(x, y)`, the **lowest anchor
-  oxygen** `OH_HEIGHT` (≈2.05 Å) above the exposed-Ni plane. Clash-lift in +z if
-  needed (`docking_lift`). The molecule is shifted into the cell as a rigid body
-  — never `wrap()`, which would tear it across the periodic boundary.
+- **Placement** (`place_ligand`): the neutral molecule's terminal P=O oxygen is
+  placed directly over the target exposed Ni at `OH_HEIGHT` (≈2.05 Å). This
+  guarantees that the requested starting Ni–O distance is real rather than
+  placing P over Ni and leaving every anchor O laterally displaced. Steric
+  clashes are resolved by an azimuth/contact-tilt search about that fixed O;
+  the final Ni–O distance is audited and never sacrificed to a vertical lift.
 - **Vacuum / cell**: the slab sits in the *middle* of its cell, so the real
   headroom is the gap to the slab's **periodic image** (`slab_bottom + c`), not
   the distance to the `c` plane. `vacuum_fit` reports `vacuum_gap` (to the image);
   `ok` needs no overlaps *and* `fits_vacuum`.
 - **`LIGAND_CELL_C`** (§9), applied to ligand cases only (bare / OH-only keep the
   CONTCAR cell):
-  - `"auto"` *(default)* — lengthen `c` per case just enough that the whole
-    molecule sits **inside** the cell with `LIGAND_VACUUM_TOP` (3 Å) above its
-    top atom. Typical result: Me-4PACz ~38–40 Å, MeO-2PACz ~36–38, MeO-4PADBC
-    ~41–42, DCZ-4P ~45–47 (from the 35.9 Å CONTCAR). `c` varies per case — fine
-    for MLIP training; the manifest / provenance record it.
-  - a number — force that `c` for every ligand case (uniform cell, e.g. `48`).
-  - `None` — never touch `c`; a tall molecule then pokes past the box into the
-    (empty) bottom vacuum — physically fine, just untidy in a viewer.
+  - `48.0` *(default)* — one uniform cell for all supplied passivants.
+  - `"auto"` — keep the molecule upright, then lengthen `c` until the gap from
+    the ligand top to the next slab image is at least `LIGAND_PERIODIC_GAP`
+    (12 Å by default). The old implementation tilted before extending, which
+    could create an unintended geometry.
+  - `None` — never change `c`; the vacuum audit must still pass.
   `extend_vacuum` rescales only the `c` lattice vector; atom positions unchanged.
 
-### The three anchor positions
+### Anchor positions
 
 - **`bare`** — over an exposed Ni with no hydroxyl (acid condenses with bare Ni²⁺).
-- **`oh`** — over a hydroxylated exposed Ni (`Ni–OH`).
-- **`boundary`** — the in-plane **midpoint between a hydroxylated exposed-Ni and
-  its nearest bare exposed-Ni neighbour**: the anchor straddles the edge of an OH
-  island, one acid −OH over bare Ni, the P=O turned toward the adjacent `Ni–OH`'s
-  H. Highest-value case, never dropped.
+- **`boundary`** — bound to a bare exposed Ni that is the nearest neighbour of a
+  hydroxylated Ni; P=O is oriented toward the adjacent `Ni–OH` H. It is not
+  placed at the geometric midpoint, which produced a non-bonded starting state.
+
+Direct placement over an already occupied `Ni–OH` site is intentionally not in
+the default grid. That would be a distinct physisorbed configuration and cannot
+be interpreted as chemisorption. Explicit deprotonated mono-/bidentate
+products and proton-transfer/water-elimination states should be generated as
+separate chemical states rather than expected to appear during local relaxation.
 
 ### §13 batch
 
@@ -161,13 +166,13 @@ NiO_m110_Big_U46_OH50_clustered_capped_Me4PACz_boundary      + ligand
 
 `OH<pct>` = coverage fraction of the exposed-Ni inventory; `<pattern-id>` ∈
 {clustered, scattered, full}; `<motif>` ∈ {capped, dissoc}; ligand token has
-hyphens stripped; anchor position ∈ {bare, oh, boundary}.
+hyphens stripped; default anchor position ∈ {bare, boundary}.
 
 ## Export — runnable VASP optimization folders
 
-`RUN_TEMPLATE` (§1) points at a working run (`INCAR` + `KPOINTS` + `POTCAR`,
-optionally `runvasp.sh`). Every generated case is a launchable folder, grouped
-by OH type:
+`RUN_TEMPLATE` (§1) points at the supplied working `INCAR` + `KPOINTS`
+(optionally `runvasp.sh`). Every generated case is ready for the project's
+POTCAR-generation/launch step and is grouped by OH type:
 
 ```
 generated/
@@ -190,8 +195,9 @@ Each leaf:
 
 ```
 POSCAR          element-ordered (alphabetical = ASE sort=True) via a *stable*
-                sort, so POSCAR / MAGMOM / LDAU* / POTCAR all agree on one order;
-                Ni-up stays before Ni-down. Selective-dynamics F/T.
+                sort, so POSCAR / MAGMOM / LDAU* agree and an external POTCAR
+                generator receives an unambiguous order. Ni-up stays before
+                Ni-down. Selective-dynamics F/T.
 KPOINTS         copied from RUN_TEMPLATE
 INCAR           template copied, then rewritten for THIS case's species order --
                 MAGMOM, LDAUL, LDAUU, LDAUJ are per POSCAR species so they change
@@ -199,11 +205,10 @@ INCAR           template copied, then rewritten for THIS case's species order --
                    bare        Ni O          LDAUL = 2 -1
                    hydroxylated H Ni O        LDAUL = -1 2 -1
                    ligand      C H N Ni O P   LDAUL = -1 -1 -1 2 -1 -1
-                Ni always L=2, U=4.6; SYSTEM = case name;
-                ISIF=2 + dipole for decorated slabs; pristine 0 % -> ISIF=3, LDIPOL=.FALSE.
-POTCAR          sliced from the template POTCAR (or POTCAR_ROOT) into that same
-                element order. inputs/vasp_template/POTCAR is git-ignored but kept
-                locally; set POTCAR_ROOT if you relocate the notebook.
+                Ni always L=2, U=4.6; SYSTEM = case name; ISIF=2 for every slab;
+                decorated slabs receive a structure-specific DIPOL centre.
+POTCAR          intentionally not written; generate it from the ordered POSCAR
+                using the existing project workflow.
 structure.xyz   convenience (carries the magnetic moments + freeze constraint)
 provenance.json coverage / pattern / motif / sites / H-bond score / ligand info /
                 freeze / supercell / magmom / input hashes / run_dir / run_inputs
@@ -247,7 +252,11 @@ bare / hydroxylated-only runs. To rebuild the surface from scratch
   (checked in §7).
 - Every hydroxylated case passes: correct `O–H` bond lengths, no atom overlaps,
   cell/pbc unchanged, `Ni–OH` count == requested fraction, total atom count ==
-  bare + added O + added H. The sweep asserts this before export.
+  bare + added O + added H. Every dissociated case additionally requires one
+  distinct protonated lattice O per selected Ni.
+- Every exported Ni-containing run has an explicit, spin-balanced MAGMOM of the
+  exact POSCAR length. Both interactive and batch paths call the same validator.
+- Every slab uses fixed-cell `ISIF=2`; the vacuum direction is never relaxed.
 - Each pattern has a top+side plot and a printed H-bond diagnostic score.
 
 ## Reference conventions this mirrors
@@ -256,6 +265,6 @@ bare / hydroxylated-only runs. To rebuild the surface from scratch
   `_static_exposed_ni_sites` (upper-half Ni, O-coordination < 6).
 - Phosphonate anchor rule: `NiO_MD_Passivation/src/nio_md_prep/chemistry.py`
   `phosphonate_roles` (P bonded to exactly 3 O + 1 C).
-- VASP run-dir packaging + `assemble_potcar`: `interfaceforge/vasp.py`.
+- POTCAR generation after export: `interfaceforge/vasp.py`.
 - Naming stem `NiO_m110_Big_U46[_<Ligand>]`: InterfaceForge VASP workflow
   (`docs/vasp.md`, `tests/test_aimd_protocols.py`). "U46" = `LDAUU = 4.6` on Ni-d.

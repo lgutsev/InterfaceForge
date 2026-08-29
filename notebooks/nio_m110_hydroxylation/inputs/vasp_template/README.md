@@ -5,8 +5,12 @@ Template run inputs, copied into every generated case folder by the notebook
 
 | file | in the export | note |
 |---|---|---|
-| `INCAR` | copied, with `MAGMOM` rewritten for the case's atom count/order, `SYSTEM` set, and `ISIF = 2` for every decorated slab (the clean 0 % slab keeps `ISIF = 3`) | the AFM-II relaxation recipe: PBE + Dudarev U(Ni 3d) = 4.6 eV + D3 |
+| `INCAR` | copied, with `MAGMOM` rewritten for the exact case atom count/order, `SYSTEM` set, `ISIF = 2` for every slab, and a structure-specific `DIPOL` for decorated slabs | the AFM-II relaxation recipe: PBE + Dudarev U(Ni 3d) = 4.6 eV + D3 |
 | `KPOINTS` | copied verbatim | Γ-only (the cell is large) |
-| `POTCAR` | **not bundled** (VASP-licensed). Drop `PAW_PBE Ni` + `PAW_PBE O` here for the Ni/O-only pristine case, or set `POTCAR_ROOT` in §1 to a per-element PAW tree (`<root>/Ni/POTCAR`, `<root>/C/POTCAR`, …) for the hydroxyl / ligand cases | POSCAR element order |
+| `POTCAR` | **not generated** | run the project's existing POTCAR generator against the element-ordered POSCAR |
 
-`POTCAR` (and any `WAVECAR` / `CHGCAR` you leave here) are git-ignored.
+The user-supplied reference template has the same INCAR and KPOINTS committed
+here. Its POSCAR/CONTCAR are reference structures, not export templates: the
+notebook writes a new ordered POSCAR for every generated chemistry.
+
+Any local `POTCAR`, `WAVECAR`, or `CHGCAR` files remain git-ignored.

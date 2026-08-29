@@ -18,14 +18,15 @@ import hashlib
 import json
 import platform
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Sequence
 
 import numpy as np
 from ase import Atoms
-from ase.io import read as ase_read, write as ase_write
+from ase.io import read as ase_read
+from ase.io import write as ase_write
 
 # --------------------------------------------------------------------------
 # constants (placeholder geometry -- refined later by VASP+U relaxation)
@@ -251,41 +252,73 @@ def build_capped_hydroxide(surface: SurfaceModel, site_indices: Sequence[int], *
 
 def build_dissociated_pair(surface: SurfaceModel, site_indices: Sequence[int], *,
                            d_ni_o: float = D_NI_O_PLACEHOLDER,
-                           acceptor_search_radius: float = 4.0,
-                           surface_o_band: float = 1.6) -> list[Hydroxyl]:
-    """Motif B: Motif-A Ni-OH *plus* a proton on the nearest free surface lattice
-    O beyond the Ni's first shell (not the Ni-bound one) -- the dissociative
-    water-chemisorption geometry the literature describes."""
+                           acceptor_search_radius: float = 3.2,
+                           acceptor_min_radius: float = 1.5,
+                           surface_o_band: float = 1.6,
+                           require_complete: bool = True) -> list[Hydroxyl]:
+    """Build one water-balanced dissociation pair per selected surface Ni.
+
+    Each pair contains a new ``Ni-OH`` plus a proton on a *distinct* nearby
+    surface lattice O.  Surface O atoms in the Ni first coordination shell are
+    valid proton acceptors; excluding them incorrectly removes the usual
+    nearest-neighbour proton-transfer product on an oxide surface.
+
+    A deterministic augmenting-path matching is used instead of greedy nearest
+    assignment.  This avoids silently losing lattice protons at high coverage.
+    By default an incomplete matching is an error because a folder labelled
+    ``dissoc`` must contain one full H2O equivalent per selected Ni site.
+    """
     atoms = surface.atoms
     pos = atoms.positions
     cell = atoms.cell
     o_z = pos[surface.o_indices, 2]
     surf_o = surface.o_indices[o_z >= surface.top_z - surface_o_band]
 
-    hydroxyls = build_capped_hydroxide(surface, site_indices, d_ni_o=d_ni_o)
-    claimed: set[int] = set()
-    unplaced = 0
-    for hx in list(hydroxyls):
-        ni = hx.parent_ni
-        cands = []
+    sites = [int(i) for i in site_indices]
+    hydroxyls = build_capped_hydroxide(surface, sites, d_ni_o=d_ni_o)
+    options: list[list[tuple[float, int]]] = []
+    for ni in sites:
+        cands: list[tuple[float, int]] = []
         for o in surf_o:
-            if int(o) in claimed:
-                continue
             d_ni = float(np.linalg.norm(mic_delta(pos[o], pos[ni], cell)))
-            if d_ni < NI_O_BOND_CUTOFF or d_ni > acceptor_search_radius:
+            if d_ni < acceptor_min_radius or d_ni > acceptor_search_radius:
                 continue
             cands.append((d_ni, int(o)))
-        if not cands:
-            unplaced += 1
-            continue
-        cands.sort()
-        claimed.add(cands[0][1])
-        hydroxyls.append(Hydroxyl(o_pos=pos[cands[0][1]].copy(), kind="lattice_oh",
-                                  parent_o=cands[0][1]))
-    if unplaced:
-        print(f"  [build_dissociated_pair] WARNING: no free lattice O in "
-              f"({NI_O_BOND_CUTOFF}, {acceptor_search_radius}) Å of the Ni for "
-              f"{unplaced}/{len(site_indices)} site(s); those reduce to a capped hydroxide.")
+        options.append(sorted(cands))
+
+    # Maximum-cardinality bipartite matching.  Visit the most constrained Ni
+    # first, while each Ni's candidate order still prefers the closest O.
+    matched_o: dict[int, int] = {}
+
+    def augment(site_pos: int, seen_o: set[int]) -> bool:
+        for _distance, oxygen in options[site_pos]:
+            if oxygen in seen_o:
+                continue
+            seen_o.add(oxygen)
+            previous = matched_o.get(oxygen)
+            if previous is None or augment(previous, seen_o):
+                matched_o[oxygen] = site_pos
+                return True
+        return False
+
+    for site_pos in sorted(range(len(sites)), key=lambda i: (len(options[i]), i)):
+        augment(site_pos, set())
+
+    assigned = {site_pos: oxygen for oxygen, site_pos in matched_o.items()}
+    missing = [sites[i] for i in range(len(sites)) if i not in assigned]
+    if missing and require_complete:
+        raise ValueError(
+            "incomplete dissociated-water motif: could not assign a distinct "
+            f"surface lattice O to {len(missing)}/{len(sites)} selected Ni sites "
+            f"within {acceptor_min_radius}-{acceptor_search_radius} Å; "
+            f"unmatched Ni indices: {missing}"
+        )
+    if missing:
+        print(f"  [build_dissociated_pair] WARNING: incomplete matching for {missing}")
+    for site_pos in sorted(assigned):
+        oxygen = assigned[site_pos]
+        hydroxyls.append(Hydroxyl(o_pos=pos[oxygen].copy(), kind="lattice_oh",
+                                  parent_o=oxygen))
     return hydroxyls
 
 
@@ -368,7 +401,9 @@ def hbond_diagnostic(hydroxyls: list[Hydroxyl], cell) -> HBondDiagnostic:
                 ho = mic_delta(opos[b], hpos[a], cell)
                 if np.linalg.norm(ho) > HBOND_HO_MAX:
                     continue
-                ang = np.degrees(np.arccos(np.clip(np.dot(_unit(oh), _unit(ho)), -1, 1)))
+                # Conventional donor-O--H...acceptor-O angle is measured at H:
+                # H->donor O is ``-oh`` and H->acceptor O is ``ho``.
+                ang = np.degrees(np.arccos(np.clip(np.dot(-_unit(oh), _unit(ho)), -1, 1)))
                 if ang >= HBOND_ANGLE_MIN:
                     sat += 1
                     break
@@ -408,9 +443,11 @@ def assemble(atoms: Atoms, hydroxyls: list[Hydroxyl]) -> Atoms:
     add_sym, add_pos = [], []
     for h in hydroxyls:
         if h.kind == "ni_oh":
-            add_sym.append("O"); add_pos.append(h.o_pos)
+            add_sym.append("O")
+            add_pos.append(h.o_pos)
         if h.h_pos is not None:
-            add_sym.append("H"); add_pos.append(h.h_pos)
+            add_sym.append("H")
+            add_pos.append(h.h_pos)
     if add_pos:
         out = _extend(out, Atoms(add_sym, positions=np.array(add_pos)))
     out.wrap()
@@ -605,34 +642,98 @@ def _min_gap(a_pos: np.ndarray, b_pos: np.ndarray, cell) -> float:
     return float(np.linalg.norm(d, axis=-1).min())
 
 
+def binding_oxygen(anchor: PhosphonateAnchor) -> int:
+    """Choose the neutral phosphonate O used for initial molecular Ni binding.
+
+    Prefer the terminal P=O oxygen.  Explicit deprotonated mono-/bidentate
+    products are a separate chemical-state generator and must not be implied by
+    silently deleting an acid proton here.
+    """
+    return int(anchor.eq_o_indices[0] if anchor.eq_o_indices else anchor.o_indices[0])
+
+
 def place_ligand(built_surface: Atoms, oriented_mol: Atoms, anchor: PhosphonateAnchor,
                  xy: Sequence[float], *, ni_plane_z: float, oh_height: float = D_NI_OP,
-                 min_clearance: float = 1.25, max_lift: float = 2.5) -> tuple[Atoms, float]:
-    """Dock an oriented molecule so its **P sits over ``xy``** and its **lowest
-    anchor oxygen** is ``oh_height`` Å above the exposed-Ni plane -- head at
-    Ni-O bonding distance, body above it.
+                 anchor_o_index: int | None = None,
+                 min_clearance: float = 1.25,
+                 max_azimuth_adjust_deg: float = 60.0,
+                 max_contact_tilt_deg: float = 25.0) -> tuple[Atoms, float]:
+    """Dock an oriented molecule with one chosen anchor O directly over ``xy``.
 
-    If any ligand atom is then closer than ``min_clearance`` to a slab atom the
-    molecule is lifted +z in 0.1 Å steps until it clears (<= ``max_lift``).
-    The molecule is brought into the cell as a RIGID body (whole lattice
+    The selected O is placed ``oh_height`` Å above the exposed-Ni plane, so a
+    target exposed Ni at ``xy`` starts with the requested Ni--O distance.  This
+    replaces the old P-over-Ni placement, whose lateral P--O offset produced
+    nominally bound cases with actual Ni--O distances of 2.3--3.7 Å.
+
+    Steric clashes are resolved by a deterministic rigid-body orientation
+    search about the *fixed binding O*, first in azimuth and then with modest
+    contact tilts.  The Ni--O bond is never destroyed by lifting the entire
+    molecule.  If no clean bound orientation exists, generation stops.
+
+    The molecule is brought into the cell as a rigid body (whole lattice
     vectors only) -- never ``wrap()``, which would tear it across the boundary.
-    Returns ``(structure, lift_applied)``; slab constraint preserved."""
+    Returns ``(structure, contact_tilt_deg)``; slab constraint preserved."""
     mol = oriented_mol.copy()
-    low_o = min(anchor.o_indices, key=lambda i: mol.positions[i, 2])
-    mol.positions[:, :2] += np.asarray(xy) - mol.positions[anchor.p_index, :2]
-    mol.positions[:, 2] += (ni_plane_z + oh_height) - mol.positions[low_o, 2]
+    bind_o = binding_oxygen(anchor) if anchor_o_index is None else int(anchor_o_index)
+    if bind_o not in anchor.o_indices:
+        raise ValueError(f"anchor_o_index {bind_o} is not one of {anchor.o_indices}")
+    mol.positions[:, :2] += np.asarray(xy) - mol.positions[bind_o, :2]
+    mol.positions[:, 2] += (ni_plane_z + oh_height) - mol.positions[bind_o, 2]
 
-    lift = 0.0
     slab_pos = built_surface.positions
-    while lift < max_lift and _min_gap(mol.positions, slab_pos, built_surface.cell) < min_clearance:
-        mol.positions[:, 2] += 0.1
-        lift += 0.1
+    pivot = mol.positions[bind_o].copy()
+    base = mol.positions.copy()
+    best_positions = base
+    best_clearance = _min_gap(base, slab_pos, built_surface.cell)
+    best_tilt = 0.0
+
+    az_step = 15.0
+    azimuths = [0.0]
+    for angle in np.arange(az_step, max_azimuth_adjust_deg + 0.1, az_step):
+        azimuths.extend([float(angle), -float(angle)])
+
+    def consider(positions: np.ndarray, tilt: float) -> None:
+        nonlocal best_positions, best_clearance, best_tilt
+        clearance = _min_gap(positions, slab_pos, built_surface.cell)
+        if clearance > best_clearance:
+            best_positions = positions
+            best_clearance = clearance
+            best_tilt = tilt
+
+    for azimuth in azimuths:
+        rz = _rot_about_z(np.radians(azimuth))
+        spun = (rz @ (base - pivot).T).T + pivot
+        consider(spun, 0.0)
+        if best_clearance >= min_clearance:
+            break
+
+    if best_clearance < min_clearance:
+        # Tilt directions span the in-plane circle; every rotation is about the
+        # binding O, so its requested Ni--O distance remains exactly fixed.
+        for tilt in np.arange(5.0, max_contact_tilt_deg + 0.1, 5.0):
+            for axis_azimuth in np.arange(0.0, 360.0, 30.0):
+                phi = np.radians(axis_azimuth)
+                axis = np.array([np.cos(phi), np.sin(phi), 0.0])
+                rt = _rotmat_axis(axis, np.radians(tilt))
+                for azimuth in azimuths:
+                    rz = _rot_about_z(np.radians(azimuth))
+                    candidate = (rt @ (rz @ (base - pivot).T)).T + pivot
+                    consider(candidate, float(tilt))
+            if best_clearance >= min_clearance:
+                break
+
+    if best_clearance < min_clearance:
+        raise ValueError(
+            f"no bound ligand orientation reaches {min_clearance:.2f} Å slab "
+            f"clearance; best is {best_clearance:.3f} Å with the binding O fixed"
+        )
+    mol.positions = best_positions
 
     C = _cell_array(built_surface.cell)
     pfrac = mol.positions[anchor.p_index] @ np.linalg.inv(C)
     mol.positions -= np.array([np.floor(pfrac[0]), np.floor(pfrac[1]), 0.0]) @ C
 
-    return _extend(built_surface.copy(), mol), round(lift, 2)
+    return _extend(built_surface.copy(), mol), round(best_tilt, 2)
 
 
 # ==========================================================================
@@ -642,11 +743,12 @@ def detect_layers(atoms: Atoms, *, axis: int = 2, layer_tol: float = 0.60) -> li
     z = atoms.positions[:, axis]
     order = np.argsort(z)
     layers, current = [], [order[0]]
-    for prev, idx in zip(order, order[1:]):
+    for prev, idx in zip(order, order[1:], strict=False):
         if z[idx] - z[prev] < layer_tol:
             current.append(idx)
         else:
-            layers.append(np.array(current)); current = [idx]
+            layers.append(np.array(current))
+            current = [idx]
     layers.append(np.array(current))
     return layers
 
@@ -693,9 +795,11 @@ def freeze_bottom(atoms: Atoms, *, mode: str = "layers", value: float = 1.0,
     elif mode == "layers":
         layers = detect_layers(out, axis=axis, layer_tol=layer_tol)
         keep = np.concatenate(layers[: int(value)]) if int(value) else np.array([], int)
-        mask = np.zeros(len(out), bool); mask[keep] = True
+        mask = np.zeros(len(out), bool)
+        mask[keep] = True
     elif mode == "count":
-        mask = np.zeros(len(out), bool); mask[np.argsort(pos)[: int(value)]] = True
+        mask = np.zeros(len(out), bool)
+        mask[np.argsort(pos)[: int(value)]] = True
     else:
         raise ValueError(f"unknown freeze mode {mode!r}")
     if only_symbols is not None:
@@ -757,6 +861,7 @@ def assign_afm_ii_moments(atoms: Atoms, *, ni_o_cut: float = 2.7, mu: float = 2.
     Purely angular -- frame- and lattice-spacing-independent, and robust to
     surface relaxation.  Non-Ni atoms get 0; survives ``repeat`` / decoration."""
     import collections
+
     from ase.neighborlist import neighbor_list
 
     sym = np.array(atoms.get_chemical_symbols())
@@ -766,7 +871,7 @@ def assign_afm_ii_moments(atoms: Atoms, *, ni_o_cut: float = 2.7, mu: float = 2.
 
     i, j, D = neighbor_list("ijD", atoms, {("O", "Ni"): ni_o_cut})
     by_o: dict[int, list] = collections.defaultdict(list)
-    for a, b, d in zip(i, j, D):
+    for a, b, d in zip(i, j, D, strict=True):
         if sym[a] == "O" and sym[b] == "Ni":
             by_o[int(a)].append((int(b), d / (np.linalg.norm(d) + 1e-12)))
 
@@ -776,7 +881,8 @@ def assign_afm_ii_moments(atoms: Atoms, *, ni_o_cut: float = 2.7, mu: float = 2.
             for y in range(x + 1, len(bonds)):
                 (na, va), (nb, vb) = bonds[x], bonds[y]
                 if float(np.dot(va, vb)) < linear_dot:
-                    adj[na].add(nb); adj[nb].add(na)
+                    adj[na].add(nb)
+                    adj[nb].add(na)
 
     colour: dict[int, int] = {}
     frustrated = 0
@@ -789,7 +895,8 @@ def assign_afm_ii_moments(atoms: Atoms, *, ni_o_cut: float = 2.7, mu: float = 2.
             u = q.popleft()
             for v in adj[u]:
                 if v not in colour:
-                    colour[v] = 1 - colour[u]; q.append(v)
+                    colour[v] = 1 - colour[u]
+                    q.append(v)
                 elif colour[v] == colour[u]:
                     frustrated += 1
     m = np.zeros(len(atoms))
@@ -807,20 +914,44 @@ def assign_afm_ii_moments(atoms: Atoms, *, ni_o_cut: float = 2.7, mu: float = 2.
     return atoms
 
 
-def _slice_potcar(potcar: Path) -> dict[str, str]:
-    """Split a concatenated POTCAR into ``{element: block}`` (each block ends at
-    ``End of Dataset``) so any subset can be re-assembled in any order."""
-    text = Path(potcar).read_text(errors="ignore")
-    blocks, cur = {}, []
-    for line in text.splitlines(keepends=True):
-        cur.append(line)
-        if "End of Dataset" in line:
-            block = "".join(cur)
-            m = re.search(r"TITEL\s*=\s*\S+\s+(\S+)", block)
-            if m:
-                blocks[m.group(1).split("_")[0]] = block
-            cur = []
-    return blocks
+def ensure_afm_moments(atoms: Atoms, *, template_incar: str | Path | None = None,
+                       repeats: int = 1, mu: float = 2.0) -> str:
+    """Ensure a spin-balanced AFM initialization and return its provenance.
+
+    This helper is deliberately used by both the interactive and batch paths;
+    previously the batch path reloaded the slab with zero moments and exported
+    the template's unrelated 165-entry ``MAGMOM`` unchanged.
+    """
+    sym = np.array(atoms.get_chemical_symbols())
+    ni = np.where(sym == "Ni")[0]
+    if not len(ni):
+        return "not-applicable"
+
+    moments = atoms.get_initial_magnetic_moments()
+    source = "input structure"
+    if not np.any(moments):
+        try:
+            if template_incar is None:
+                raise ValueError("no template INCAR supplied")
+            moments = magmom_from_incar(template_incar, len(atoms), repeats=repeats)
+            atoms.set_initial_magnetic_moments(moments)
+            source = f"template INCAR {Path(template_incar)}"
+        except Exception as exc:
+            print(f"  moments: {exc} -> deriving AFM-II from geometry")
+            assign_afm_ii_moments(atoms, mu=mu)
+            moments = atoms.get_initial_magnetic_moments()
+            source = "geometry-derived AFM-II"
+
+    ni_mom = np.asarray(moments)[ni]
+    n_up, n_down = int((ni_mom > 0).sum()), int((ni_mom < 0).sum())
+    if n_up + n_down != len(ni):
+        raise ValueError(f"{len(ni) - n_up - n_down} Ni atoms have zero initial moment")
+    if n_up != n_down or abs(float(ni_mom.sum())) > 1e-6:
+        raise ValueError(
+            f"AFM initialization is not spin-balanced: {n_up} up / {n_down} down, "
+            f"net {float(ni_mom.sum()):+.3f} uB"
+        )
+    return source
 
 
 def order_by_element(atoms: Atoms) -> Atoms:
@@ -828,8 +959,9 @@ def order_by_element(atoms: Atoms) -> Atoms:
     ``ase.io.write(format='vasp', sort=True)`` uses.  Ni-up stays before Ni-down
     (stable within an element), and the ``FixAtoms`` constraint + initial
     magnetic moments are carried through.  Doing it here (then writing with
-    ``sort=False``) keeps the POSCAR, MAGMOM, LDAU tags and POTCAR all in one
-    agreed order -- which matters because ``LDAUL/LDAUU/LDAUJ`` and ``MAGMOM``
+    ``sort=False``) keeps the POSCAR, MAGMOM, and LDAU tags in one agreed order
+    and gives an external POTCAR generator an unambiguous species order.  This
+    matters because ``LDAUL/LDAUU/LDAUJ`` and ``MAGMOM``
     are *per POSCAR species, in POSCAR order*."""
     sym = np.array(atoms.get_chemical_symbols())
     return atoms[np.argsort(sym, kind="stable")]
@@ -849,7 +981,7 @@ def _template_ueff(incar_text: str, l_for: str = "2") -> float | None:
 
 
 def write_run_inputs(case_dir: str | Path, structure: Atoms, template_dir: str | Path, *,
-                     potcar_root: str | Path | None = None, system_name: str | None = None,
+                     system_name: str | None = None,
                      incar_overrides: dict | None = None) -> dict:
     """Make ``case_dir`` a runnable VASP optimization folder from a template run:
 
@@ -857,9 +989,9 @@ def write_run_inputs(case_dir: str | Path, structure: Atoms, template_dir: str |
     * **INCAR** -- copied with ``MAGMOM`` rewritten for this structure's atom
       count/order (``compact_magmom``), ``SYSTEM`` set to the case name, and any
       ``incar_overrides`` applied (e.g. ``{"ISIF": "2"}`` for a decorated slab).
-    * **POTCAR** -- concatenated in POSCAR element order from ``potcar_root``
-      (``<root>/<Element>/POTCAR``); if that isn't available the template POTCAR
-      is reused only when its elements already cover the structure.
+    POTCAR generation is intentionally out of scope.  The exported POSCAR is
+    element ordered and the matching species order is recorded, allowing the
+    project's standard POTCAR generator to remain the single source of truth.
     """
     import shutil
 
@@ -868,7 +1000,7 @@ def write_run_inputs(case_dir: str | Path, structure: Atoms, template_dir: str |
 
     if not tdir.is_dir():
         print(f"  [write_run_inputs] WARNING: RUN_TEMPLATE {tdir} does not exist -- "
-              "no INCAR / KPOINTS / POTCAR written. Set RUN_TEMPLATE in §1.")
+              "no INCAR / KPOINTS written. Set RUN_TEMPLATE in §1.")
         return {"error": f"template dir missing: {tdir}"}
     for want in ("INCAR", "KPOINTS"):
         if not (tdir / want).is_file():
@@ -884,6 +1016,11 @@ def write_run_inputs(case_dir: str | Path, structure: Atoms, template_dir: str |
     if (tdir / "INCAR").is_file():
         incar_text = (tdir / "INCAR").read_text()
         mom = structure.get_initial_magnetic_moments()
+        if "Ni" in elements and not np.any(mom):
+            raise ValueError(
+                "refusing to export a Ni-containing VASP run without explicit "
+                "initial magnetic moments; call ensure_afm_moments() first"
+            )
         magmom = compact_magmom(mom) if np.any(mom) else None
         # DFT+U rebuilt for THIS case's species order: Ni -> (L=2, U=Ueff), else (-1, 0)
         ueff = _template_ueff(incar_text)
@@ -899,39 +1036,52 @@ def write_run_inputs(case_dir: str | Path, structure: Atoms, template_dir: str |
         for ln in incar_text.splitlines():
             key = ln.split("=", 1)[0].strip().upper() if "=" in ln else ""
             if key == "SYSTEM" and system_name:
-                out.append(f"SYSTEM = {system_name}"); done.add("SYSTEM")
+                out.append(f"SYSTEM = {system_name}")
+                done.add("SYSTEM")
             elif key == "MAGMOM" and magmom is not None:
-                out.append(f"MAGMOM = {magmom}"); done.add("MAGMOM")
+                out.append(f"MAGMOM = {magmom}")
+                done.add("MAGMOM")
             elif key in ldaul:
-                out.append(f"{key} = {ldaul[key]}"); done.add(key)
+                out.append(f"{key} = {ldaul[key]}")
+                done.add(key)
             elif key in ov:
-                out.append(f"{key} = {ov[key]}"); done.add(key)
+                out.append(f"{key} = {ov[key]}")
+                done.add(key)
+            elif ln.strip().startswith("# Dudarev DFT+U: species order"):
+                out.append(f"# Dudarev DFT+U: species order {' '.join(elements)}")
+            elif ln.strip().startswith("# C18 H22 N1 |"):
+                out.append(f"# Per-atom AFM initialization for {len(structure)} atoms")
             else:
                 out.append(ln)
         for extra in (ldaul, ov):
             for key, val in extra.items():
                 if key not in done:
-                    out.append(f"{key} = {val}"); done.add(key)
+                    out.append(f"{key} = {val}")
+                    done.add(key)
         if magmom is not None and "MAGMOM" not in done:
             out.append(f"MAGMOM = {magmom}")
         (case_dir / "INCAR").write_text("\n".join(out) + "\n", encoding="utf-8")
         notes["incar"] = ("rewritten: MAGMOM, LDAUL/U/J (species order "
                           f"{elements}), SYSTEM" + (", " + ",".join(ov) if ov else ""))
-    tpot = tdir / "POTCAR"
-    tblocks = _slice_potcar(tpot) if tpot.is_file() else {}
-    if potcar_root is not None and all((Path(potcar_root) / e / "POTCAR").is_file() for e in elements):
-        root = Path(potcar_root)
-        (case_dir / "POTCAR").write_bytes(
-            b"".join((root / e / "POTCAR").read_bytes() for e in elements))
-        notes["potcar"] = f"assembled {elements} from {root}"
-    elif all(e in tblocks for e in elements):
-        (case_dir / "POTCAR").write_text("".join(tblocks[e] for e in elements), encoding="utf-8")
-        notes["potcar"] = f"assembled {elements} from the template POTCAR"
-    else:
-        need = [e for e in elements if e not in tblocks]
-        notes["potcar"] = (f"skipped: template POTCAR has no {need}; set POTCAR_ROOT "
-                           "to a per-element PAW tree")
+    notes["species_order"] = elements
+    notes["potcar"] = "not generated; use the project POTCAR generator with POSCAR species order"
     return notes
+
+
+def dipole_center(atoms: Atoms) -> str:
+    """Mass-centre DIPOL tag in direct coordinates for an ``IDIPOL = 3`` slab."""
+    scaled = np.asarray(atoms.get_center_of_mass(scaled=True), dtype=float)
+    return f"0.5 0.5 {scaled[2] % 1.0:.8f}"
+
+
+def slab_incar_overrides(atoms: Atoms, *, decorated: bool) -> dict[str, str]:
+    """Safe cell/dipole overrides for a vacuum-containing slab optimization."""
+    overrides = {"ISIF": "2"}
+    if decorated:
+        overrides.update({"LDIPOL": ".TRUE.", "IDIPOL": "3", "DIPOL": dipole_center(atoms)})
+    else:
+        overrides["LDIPOL"] = ".FALSE."
+    return overrides
 
 
 # ==========================================================================
@@ -993,33 +1143,22 @@ def compact_magmom(moments) -> str:
     return " ".join(out)
 
 
-def try_assemble_potcar(poscar: Path, out_potcar: Path) -> dict:
-    try:
-        from interfaceforge.vasp import assemble_potcar, resolve_potcar_root
-
-        return assemble_potcar(poscar, out_potcar,
-                               pseudopotential_root=resolve_potcar_root(), force=True)
-    except Exception as exc:
-        return {"status": "skipped", "reason": str(exc)}
-
-
 def export_case(out_root: str | Path, name: str, structure: Atoms, provenance: dict, *,
                 subdir: str = "", run_template: str | Path | None = None,
-                potcar_root: str | Path | None = None, incar_overrides: dict | None = None,
-                template_dir: str | Path | None = None, write_potcar: bool = True,
+                incar_overrides: dict | None = None,
+                template_dir: str | Path | None = None,
                 sort_poscar: str = "element") -> Path:
     """Write a **runnable VASP optimization folder**.
 
     The structure is written **element-ordered** (alphabetical, ``sort=True``
     order) but via an explicit stable sort here -- so the POSCAR, MAGMOM, and
     the per-species ``LDAUL/LDAUU/LDAUJ`` all agree on one order.  Ni-up stays
-    before Ni-down.  Pass ``sort_poscar="keep"`` to disable.
+    before Ni-down.  POTCAR is deliberately not generated.  Pass
+    ``sort_poscar="keep"`` to disable sorting.
 
-    ``run_template`` -- a directory with INCAR / KPOINTS / POTCAR from a working
+    ``run_template`` -- a directory with INCAR / KPOINTS from a working
     run; ``write_run_inputs`` copies KPOINTS, rewrites INCAR (MAGMOM + LDAU tags
-    for *this* case's species order, SYSTEM, ``incar_overrides``), and builds
-    POTCAR in POSCAR element order (``potcar_root`` per-element tree, or sliced
-    from the template POTCAR).
+    for *this* case's species order, SYSTEM, and ``incar_overrides``).
     """
     import shutil
 
@@ -1035,10 +1174,9 @@ def export_case(out_root: str | Path, name: str, structure: Atoms, provenance: d
 
     if run_template is not None:
         provenance["run_inputs"] = write_run_inputs(
-            case_dir, structure, run_template, potcar_root=potcar_root,
-            system_name=name, incar_overrides=incar_overrides)
+            case_dir, structure, run_template, system_name=name,
+            incar_overrides=incar_overrides)
         template_dir = None
-        write_potcar = False
 
     fr, fe = frozen_free_indices(structure)
     provenance = {**provenance, "selective_dynamics": {
@@ -1052,8 +1190,6 @@ def export_case(out_root: str | Path, name: str, structure: Atoms, provenance: d
             src = Path(template_dir) / fname
             if src.is_file():
                 shutil.copy2(src, case_dir / fname)
-    if write_potcar:
-        provenance = {**provenance, "potcar": try_assemble_potcar(poscar, case_dir / "POTCAR")}
     provenance = {**provenance, "poscar_sha256": sha256_file(poscar),
                   "n_atoms": len(structure), "formula": structure.get_chemical_formula()}
     (case_dir / "provenance.json").write_text(

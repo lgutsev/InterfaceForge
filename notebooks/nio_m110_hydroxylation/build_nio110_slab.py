@@ -2,10 +2,8 @@
 
 Improvements over the `fcc110("Ni", ...) + manual O sublattice` recipe:
 
-* **rocksalt NiO(110) built directly** (``ase.build.surface``) -- correct 2:1
-  stoichiometry and a non-polar (Tasker type 1) termination, with no
-  lattice-constant-dependent ``positions + cell[0]/2`` hack that silently
-  misplaces O if the input cell isn't the conventional cube;
+* **rocksalt NiO(110)** with the correct 1:1 Ni:O stoichiometry and a non-polar
+  (Tasker type 1) termination;
 * **in-plane supercell sized to a target minimum image distance** so a standing
   phosphonate SAM does not interact with its periodic neighbour (the 12x12 A
   cell gave only ~5-6 A ring-to-ring);
@@ -26,14 +24,14 @@ thickness, or a symmetric slab.
 """
 from __future__ import annotations
 
-import numpy as np
 from pathlib import Path
+
+import numpy as np
 from ase import Atoms
 from ase.build import fcc110, make_supercell
 from ase.constraints import FixAtoms
 from ase.io import write
-
-from nio_hydroxylation_utils import assign_afm_ii_moments   # same directory
+from nio_hydroxylation_utils import assign_afm_ii_moments  # same directory
 
 # ----------------------------------------------------------------------------
 # knobs
@@ -98,8 +96,13 @@ magmom = f"{len(up)}*{MU_NI} {len(dn)}*{-MU_NI} {len(o_)}*0.0"
 # ----------------------------------------------------------------------------
 z = slab.positions[:, 2]
 planes = np.sort(np.unique(np.round(z - z.min(), 1)))          # distinct (110) sub-planes
-zcut = planes[min(FREEZE_LAYERS, len(planes) - 1)] + z.min() + 0.05
-frozen = np.where(z <= zcut)[0]
+if not 0 <= FREEZE_LAYERS <= len(planes):
+    raise ValueError(f"FREEZE_LAYERS={FREEZE_LAYERS} outside 0..{len(planes)}")
+if FREEZE_LAYERS:
+    zcut = planes[FREEZE_LAYERS - 1] + z.min() + 0.05
+    frozen = np.where(z <= zcut)[0]
+else:
+    frozen = np.array([], dtype=int)
 slab.set_constraint(FixAtoms(indices=frozen.tolist()))
 
 # ----------------------------------------------------------------------------
@@ -119,7 +122,7 @@ write(OUT_DIR / f"{OUT_STEM}.extxyz", slab)          # feed this to the notebook
     f"LDIPOL = .TRUE.\nIDIPOL = 3        # asymmetric slab -> dipole correction\n",
     encoding="utf-8")
 
-print(f"NiO(110) AFM-II slab")
+print("NiO(110) AFM-II slab")
 print(f"  a (bulk)      : {A_NIO} A")
 print(f"  layers        : {N_LAYERS}")
 print(f"  supercell P   : [[{2*n},{-3*n}],[{2*n},{3*n}]]   ({int(round(np.linalg.det(P)))}-fold)")
