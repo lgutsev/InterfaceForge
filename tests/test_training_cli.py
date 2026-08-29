@@ -52,8 +52,22 @@ class TrainingTests(unittest.TestCase):
                 "batch_atoms": 64,
                 "max_concurrent": 1,
             }
-            campaign = load_campaign(write_campaign(root, deepmd=deepmd))
+            campaign_path = write_campaign(root, deepmd=deepmd)
+            profile_path = root / "profile.yaml"
+            profile_data = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+            profile_data["jobs"]["deepmd_gpu"]["modules"] = [
+                "deepmd-kit/r9.3-deepmd3.2.0.b.0-gpu"
+            ]
+            profile_path.write_text(
+                yaml.safe_dump(profile_data, sort_keys=False), encoding="utf-8"
+            )
+            campaign = load_campaign(campaign_path)
             manifest = generate_deepmd_training(campaign)
+            self.assertEqual(manifest["runtime"]["profile"], "deepmd_gpu")
+            self.assertEqual(
+                manifest["runtime"]["modules"],
+                ["deepmd-kit/r9.3-deepmd3.2.0.b.0-gpu"],
+            )
             self.assertEqual(
                 manifest["execution_order"],
                 [

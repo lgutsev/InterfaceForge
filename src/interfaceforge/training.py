@@ -628,6 +628,7 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
 
     profile = load_profile(campaign.profile_path)
     profile_name = str(settings.get("profile", "deepmd_gpu"))
+    profile_job = dict(profile.get("jobs", {}).get(profile_name, {}))
     backend_flag, frozen_name = _backend_flag(backend)
     architectures_array = " ".join(shlex.quote(value) for value in architectures)
     prefix = _deepmd_shell_prefix(settings, backend, scheduler=str(profile.get("scheduler", "")).lower())
@@ -810,6 +811,11 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
         "campaign": campaign.name,
         "backend": backend,
         "backend_flag": backend_flag,
+        "runtime": {
+            "profile": profile_name,
+            "modules": [str(value) for value in profile_job.get("modules", [])],
+            "container_image": str(settings.get("container_image", "")),
+        },
         "architectures": architectures,
         "dataset_root": str(dataset_root),
         "type_map": type_map,

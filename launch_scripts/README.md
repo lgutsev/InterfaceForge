@@ -17,6 +17,10 @@ environment paths, wall time, job name, executable, and resource counts before r
   `gpu_usage_<jobid>.log`. Canonical InterfaceForge labels default to
   `REF_energy` and `REF_forces`; legacy datasets can override them through
   `MACE_ENERGY_KEY` and `MACE_FORCES_KEY`.
+- `deepmd_32_gpu_preflight.sbatch`: non-mutating `gpu2` check for LONI's
+  `deepmd-kit/r9.3-deepmd3.2.0.b.0-gpu` module, DeePMD 3.2 PyTorch commands,
+  CUDA visibility, and optional LAMMPS DeePMD support. It does not request
+  memory manually.
 - `restart_daughter_jobs.sh`: one-level campaign helper for immediate VASP daughter
   directories. It can run either `Restart <daughter>` or `TotalRestart <daughter>`,
   copies root `INCAR`, `KPOINTS`, and `runvasp.sh`, verifies the expected restart

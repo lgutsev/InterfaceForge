@@ -50,3 +50,47 @@ DEEPMD_IMAGE=/new/path/deepmd.sif sbatch models/deepmd/run_preflight.slurm
 Do not infer production readiness from training success alone. Verify the
 frozen model with `dp test`, committee deviation, and the exact downstream MD
 engine.
+
+## LONI DeePMD-kit 3.2 module
+
+The `deepmd_gpu_320` profile uses the native LONI module
+`deepmd-kit/r9.3-deepmd3.2.0.b.0-gpu`. It is separate from `deepmd_gpu`, so an
+older campaign using an activated environment or container is not silently
+moved to a different DeePMD runtime. Neither profile requests memory manually.
+
+Use PyTorch and begin with one DPA-2 architecture for a four-model committee:
+
+```yaml
+models:
+  deepmd:
+    enabled: true
+    profile: deepmd_gpu_320
+    backend: pytorch
+    architectures: [dpa2]
+    committee: 4
+    seeds: [11, 23, 37, 53]
+    numb_steps: 500000
+    batch_atoms: 1024
+    max_concurrent: 2
+```
+
+Before generating or submitting production training, run the independent site
+module preflight:
+
+```bash
+sbatch /path/to/InterfaceForge/launch_scripts/deepmd_32_gpu_preflight.sbatch
+```
+
+Then generate jobs from the campaign root and execute them in order:
+
+```bash
+iface train deepmd
+sbatch models/deepmd/run_preflight.slurm
+sbatch models/deepmd/run_smoke.slurm
+sbatch models/deepmd/run_ensemble.slurm
+sbatch models/deepmd/run_evaluate.slurm
+```
+
+Wait for each preceding stage to succeed. In particular, do not submit the full
+ensemble until the smoke job has trained, frozen, and tested its short DPA-2
+model. The ensemble manifest records the exact scheduler profile and module.
