@@ -54,6 +54,14 @@ from .mlff_interfaces import (
 from .regfgw import compare_registry_selection, regfgw_status, run_regfgw_optimize
 from .report import build_report
 from .selection import select_from_csv
+from .surface import (
+    analyze_surface,
+    audit_surface_runs,
+    build_surface_campaign,
+    optimize_surface_cell,
+    plan_surface_campaign,
+    select_surface_candidates,
+)
 from .training import generate_deepmd_training, generate_mace_training
 from .validation import (
     adhesion_from_csv,
@@ -661,6 +669,80 @@ def cmd_geom(args: argparse.Namespace) -> int:
         batches = [r for r in (results if len(results) > 1 else [payload]) if "rows" in r]
         if batches:
             _print_vacuum_summary(batches, args)
+    return 0
+
+
+def cmd_surface_analyze(args: argparse.Namespace) -> int:
+    _json(
+        analyze_surface(
+            args.structure,
+            metal=args.metal,
+            anion=args.anion,
+            coordination_cutoff=args.coordination_cutoff,
+            bulk_coordination=args.bulk_coordination,
+            top_tolerance=args.top_tolerance,
+        ).to_dict()
+    )
+    return 0
+
+
+def cmd_surface_cell_optimize(args: argparse.Namespace) -> int:
+    _json(
+        optimize_surface_cell(
+            args.slab,
+            adsorbate_path=args.adsorbate,
+            min_multiplier=args.min_multiplier,
+            max_multiplier=args.max_multiplier,
+            max_atoms=args.max_atoms,
+            min_translation=args.min_translation,
+            min_image_gap=args.min_image_gap,
+            max_aspect=args.max_aspect,
+            translation_parity=tuple(args.translation_parity) if args.translation_parity else None,
+            orientation_samples=args.orientation_samples,
+            frozen_bottom_layers=args.freeze_bottom_layers,
+            output=args.output,
+            force=args.force,
+            top=args.top,
+        )
+    )
+    return 0
+
+
+def cmd_surface_plan(args: argparse.Namespace) -> int:
+    _json(plan_surface_campaign(args.campaign))
+    return 0
+
+
+def cmd_surface_build(args: argparse.Namespace) -> int:
+    _json(build_surface_campaign(args.campaign, force=args.force))
+    return 0
+
+
+def cmd_surface_audit(args: argparse.Namespace) -> int:
+    _json(audit_surface_runs(args.root, output=args.output))
+    return 0
+
+
+def cmd_surface_select(args: argparse.Namespace) -> int:
+    _json(
+        select_surface_candidates(
+            args.candidates,
+            args.output,
+            count=args.count,
+            uncertainty_column=args.uncertainty_column,
+            feature_columns=tuple(args.feature_column),
+            state_columns=tuple(args.state_column),
+            max_per_state=args.max_per_state,
+            uncertainty_weight=args.uncertainty_weight,
+        )
+    )
+    return 0
+
+
+def cmd_surface_init(args: argparse.Namespace) -> int:
+    destination = Path(args.output).expanduser().resolve()
+    _copy_resource("surface_nio110.yaml", destination, args.force)
+    _json({"template": str(destination)})
     return 0
 
 
@@ -1286,6 +1368,90 @@ def build_parser() -> argparse.ArgumentParser:
     add_campaign_option(mi_audit)
     mi_audit.add_argument("--readiness-profile", default="general", choices=READINESS_PROFILES)
     mi_audit.set_defaults(func=cmd_mlff_interfaces)
+
+    surface = commands.add_parser(
+        "surface",
+        help="Reaction- and magnetism-aware surface campaign generation",
+    )
+    surface_commands = surface.add_subparsers(dest="surface_command", required=True)
+
+    surface_init = surface_commands.add_parser(
+        "init", help="Write the documented NiO(110) reactive-campaign template"
+    )
+    surface_init.add_argument("-o", "--output", default="surface_campaign.yaml")
+    surface_init.add_argument("--force", action="store_true")
+    surface_init.set_defaults(func=cmd_surface_init)
+
+    surface_analyze = surface_commands.add_parser(
+        "analyze", help="Identify exposed under-coordinated surface metal sites"
+    )
+    surface_analyze.add_argument("structure")
+    surface_analyze.add_argument("--metal", required=True)
+    surface_analyze.add_argument("--anion", default="O")
+    surface_analyze.add_argument("--coordination-cutoff", type=float, default=2.7)
+    surface_analyze.add_argument("--bulk-coordination", type=int, default=6)
+    surface_analyze.add_argument("--top-tolerance", type=float, default=0.8)
+    surface_analyze.set_defaults(func=cmd_surface_analyze)
+
+    surface_cell = surface_commands.add_parser(
+        "cell-optimize",
+        help="Choose a tractable surface cell satisfying image-gap and AFM constraints",
+    )
+    surface_cell.add_argument("slab", help="Primitive or small periodic slab")
+    surface_cell.add_argument("--adsorbate", help="Molecule used for periodic-image clearance")
+    surface_cell.add_argument("--min-multiplier", type=int, default=1)
+    surface_cell.add_argument("--max-multiplier", type=int, default=30)
+    surface_cell.add_argument("--max-atoms", type=int)
+    surface_cell.add_argument("--min-translation", type=float, default=0.0)
+    surface_cell.add_argument("--min-image-gap", type=float, default=3.5)
+    surface_cell.add_argument("--max-aspect", type=float, default=2.0)
+    surface_cell.add_argument(
+        "--translation-parity",
+        nargs=2,
+        type=int,
+        metavar=("P1", "P2"),
+        help="AFM phase vector modulo 2; NiO(110) uses 1 0",
+    )
+    surface_cell.add_argument("--orientation-samples", type=int, default=12)
+    surface_cell.add_argument("--freeze-bottom-layers", type=int)
+    surface_cell.add_argument("--top", type=int, default=20)
+    surface_cell.add_argument("-o", "--output", help="Write the best cell as a POSCAR")
+    surface_cell.add_argument("--force", action="store_true")
+    surface_cell.set_defaults(func=cmd_surface_cell_optimize)
+
+    surface_plan = surface_commands.add_parser(
+        "plan", help="Validate and enumerate a reactive surface campaign without writing runs"
+    )
+    surface_plan.add_argument("campaign")
+    surface_plan.set_defaults(func=cmd_surface_plan)
+
+    surface_build = surface_commands.add_parser(
+        "build", help="Generate provenance-stamped reactive surface run directories"
+    )
+    surface_build.add_argument("campaign")
+    surface_build.add_argument("--force", action="store_true")
+    surface_build.set_defaults(func=cmd_surface_build)
+
+    surface_audit = surface_commands.add_parser(
+        "audit", help="Classify relaxed chemistry and audit converged surface spins"
+    )
+    surface_audit.add_argument("root")
+    surface_audit.add_argument("-o", "--output")
+    surface_audit.set_defaults(func=cmd_surface_audit)
+
+    surface_select = surface_commands.add_parser(
+        "select",
+        help="Select uncertain/diverse frames while preserving reaction- and spin-state coverage",
+    )
+    surface_select.add_argument("candidates", help="CSV containing uncertainty and surface-state labels")
+    surface_select.add_argument("output", help="Labeling-queue CSV")
+    surface_select.add_argument("--count", type=int, required=True)
+    surface_select.add_argument("--uncertainty-column", default="uncertainty")
+    surface_select.add_argument("--feature-column", action="append", default=[])
+    surface_select.add_argument("--state-column", action="append", default=[])
+    surface_select.add_argument("--max-per-state", type=int, default=2)
+    surface_select.add_argument("--uncertainty-weight", type=float, default=0.65)
+    surface_select.set_defaults(func=cmd_surface_select)
 
     vasp = commands.add_parser("vasp", help="Safe VASP utilities")
     vasp_commands = vasp.add_subparsers(dest="vasp_command", required=True)

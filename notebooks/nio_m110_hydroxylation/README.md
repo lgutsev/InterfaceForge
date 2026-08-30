@@ -1,10 +1,13 @@
 # NiO(110) surface hydroxylation — training-data generator
 
-One self-contained notebook that builds **partially hydroxylated NiO(110) slabs**
-(and phosphonate-ligand-decorated variants) as input for VASP+U relaxation / AIMD.
-This is a standalone application notebook — it is *not* part of the
-InterfaceForge package and does not modify it. It deliberately does **not**
-generate POTCAR files; use the project's normal POTCAR generator after export.
+This directory retains the exploratory notebook that builds **partially
+hydroxylated NiO(110) slabs** (and phosphonate-ligand-decorated variants) as
+input for VASP+U relaxation / AIMD. Its generic, tested workflow is now also
+available through `iface surface`; `surface_campaign.yaml` reproduces the
+reactive coverage grid without running notebook cells. The notebook remains
+useful for visualization and manual hydrogen-orientation experiments. Neither
+path generates POTCAR files; use the project's normal POTCAR generator after
+export.
 
 ## Why
 

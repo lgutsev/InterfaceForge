@@ -1,0 +1,64 @@
+# InterfaceForge reactive-surface campaign schema v1.
+# Paths are resolved relative to this file.
+version: 1
+name: NiO_m110_U46
+
+surface:
+  structure: inputs/NiO_110_AFM_compromise.POSCAR
+  metal: Ni
+  anion: O
+  coordination_cutoff: 2.7
+  bulk_coordination: 6
+  top_tolerance: 0.8
+
+freeze:
+  # Preserve the compromise slab's Selective-Dynamics bottom plane.
+  mode: inherit
+  required: true
+
+magnetism:
+  # Re-derive AFM-II from linear Ni-O-Ni superexchange. This remains valid
+  # after hydroxyl/ligand atoms are added and the POSCAR is element-sorted.
+  mode: superexchange
+  magnetic_species: Ni
+  bridge_species: O
+  moment: 2.0
+  bond_cutoff: 2.7
+  linear_dot: -0.85
+  require_balanced: true
+
+states:
+  coverages: [0.0, 0.25, 0.50, 0.75, 1.0]
+  arrangements: [clustered, scattered]
+  motifs: [terminal_hydroxyl, dissociated_water]
+  seed: 1
+  parameters:
+    metal_o_distance: 2.0
+    oh_distance: 0.97
+    acceptor_minimum: 1.5
+    acceptor_maximum: 3.2
+    surface_anion_band: 1.6
+
+# Add more entries for MeO-2PACz, MeO-4PADBC, and DCZ-4P. Direct adsorption
+# is generated only while a bare exposed Ni remains; OH100 uses the explicitly
+# different molecular surface-OH...O=P mode.
+adsorbates:
+  - name: Me-4PACz
+    file: inputs/Me4PACz.xyz
+    modes:
+      - mode: direct
+        coverages: [0.0, 0.25, 0.50, 0.75]
+        metal_o_distance: 2.05
+        minimum_contact: 1.4
+      - mode: hbond
+        coverages: [1.0]
+        hbond_distance: 1.8
+        minimum_contact: 1.4
+
+export:
+  output: generated_surface_campaign
+  vasp_template: inputs/vasp_template
+  incar_overrides:
+    ENCUT: 520
+    ISIF: 2
+    ISYM: 0

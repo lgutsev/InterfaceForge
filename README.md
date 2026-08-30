@@ -61,6 +61,7 @@ known gaps, and the minimum checks needed to promote a feature's status.
 | Active learning | thermodynamic exploration matrix and uncertainty-plus-diversity labeling queue; AI2-Kit TESLA MACE/OpenMM/VASP with oh-my-batch; legacy config-driven DeepMD/LAMMPS/VASP | **Code-only.** No completed external-engine loop. |
 | Validation | parity metrics, work of adhesion with uncertainty propagation, rigid-separation curves | **Code-only.** Numerical routines may be unit-tested, but no scientific validation campaign has established model accuracy. |
 | Crystalline interface generation | optional InterMat surface matching, separation/registry scans, deduplicated POSCAR export | **Code-only.** Generated structures have not been human-reviewed in a real InterMat campaign. |
+| Reactive magnetic surfaces | exposed-site analysis, AFM-compatible cell optimization, stoichiometric hydroxylation/proton-transfer states, direct/H-bond phosphonate docking, runnable VASP export, and post-relaxation chemistry/spin audits | **Automated-test verified on the bundled 200-atom NiO(110) system.** The generator recovers the `[[4,0],[0,5]]` compromise cell and builds the full reference campaign; no generated VASP relaxation has yet been scientifically validated. |
 | Provenance | manifests, hashes, append-only events, JSON/CSV/Markdown audits and a self-contained HTML report | **Mostly code-only.** VASP-MLFF audit outputs are the exception; the broader campaign provenance chain has not been exercised end to end. |
 
 ## Install
@@ -114,6 +115,22 @@ iface-mapped-collect examples/mapped-leaf-campaign/template.yaml --execute --col
 The periodic SiN/TiN/TiO example is available as
 `launch_scripts/prepare_periodic_nitride_mlips.sh`. See the
 [mapped leaf-campaign guide](examples/mapped-leaf-campaign/README.md).
+
+For reactive magnetic oxide surfaces, start from the packaged declarative
+campaign instead of copying notebook cells:
+
+```bash
+iface surface init -o surface_campaign.yaml
+iface surface plan surface_campaign.yaml
+iface surface build surface_campaign.yaml
+iface surface audit generated_surface_campaign -o surface_audit.csv
+```
+
+`iface surface cell-optimize` chooses an in-plane transformation under a real
+adsorbate-image clearance, atom budget, aspect-ratio limit, and optional AFM
+translation parity. The bundled NiO(110)/Me4PACz benchmark independently
+recovers the 200-atom `[[4,0],[0,5]]` compromise. See the
+[reactive-surface guide](docs/reactive-surfaces.md).
 
 Collect a completed four-member MACE committee into a compact, immutable bundle
 before deployment or active learning:
