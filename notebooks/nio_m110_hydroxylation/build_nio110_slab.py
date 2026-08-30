@@ -135,8 +135,14 @@ if len(frozen) != expected_frozen:
 # 5. write POSCAR (order-preserving, selective dynamics) + extxyz + starter
 # ----------------------------------------------------------------------------
 OUT_DIR.mkdir(exist_ok=True)
-write(OUT_DIR / f"{OUT_STEM}.POSCAR", slab, format="vasp", direct=True,
-      vasp5=True, sort=False)
+poscar_path = OUT_DIR / f"{OUT_STEM}.POSCAR"
+write(poscar_path, slab, format="vasp", direct=True, vasp5=True, sort=False)
+# ASE pads the POSCAR title/species lines; normalize those harmless spaces so
+# the committed generated reference also passes ``git diff --check``.
+poscar_path.write_text(
+    "\n".join(line.rstrip() for line in poscar_path.read_text().splitlines()) + "\n",
+    encoding="utf-8",
+)
 write(OUT_DIR / f"{OUT_STEM}.extxyz", slab)          # feed this to the notebook
 
 (OUT_DIR / f"{OUT_STEM}.INCAR_starter").write_text(
