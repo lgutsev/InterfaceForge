@@ -103,14 +103,53 @@ def test_full_oh_grid_is_separate_hydrogen_bond_mode(utils):
 
 
 def test_full_real_surface_has_one_lattice_proton_per_selected_ni(utils):
-    slab = utils.load_structure(NOTEBOOK_DIR / "inputs" / "CONTCAR").repeat((2, 2, 1))
+    slab = utils.load_structure(
+        NOTEBOOK_DIR / "inputs" / "NiO_110_AFM_compromise.POSCAR"
+    )
     surface = utils.analyse_surface(slab)
     hydroxyls = utils.build_dissociated_pair(surface, surface.exposed_ni)
 
-    assert len(surface.exposed_ni) == 48
-    assert sum(h.kind == "ni_oh" for h in hydroxyls) == 48
-    assert sum(h.kind == "lattice_oh" for h in hydroxyls) == 48
-    assert len({h.parent_o for h in hydroxyls if h.kind == "lattice_oh"}) == 48
+    assert len(surface.exposed_ni) == 20
+    assert sum(h.kind == "ni_oh" for h in hydroxyls) == 20
+    assert sum(h.kind == "lattice_oh" for h in hydroxyls) == 20
+    assert len({h.parent_o for h in hydroxyls if h.kind == "lattice_oh"}) == 20
+
+
+def test_compromise_slab_preserves_freezer_and_separates_real_ligands(utils):
+    slab = utils.load_structure(
+        NOTEBOOK_DIR / "inputs" / "NiO_110_AFM_compromise.POSCAR"
+    )
+    frozen, mobile = utils.frozen_free_indices(slab)
+
+    assert len(slab) == 200
+    assert np.allclose(slab.cell.lengths(), [16.74535035, 14.80093848, 35.92037539])
+    assert len(frozen) == 40
+    assert len(mobile) == 160
+    assert slab.positions[frozen, 2].max() < slab.positions[mobile, 2].min()
+
+    utils.assign_afm_ii_moments(slab)
+    moments = slab.get_initial_magnetic_moments()
+    assert (moments > 0).sum() == 50
+    assert (moments < 0).sum() == 50
+    assert moments.sum() == pytest.approx(0.0)
+
+    surface = utils.analyse_surface(slab)
+    target_xy = slab.positions[surface.exposed_ni[0], :2]
+    for ligand_file in ("Me4PACz.xyz", "MeO-2PACz.xyz", "MeO-4PADBC.xyz", "DCZ-4P.xyz"):
+        molecule = utils.load_molecule(NOTEBOOK_DIR / "inputs" / ligand_file)
+        anchor = utils.find_phosphonate_anchor(molecule)
+        oriented = utils.orient_phosphonate(molecule, anchor)
+        structure, _tilt = utils.place_ligand(
+            slab, oriented, anchor, target_xy, ni_plane_z=surface.top_z)
+        assert utils.periodic_self_image_gap(structure, len(slab)) >= 3.5
+
+
+def test_periodic_self_image_gap_detects_touching_adsorbates(utils):
+    slab = Atoms("Ni", positions=[[0.0, 0.0, 0.0]], cell=[10, 10, 20], pbc=True)
+    ligand = Atoms("CC", positions=[[1.0, 1.0, 3.0], [8.0, 1.0, 3.0]],
+                   cell=slab.cell, pbc=True)
+
+    assert utils.periodic_self_image_gap(slab + ligand, len(slab)) == pytest.approx(3.0)
 
 
 def test_ligand_binding_oxygen_is_placed_over_target_ni(utils):

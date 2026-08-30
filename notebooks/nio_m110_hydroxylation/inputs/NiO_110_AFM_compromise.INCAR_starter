@@ -1,0 +1,11 @@
+# starter tags for NiO_110_AFM_compromise -- merge into your production INCAR
+ISPIN  = 2
+MAGMOM = 50*2.0 50*-2.0 100*0.0
+LDAU   = .TRUE.
+LDAUTYPE = 2
+LDAUL = 2 -1
+LDAUU = 4.6 0.0
+LDAUJ = 0.0 0.0
+LMAXMIX = 4
+LDIPOL = .TRUE.
+IDIPOL = 3        # asymmetric slab -> dipole correction

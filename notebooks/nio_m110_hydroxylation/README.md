@@ -85,10 +85,11 @@ Configured in the sweep cell (§3):
 The interface must be **anchored from the bottom** — every exported slab has a
 frozen bottom region (`F F F`), everything above relaxes (`T T T`).
 
-- `FREEZE_MODE = "auto"` *(default)* — keep the CONTCAR's `F/T` flags if it has
-  any; otherwise freeze the bottom `FREEZE_VALUE` (2) layers. Never leaves a slab
+- `FREEZE_MODE = "auto"` *(default)* — keep the input POSCAR's `F/T` flags if it has
+  any; otherwise freeze the bottom `FREEZE_VALUE` (1) layer. Never leaves a slab
   un-anchored. Added OH / ligand atoms stay mobile. Tiles correctly under
-  `SURFACE_SUPERCELL` (24 frozen → 96 for a 2×2).
+  `SURFACE_SUPERCELL`. The compromise slab freezes 40/200 atoms, exactly the
+  same 20% bottom plane as the original 24/120 slab.
 - `FREEZE_MODE = "inherit"` — keep the CONTCAR's flags; **error** if it has none.
 - `FREEZE_MODE = "bottom"` + `FREEZE_SUBMODE` ∈ `{layers, thickness, fraction,
   count}` — always re-derive a bottom band.
@@ -287,22 +288,40 @@ frame-independent 2-colouring of the Ni `<100>` graph (`assign_afm_ii_moments`).
 `compact_magmom` re-encodes them per case (`30*2 30*-2 72*0` — added OH / ligand
 atoms trail as `N*0.0`).
 
-## Surface size — passivant images
+## Surface size — 200-atom compromise
 
-The supplied ~12 × 12 Å cell puts a standing passivant's periodic images only
-**5–6.6 Å** apart (ring-to-ring). Measured minimum image contact:
+The old 120-atom, ~12 × 12 Å cell was only slightly too small, while its 2×2
+repeat jumped to 480 atoms. `build_nio110_slab.py` now uses the AFM-compatible
+20-fold matrix `[[4,0],[0,5]]`, built from the bundled 4.1863376 Å bulk POSCAR:
 
-| supercell | in-plane | Me-4PACz | MeO-2PACz | MeO-4PADBC | DCZ-4P |
-|---|---|---|---|---|---|
-| `(1,1,1)` | ~12 Å  | 6.4 Å | 6.6 Å | 5.3 Å | 5.0 Å |
-| `(2,2,1)` | ~24 Å  | 16.8 Å | 17.5 Å | 15.4 Å | 15.7 Å |
-| `(3,3,1)` | ~36 Å  | 28.6 Å | 29.1 Å | 27.0 Å | 27.3 Å |
+| slab | in-plane cell | atoms | effective linear scale vs old | frozen |
+|---|---:|---:|---:|---:|
+| old 12-fold | ~12.21 × 12.21 Å | 120 | 1.000 | 24 |
+| **default compromise** | **16.75 × 14.80 Å** | **200** | **1.291** | **40** |
+| old 2×2 repeat | ~24.4 × 24.4 Å | 480 | 2.000 | 96 |
 
-**`SURFACE_SUPERCELL = (2, 2, 1)` is the default** (480 atoms, Ni240 O240) — it
-`repeat()`s the *relaxed* CONTCAR (AFM pattern and freeze constraint tile with
-it; only the adsorbate region then needs relaxing), 480 atoms. Drop to `(1,1,1)` for
-bare / hydroxylated-only runs. To rebuild the surface from scratch
-(different size / thickness / symmetric slab) use `build_nio110_slab.py`.
+For pristine-surface docking, the final deterministic orientations give minimum
+all-atom ligand-to-ligand image gaps of 5.19 Å (Me-4PACz), 9.40 Å (MeO-2PACz),
+9.15 Å (MeO-4PADBC), and 7.14 Å (DCZ-4P), including the contact-search tilts.
+Every ligand export independently recalculates this value and refuses to write
+a case below `MIN_PERIODIC_LIGAND_GAP = 3.5 Å`, so hydroxylated/boundary cases
+cannot silently reintroduce touching mirror images.
+
+`SURFACE_SUPERCELL = (1, 1, 1)` is therefore the default. The supplied slab
+retains the original five-layer thickness and one frozen bottom plane. Rebuild
+it from `inputs/POSCAR_bulk` with `build_nio110_slab.py` when changing the
+lattice constant, thickness, or transformation matrix.
+
+```bash
+cd notebooks/nio_m110_hydroxylation
+python build_nio110_slab.py
+```
+
+For a production campaign, first relax the generated **bare** 200-atom slab
+once at the final 520 eV settings. Then replace the bundled compromise POSCAR
+(or point `SURFACE_FILE`) at that relaxed CONTCAR before generating all
+hydroxylated/passivated cases. This amortizes the clean-surface relaxation
+instead of repeating it independently in every decorated optimization.
 
 ## Acceptance
 
