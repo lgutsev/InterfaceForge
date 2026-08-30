@@ -743,6 +743,33 @@ def _min_gap(a_pos: np.ndarray, b_pos: np.ndarray, cell) -> float:
     return float(np.linalg.norm(d, axis=-1).min())
 
 
+def periodic_self_image_gap(structure: Atoms, first_index: int, *, images: int = 2) -> float:
+    """Smallest atom--atom distance between one adsorbate and any in-plane image.
+
+    ``first_index`` splits the substrate from the final adsorbate.  Unlike a
+    minimum-image distance within one coordinate set, this explicitly compares
+    the adsorbate with translated copies, so atom ``i`` is also checked against
+    its own image.  The surface-normal direction is deliberately not periodic.
+    """
+    first_index = int(first_index)
+    if not 0 <= first_index < len(structure):
+        raise ValueError("first_index must leave a nonempty adsorbate")
+    if images < 1:
+        raise ValueError("images must be at least 1")
+    positions = np.asarray(structure.positions[first_index:], dtype=float)
+    a, b = _cell_array(structure.cell)[:2]
+    best = np.inf
+    for ia in range(-images, images + 1):
+        for ib in range(-images, images + 1):
+            if ia == 0 and ib == 0:
+                continue
+            shifted = positions + ia * a + ib * b
+            distances = np.linalg.norm(
+                positions[:, None, :] - shifted[None, :, :], axis=-1)
+            best = min(best, float(distances.min()))
+    return best
+
+
 @dataclass(frozen=True)
 class ContactDiagnostic:
     """Most limiting ligand--slab atom pair relative to its chemical floor."""
