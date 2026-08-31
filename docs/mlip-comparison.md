@@ -70,7 +70,11 @@ Finalization independently checks that the reference columns written by
 - `publication_rmse_by_group.csv`: exact pooled energy and force RMSE for the
   overall test set and seven physical-system bins;
 - `publication_rmse_summary.{png,svg,pdf}`: compact two-panel main figure with
-  energy and force RMSE, four committee members, and the ensemble mean;
+  energy and force RMSE, four committee members, and the committee-averaged
+  prediction;
+- `temperature_rmse_by_group.csv`: pooled RMSE for Overall, 300 K, and 450 K;
+- `temperature_rmse_summary.{png,svg,pdf}`: separate publication figure using
+  the same energy/force and committee visual encoding for temperature;
 - `force_rmse_heatmap_mace.{png,svg}` and
   `force_rmse_heatmap_dpa2.{png,svg}`: annotated member-by-system heatmaps;
 - `force_rmse_heatmaps.{png,svg}`: both committees side by side with identical
@@ -89,7 +93,14 @@ resolution remains available in `metrics_by_group.csv` and the diagnostic
 heatmaps. The plotted RMSE is recomputed by observation weighting of squared
 per-system RMSEs, not by averaging per-system RMSE values. Open circles are
 the four independently trained models, the connecting segment is their range,
-and the filled diamond is the committee-mean prediction.
+and the filled diamond is the RMSE of the committee-averaged prediction. The
+diamond is not the arithmetic mean of the four member RMSEs and may lie below
+their range when member errors cancel.
+
+The temperature summary separately pools all 24 test systems at 300 K and all
+24 at 450 K. Its Overall row is identical to the Overall row in the physical-
+system figure, providing a direct visual reference without mixing temperature
+and chemistry into one overloaded panel.
 
 Energy is evaluated per atom. Force RMSE is over Cartesian components; vector
 RMSE and force RMSE normalized by the reference-force standard deviation are
@@ -130,9 +141,14 @@ because this MACE committee was not trained on virials.
    `Overall`, three bulk chemistries, and four interface family/termination
    combinations for each member and ensemble. Open
    `publication_rmse_summary.pdf`; both panels must show four open member
-   circles and one filled ensemble diamond per engine and bin.
+   circles and one filled committee-prediction diamond per engine and bin.
 
-6. Debugging cross-check: the individual MACE micro force RMSE values should
+6. Confirm `temperature_rmse_by_group.csv` contains `Overall`, `300 K`, and
+   `450 K`, with 48, 24, and 24 systems respectively. Open
+   `temperature_rmse_summary.pdf` and confirm its Overall values match the
+   physical-system figure exactly.
+
+7. Debugging cross-check: the individual MACE micro force RMSE values should
    reproduce the existing MACE test table near 62 meV/A within ordinary
    numerical/inference rounding. The DPA-2 individual micro values should
    exactly reproduce its existing `rmse_overall.csv`. Investigate any larger

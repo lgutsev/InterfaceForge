@@ -9,6 +9,7 @@ import json
 import math
 import re
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -748,6 +749,8 @@ PUBLICATION_GROUP_ORDER = (
     "Real / Ti-terminated interface",
 )
 
+TEMPERATURE_GROUP_ORDER = ("Overall", "300 K", "450 K")
+
 
 def _publication_group(row: dict[str, Any]) -> str:
     """Collapse the 48 trajectories into chemically interpretable figure bins."""
@@ -774,18 +777,57 @@ def _publication_group(row: dict[str, Any]) -> str:
 def _publication_summary_rows(
     system_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Return exact pooled RMSEs for the overall set and physical-system bins.
+    """Return exact pooled RMSEs for the overall set and physical-system bins."""
+
+    return _pooled_summary_rows(
+        system_rows,
+        group_key="physical_group",
+        group_order=PUBLICATION_GROUP_ORDER,
+        group_for=_publication_group,
+    )
+
+
+def _temperature_group(row: dict[str, Any]) -> str:
+    temperature = str(row["temperature"])
+    if not re.fullmatch(r"\d+K", temperature):
+        raise SafetyError(
+            f'Cannot assign temperature group: {row["relative_leaf"]}'
+        )
+    return temperature.removesuffix("K") + " K"
+
+
+def _temperature_summary_rows(
+    system_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return exact pooled RMSEs for the overall, 300 K, and 450 K sets."""
+
+    return _pooled_summary_rows(
+        system_rows,
+        group_key="temperature_group",
+        group_order=TEMPERATURE_GROUP_ORDER,
+        group_for=_temperature_group,
+    )
+
+
+def _pooled_summary_rows(
+    system_rows: list[dict[str, Any]],
+    *,
+    group_key: str,
+    group_order: tuple[str, ...],
+    group_for: Callable[[dict[str, Any]], str],
+) -> list[dict[str, Any]]:
+    """Return exact pooled RMSEs for an overall set and requested bins.
 
     RMSEs are pooled from squared per-system RMSEs with their correct numbers
     of observations. This is algebraically identical to recomputing the metric
     from all frame predictions in a bin; it is not an average of RMSEs.
     """
 
-    augmented = [(row, _publication_group(row)) for row in system_rows]
+    augmented = [(row, group_for(row)) for row in system_rows]
     groups_present = {group for _, group in augmented}
     ordered_groups = [
         group
-        for group in PUBLICATION_GROUP_ORDER
+        for group in group_order
         if group == "Overall" or group in groups_present
     ]
     rows: list[dict[str, Any]] = []
@@ -844,7 +886,7 @@ def _publication_summary_rows(
                         "engine": engine,
                         "model": model,
                         "seed": selected[0]["seed"],
-                        "physical_group": group,
+                        group_key: group,
                         "systems": len(selected),
                         "frames": energy_observations,
                         "atom_frames": force_observations // 3,
@@ -856,7 +898,14 @@ def _publication_summary_rows(
 
 
 def _write_publication_rmse_figure(
-    output: Path, summary_rows: list[dict[str, Any]]
+    output: Path,
+    summary_rows: list[dict[str, Any]],
+    *,
+    group_key: str = "physical_group",
+    group_order: tuple[str, ...] = PUBLICATION_GROUP_ORDER,
+    path_stem: str = "publication_rmse_summary",
+    output_key: str = "publication_rmse",
+    figure_height: float = 4.0,
 ) -> dict[str, Path]:
     """Plot compact, publication-oriented energy and force RMSE panels."""
 
@@ -877,17 +926,17 @@ def _write_publication_rmse_figure(
     offsets = {"MACE": -0.13, "DPA2": 0.13}
     groups = [
         group
-        for group in PUBLICATION_GROUP_ORDER
-        if any(row["physical_group"] == group for row in summary_rows)
+        for group in group_order
+        if any(row[group_key] == group for row in summary_rows)
     ]
     if not groups:
-        raise SafetyError("No physical-system groups available for publication figure")
+        raise SafetyError("No groups available for publication figure")
     group_counts = {
         group: int(
             next(
                 row["systems"]
                 for row in summary_rows
-                if row["physical_group"] == group
+                if row[group_key] == group
             )
         )
         for group in groups
@@ -915,7 +964,7 @@ def _write_publication_rmse_figure(
         fig, axes = plt.subplots(
             1,
             2,
-            figsize=(7.2, 4.0),
+            figsize=(7.2, figure_height),
             sharey=True,
             layout="constrained",
         )
@@ -927,7 +976,7 @@ def _write_publication_rmse_figure(
                         row
                         for row in summary_rows
                         if row["engine"] == engine
-                        and row["physical_group"] == group
+                        and row[group_key] == group
                     ]
                     member_values = [
                         float(row[metric])
@@ -1011,7 +1060,7 @@ def _write_publication_rmse_figure(
                 markerfacecolor="#4B5563",
                 linewidth=0,
                 markersize=4.6,
-                label="ensemble mean",
+                label="committee-averaged prediction",
             ),
         ]
         fig.legend(
@@ -1022,17 +1071,17 @@ def _write_publication_rmse_figure(
             handlelength=1.5,
             columnspacing=1.2,
         )
-        png = output / "publication_rmse_summary.png"
-        svg = output / "publication_rmse_summary.svg"
-        pdf = output / "publication_rmse_summary.pdf"
+        png = output / f"{path_stem}.png"
+        svg = output / f"{path_stem}.svg"
+        pdf = output / f"{path_stem}.pdf"
         fig.savefig(png, dpi=300, bbox_inches="tight")
         fig.savefig(svg, bbox_inches="tight")
         fig.savefig(pdf, bbox_inches="tight")
         plt.close(fig)
     return {
-        "publication_rmse_png": png,
-        "publication_rmse_svg": svg,
-        "publication_rmse_pdf": pdf,
+        f"{output_key}_png": png,
+        f"{output_key}_svg": svg,
+        f"{output_key}_pdf": pdf,
     }
 
 
@@ -1187,6 +1236,17 @@ def finalize_comparison(
     publication_rows = _publication_summary_rows(system_rows)
     _write_csv(output / "publication_rmse_by_group.csv", publication_rows)
     publication_figures = _write_publication_rmse_figure(output, publication_rows)
+    temperature_rows = _temperature_summary_rows(system_rows)
+    _write_csv(output / "temperature_rmse_by_group.csv", temperature_rows)
+    temperature_figures = _write_publication_rmse_figure(
+        output,
+        temperature_rows,
+        group_key="temperature_group",
+        group_order=TEMPERATURE_GROUP_ORDER,
+        path_stem="temperature_rmse_summary",
+        output_key="temperature_rmse",
+        figure_height=2.6,
+    )
     headline = [
         row
         for row in overall_rows
@@ -1231,10 +1291,12 @@ def finalize_comparison(
             "by_group": str(output / "metrics_by_group.csv"),
             "uncertainty": str(output / "uncertainty_calibration.csv"),
             "publication_by_group": str(output / "publication_rmse_by_group.csv"),
+            "temperature_by_group": str(output / "temperature_rmse_by_group.csv"),
             "markdown": str(output / "comparison.md"),
             "svg": str(output / "comparison.svg"),
             **{name: str(path) for name, path in heatmaps.items()},
             **{name: str(path) for name, path in publication_figures.items()},
+            **{name: str(path) for name, path in temperature_figures.items()},
         },
     }
     _write_json(output / "comparison.json", payload)

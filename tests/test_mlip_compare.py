@@ -18,6 +18,7 @@ from interfaceforge.mlip_compare import (
     _groups,
     _metrics,
     _publication_summary_rows,
+    _temperature_summary_rows,
     comparison_status,
     finalize_comparison,
     prepare_comparison,
@@ -270,6 +271,7 @@ class TestMLIPComparison(unittest.TestCase):
                 "metrics_by_group.csv",
                 "uncertainty_calibration.csv",
                 "publication_rmse_by_group.csv",
+                "temperature_rmse_by_group.csv",
                 "comparison.json",
                 "comparison.md",
                 "comparison.svg",
@@ -282,6 +284,9 @@ class TestMLIPComparison(unittest.TestCase):
                 "publication_rmse_summary.png",
                 "publication_rmse_summary.svg",
                 "publication_rmse_summary.pdf",
+                "temperature_rmse_summary.png",
+                "temperature_rmse_summary.svg",
+                "temperature_rmse_summary.pdf",
             ):
                 self.assertTrue((output / name).is_file(), name)
                 self.assertGreater((output / name).stat().st_size, 0, name)
@@ -290,6 +295,7 @@ class TestMLIPComparison(unittest.TestCase):
                 "force_rmse_heatmap_dpa2.svg",
                 "force_rmse_heatmaps.svg",
                 "publication_rmse_summary.svg",
+                "temperature_rmse_summary.svg",
             ):
                 ET.parse(output / name)
             self.assertEqual(
@@ -302,6 +308,21 @@ class TestMLIPComparison(unittest.TestCase):
                     "force_heatmap_mace_png",
                     "force_heatmap_dpa2_png",
                     "force_heatmaps_png",
+                },
+            )
+            self.assertEqual(
+                set(report["outputs"])
+                & {
+                    "temperature_by_group",
+                    "temperature_rmse_png",
+                    "temperature_rmse_svg",
+                    "temperature_rmse_pdf",
+                },
+                {
+                    "temperature_by_group",
+                    "temperature_rmse_png",
+                    "temperature_rmse_svg",
+                    "temperature_rmse_pdf",
                 },
             )
             self.assertEqual(
@@ -346,6 +367,21 @@ class TestMLIPComparison(unittest.TestCase):
                 "ensemble_mean": (2.5, 25.0),
             }
             for row in publication_rows:
+                expected_energy, expected_force = expected[row["model"]]
+                self.assertAlmostEqual(
+                    float(row["energy_rmse_mev_per_atom"]), expected_energy
+                )
+                self.assertAlmostEqual(
+                    float(row["force_rmse_mev_per_angstrom"]), expected_force
+                )
+
+            temperature_rows = _temperature_summary_rows(system_rows)
+            self.assertEqual(
+                {row["temperature_group"] for row in temperature_rows},
+                {"Overall", "300 K", "450 K"},
+            )
+            self.assertEqual(len(temperature_rows), 30)
+            for row in temperature_rows:
                 expected_energy, expected_force = expected[row["model"]]
                 self.assertAlmostEqual(
                     float(row["energy_rmse_mev_per_atom"]), expected_energy
