@@ -76,12 +76,43 @@ class Step1PrepareTests(unittest.TestCase):
             self.assertEqual(audit["status"], "PASS")
             self.assertEqual(audit["runs"][0]["preheat_ps"], 0.4)
 
-    def test_missing_wavecar_is_rejected(self) -> None:
+    def test_missing_wavecar_falls_back_to_fresh_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            opt = _opt_tree(root, wavecar=False)
+            result = prepare_step1_series(opt, protocol="training")
+            self.assertEqual(result["mode"], "prepared-and-audited")
+            self.assertEqual(result["fresh_start_runs"], 1)
+            self.assertTrue(result["warnings"])
+            run = root / "Step1" / "NiO_m110_Big_U46"
+            incar = parse_incar(run / "INCAR")
+            self.assertEqual(incar["ISTART"], "0")
+            # Hubbard U + spin are still inherited verbatim from the OPT INCAR
+            self.assertEqual(incar["ISPIN"], "2")
+            self.assertEqual(incar["MAGMOM"], "2*2.0 3*-2.0")
+            self.assertEqual(incar["LDAUU"], "4.6 0.0")
+            self.assertEqual(incar["LMAXMIX"], "4")
+            self.assertEqual(incar["GGA"], "PE")
+            self.assertFalse((run / "WAVECAR").exists())
+            audit = json.loads((root / "Step1" / "step1_audit.json").read_text(encoding="utf-8"))
+            self.assertEqual(audit["status"], "PASS")
+
+    def test_missing_wavecar_is_rejected_with_require_wavecar(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             opt = _opt_tree(root, wavecar=False)
             with self.assertRaises(SafetyError):
-                prepare_step1_series(opt)
+                prepare_step1_series(opt, require_wavecar=True)
+
+    def test_fresh_start_ignores_existing_wavecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            opt = _opt_tree(root)
+            result = prepare_step1_series(opt, protocol="training", fresh_start=True)
+            run = root / "Step1" / "NiO_m110_Big_U46"
+            self.assertEqual(parse_incar(run / "INCAR")["ISTART"], "0")
+            self.assertFalse((run / "WAVECAR").exists())
+            self.assertEqual(result["fresh_start_runs"], 1)
 
     def test_magmom_length_mismatch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

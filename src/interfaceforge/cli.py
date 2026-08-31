@@ -435,6 +435,8 @@ def cmd_vasp_step1_prepare(args: argparse.Namespace) -> int:
             protocol=args.protocol,
             dry_run=args.dry_run,
             audit_only=args.audit_only,
+            fresh_start=args.fresh_start,
+            require_wavecar=args.require_wavecar,
         )
     )
     return 0
@@ -1674,7 +1676,9 @@ def build_parser() -> argparse.ArgumentParser:
         "step1-prepare",
         help="Promote a recursive OPT tree into a sibling Step1 preheat tree",
     )
-    step1_prepare.add_argument("source", help="OPT root with per-run INCAR, CONTCAR, WAVECAR")
+    step1_prepare.add_argument(
+        "source", help="OPT root with per-run INCAR, CONTCAR (WAVECAR optional)"
+    )
     step1_prepare.add_argument("--temperature", type=float, default=300.0)
     step1_prepare.add_argument("--output-root", help="Parent for Step1/ (default: parent of OPT root)")
     step1_prepare.add_argument("--template", help="Step1 INCAR template (default: packaged)")
@@ -1684,6 +1688,19 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(AIMD_PROTOCOLS),
         default="academic",
         help="academic: NSW=2000 (~2 ps); training: NSW=400 (~0.4 ps)",
+    )
+    step1_prepare.add_argument(
+        "--fresh-start",
+        action="store_true",
+        help="Force ISTART=0 (fresh electronic start) for every run and never "
+        "require a WAVECAR; without it, each run uses ISTART=1 when the OPT "
+        "produced a nonempty WAVECAR and falls back to ISTART=0 with a warning",
+    )
+    step1_prepare.add_argument(
+        "--require-wavecar",
+        action="store_true",
+        help="Restore the old strict behaviour: refuse any run without a nonempty "
+        "OPT WAVECAR instead of falling back to a fresh start",
     )
     step1_prepare.add_argument("--dry-run", action="store_true")
     step1_prepare.add_argument("--audit-only", action="store_true")

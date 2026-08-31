@@ -79,22 +79,31 @@ when submitted jobs are already recorded.
 ## Promote an OPT tree into a Step1 preheat tree
 
 `iface vasp step1-prepare <OPT_root>` recursively discovers finished
-geometry optimizations (a local `INCAR`, nonempty `CONTCAR`, **nonempty
-`WAVECAR`**) and builds a sibling `Step1/` tree of forced-thermalization MD
-runs:
+geometry optimizations (a local `INCAR` and nonempty `CONTCAR`) and builds a
+sibling `Step1/` tree of forced-thermalization MD runs:
 
 ```bash
 iface vasp step1-prepare OPT --dry-run
 iface vasp step1-prepare OPT --protocol training     # NSW=400 (~0.4 ps)
 iface vasp step1-prepare OPT                         # academic, NSW=2000 (~2 ps)
+
+# fresh, unoptimized POSCAR -> Step1 100 K preheat, no WAVECAR needed
+iface vasp step1-prepare OPT --source-structure POSCAR --fresh-start \
+    --temperature 100 --protocol training
 ```
 
 Per OPT run:
 
-- `CONTCAR` → `POSCAR`;
-- the OPT `WAVECAR` is **hard-linked** in (verified by device/inode; falls
-  back to a copy on filesystems that refuse the link) so the preheat can
-  `ISTART=1` from the converged AFM electronic state — no `MAGMOM` re-init;
+- `CONTCAR` → `POSCAR` (or another `--source-structure`, e.g. `POSCAR`);
+- **electronic restart adapts per run**: when the OPT left a nonempty
+  `WAVECAR` it is **hard-linked** in (verified by device/inode; falls back to
+  a copy on filesystems that refuse the link) and the preheat runs
+  `ISTART=1` from the converged AFM state — no `MAGMOM` re-init. When there
+  is no usable `WAVECAR`, Step1 falls back to a fresh electronic start
+  (`ISTART=0`, no `WAVECAR`, moments from the inherited `MAGMOM`) and prints
+  a warning. `--fresh-start` forces `ISTART=0` for every run even when a
+  `WAVECAR` exists; `--require-wavecar` restores the old strict behaviour and
+  refuses any run without one;
 - `GGA`, `ISPIN`, `LASPH`, `LNONCOLLINEAR`, `MAGMOM`, and the full active
   `LDAU*` / `LMAXMIX` block are copied **byte-for-byte** from the OPT
   `INCAR` (`LDAUPRINT` is not — it is print verbosity, not a U parameter);
@@ -109,7 +118,8 @@ Per OPT run:
 `LDAU*` array lengths and `MAGMOM` length are checked against the species /
 ion count in the `CONTCAR`. `Step1/` receives `step1_manifest.json` plus
 `step1_audit.{json,tsv,md}`; the audit re-derives the render, checks the
-inherited tags survived, confirms `IBRION=0`/`SMASS=-1`/`ISTART=1`, runs the
+inherited tags survived, confirms `IBRION=0`/`SMASS=-1` and the expected
+`ISTART` (`1` with a `WAVECAR`, `0` without), runs the
 [protocol preheat-length check](#step1-switch-and-audit-the-preheat), and
 notes a thin [slab vacuum](#slab-vacuum-check). Existing `Step1/` is never
 overwritten; re-audit with `--audit-only`.

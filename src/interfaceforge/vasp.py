@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 from collections.abc import Callable, Iterable, Mapping
@@ -1914,7 +1915,12 @@ def _verified_hardlink(source: Path, target: Path) -> str:
 
 
 def _render_step1_incar(
-    opt_incar_text: str, template_text: str, *, temperature: float, nsw: int
+    opt_incar_text: str,
+    template_text: str,
+    *,
+    temperature: float,
+    nsw: int,
+    istart: int = 1,
 ) -> dict[str, Any]:
     """Render a Step1 preheat INCAR from an OPT run.
 
@@ -1923,7 +1929,8 @@ def _render_step1_incar(
     ``LNONCOLLINEAR``, ``MAGMOM`` and the full active ``LDAU*`` / ``LMAXMIX``
     set are copied byte-for-byte from the OPT INCAR; the requested
     temperature overrides ``SYSTEM`` / ``TEBEG`` / ``TEEND`` and ``NSW`` is
-    set from the protocol. ``ISTART=1`` stays (the OPT WAVECAR is inherited).
+    set from the protocol. ``ISTART`` is ``1`` when the OPT WAVECAR is
+    inherited and ``0`` for a fresh electronic start.
     """
 
     inherited_lines, inherited_values = _collect_verbatim_source_tags(
@@ -1936,6 +1943,7 @@ def _render_step1_incar(
         "TEBEG": text_temp,
         "TEEND": text_temp,
         "NSW": str(int(nsw)),
+        "ISTART": str(int(istart)),
     }
 
     found: set[str] = set()
@@ -1989,15 +1997,26 @@ def prepare_step1_series(
     protocol: str = "academic",
     dry_run: bool = False,
     audit_only: bool = False,
+    fresh_start: bool = False,
+    require_wavecar: bool = False,
 ) -> dict[str, Any]:
     """Promote a recursive OPT tree into a sibling ``Step1`` preheat tree.
 
-    Each finished OPT run (local ``INCAR`` + nonempty ``CONTCAR`` + nonempty
-    ``WAVECAR``) becomes a fixed-temperature preheat MD: ``CONTCAR`` is
-    promoted to ``POSCAR``, the OPT ``WAVECAR`` is hard-linked in for the
-    ``ISTART=1`` restart, ``GGA``/spin/``LDAU*`` are inherited verbatim, and
-    the rest comes from the packaged ``INCAR.step1_preheat`` template.
+    Each finished OPT run (local ``INCAR`` + nonempty ``CONTCAR``) becomes a
+    fixed-temperature preheat MD: ``CONTCAR`` is promoted to ``POSCAR``,
+    ``GGA``/spin/``LDAU*`` are inherited verbatim, and the rest comes from
+    the packaged ``INCAR.step1_preheat`` template.
+
+    The electronic restart adapts per run: when the OPT produced a nonempty
+    ``WAVECAR`` it is hard-linked in and ``ISTART=1``; otherwise Step1 falls
+    back to a fresh electronic start (``ISTART=0``, no ``WAVECAR``) with a
+    warning. ``fresh_start=True`` forces the fresh start for every run even
+    when a ``WAVECAR`` exists; ``require_wavecar=True`` restores the old
+    strict behaviour and refuses any run without one.
     """
+
+    if fresh_start and require_wavecar:
+        raise SafetyError("--fresh-start and --require-wavecar cannot be combined")
 
     from .aimd import resolve_protocol
 
@@ -2045,16 +2064,34 @@ def prepare_step1_series(
         )
 
     plans: list[dict[str, Any]] = []
+    warnings: list[str] = []
     for run in runs:
         relative = run.relative_to(source_root)
         structure = run / source_structure
         elements = _poscar_elements(structure)
         ion_count = _poscar_ion_count(structure)
         wavecar = run / "WAVECAR"
-        if not (wavecar.is_file() and wavecar.stat().st_size):
+        has_wavecar = wavecar.is_file() and bool(wavecar.stat().st_size)
+        if fresh_start:
+            use_wavecar = False
+            if has_wavecar:
+                warnings.append(
+                    f"{relative.as_posix() or '.'}: --fresh-start given; ignoring the "
+                    "OPT WAVECAR and using a fresh electronic start (ISTART=0)"
+                )
+        elif has_wavecar:
+            use_wavecar = True
+        elif require_wavecar:
             raise SafetyError(
                 f"OPT run {run} has no nonempty WAVECAR for the ISTART=1 restart"
             )
+        else:
+            use_wavecar = False
+            warnings.append(
+                f"{relative.as_posix() or '.'}: no nonempty OPT WAVECAR; "
+                "preparing a fresh electronic start (ISTART=0)"
+            )
+        istart = 1 if use_wavecar else 0
         resolved_inputs = {
             name: path
             for name in STEP1_INHERITED_FILES
@@ -2071,6 +2108,7 @@ def prepare_step1_series(
             template_text,
             temperature=temperature,
             nsw=nsw,
+            istart=istart,
         )
         for tag in ("LDAUL", "LDAUU", "LDAUJ"):
             value = rendered["inherited_tags"].get(tag)
@@ -2091,7 +2129,8 @@ def prepare_step1_series(
                 "relative": relative,
                 "destination": output_root_path / relative,
                 "structure": structure,
-                "wavecar": wavecar,
+                "wavecar": wavecar if use_wavecar else None,
+                "istart": istart,
                 "elements": elements,
                 "inputs": resolved_inputs,
                 "incar_text": rendered["text"],
@@ -2107,9 +2146,10 @@ def prepare_step1_series(
                 destination: Path = plan["destination"]
                 destination.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(plan["structure"], destination / "POSCAR")
-                link_modes[plan["relative"].as_posix() or "."] = _verified_hardlink(
-                    plan["wavecar"], destination / "WAVECAR"
-                )
+                if plan["wavecar"] is not None:
+                    link_modes[plan["relative"].as_posix() or "."] = _verified_hardlink(
+                        plan["wavecar"], destination / "WAVECAR"
+                    )
                 for name, path in plan["inputs"].items():
                     target = destination / name
                     shutil.copy2(path, target)
@@ -2125,12 +2165,16 @@ def prepare_step1_series(
                 "temperature_k": float(temperature),
                 "nsw": nsw,
                 "wavecar_link_mode": link_modes,
+                "fresh_start": bool(fresh_start),
+                "require_wavecar": bool(require_wavecar),
+                "warnings": warnings,
                 "precedence": {
                     "ordinary_incar_tags": "Step1 template",
                     "inherited_tags": (
                         "exact active LDAU*/LMAXMIX plus "
                         + ", ".join(STEP1_EXTRA_INHERITED_TAGS)
-                        + " from each OPT INCAR; ISTART=1 restart from the OPT WAVECAR"
+                        + " from each OPT INCAR; ISTART=1 restart from the OPT "
+                        "WAVECAR when present, otherwise ISTART=0 fresh start"
                     ),
                 },
                 "runs": [
@@ -2138,6 +2182,7 @@ def prepare_step1_series(
                         "source": str(plan["source"]),
                         "relative_path": plan["relative"].as_posix() or ".",
                         "destination": str(plan["destination"]),
+                        "istart": plan["istart"],
                         "elements": plan["elements"],
                         "inherited_tags": plan["inherited_tags"],
                         "source_incar_sha256": _sha256_file(plan["source"] / "INCAR"),
@@ -2163,6 +2208,9 @@ def prepare_step1_series(
                 f"{output_root_path / 'step1_audit.md'}"
             )
 
+    for message in warnings:
+        print(f"WARNING: step1-prepare: {message}", file=sys.stderr)
+
     return {
         "mode": "dry-run" if dry_run else "audited" if audit_only else "prepared-and-audited",
         "source_root": str(source_root),
@@ -2172,7 +2220,9 @@ def prepare_step1_series(
         "temperature_k": float(temperature),
         "nsw": nsw,
         "prepared_runs": len(plans),
+        "fresh_start_runs": sum(1 for plan in plans if plan["istart"] == 0),
         "wavecar_link_mode": link_modes,
+        "warnings": warnings,
         "audit": audit_payload,
     }
 
@@ -2200,14 +2250,18 @@ def _audit_step1_plans(
                 issues.append(f"{tag} not inherited from OPT")
         if parsed.get("IBRION") != "0" or parsed.get("SMASS") != "-1":
             issues.append("Step1 INCAR is not a velocity-rescaled preheat (IBRION=0, SMASS=-1)")
-        if parsed.get("ISTART") != "1":
-            issues.append("ISTART is not 1 (WAVECAR restart)")
+        expected_istart = str(plan.get("istart", 1))
+        if parsed.get("ISTART") != expected_istart:
+            issues.append(f"ISTART is not {expected_istart}")
         poscar = destination / "POSCAR"
         if not poscar.is_file() or _sha256_file(poscar) != _sha256_file(plan["structure"]):
             issues.append(f"POSCAR does not match OPT {source_structure}")
         wavecar = destination / "WAVECAR"
-        if not (wavecar.is_file() and wavecar.stat().st_size):
-            issues.append("missing WAVECAR")
+        if plan.get("wavecar") is not None:
+            if not (wavecar.is_file() and wavecar.stat().st_size):
+                issues.append("missing WAVECAR")
+        elif wavecar.exists():
+            issues.append("unexpected WAVECAR in a fresh-start (ISTART=0) run")
         for name in plan["inputs"]:
             target = destination / name
             if not target.is_file() or _sha256_file(target) != _sha256_file(plan["inputs"][name]):

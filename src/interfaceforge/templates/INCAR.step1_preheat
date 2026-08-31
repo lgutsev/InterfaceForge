@@ -1,11 +1,11 @@
 # ============================================================
 # Step 1: Preheat / forced thermalization
-# Restart from an optimized AFM electronic state (OPT WAVECAR)
 # ============================================================
 
 SYSTEM = Step1_preheat_300K
 
-# Restart the wavefunction from the inherited OPT WAVECAR
+# ISTART is set by `iface vasp step1-prepare`: 1 when a nonempty OPT WAVECAR
+# is inherited for the electronic restart, 0 for a fresh electronic start.
 ISTART = 1
 
 # ----------------------------
