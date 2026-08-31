@@ -657,14 +657,18 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
     if "dpa2_ft" in architectures:
         ft_pretrained = shlex.quote(str(finetune["pretrained"]))
         ft_branch = shlex.quote(str(finetune.get("model_branch", "RANDOM")))
+        # --use-pretrain-script: take the descriptor and fitting-net architecture
+        # from the pretrained checkpoint instead of the generated input.json,
+        # which only carries InterfaceForge's small default dpa2 shapes.
+        ft_flags = f"--finetune {ft_pretrained} --model-branch {ft_branch} --use-pretrain-script"
         train_dispatch = (
             f'if [[ -s {restart_marker} ]]; then TRAIN_ARGS+=(--restart {checkpoint}); '
             f'elif [[ "$ARCH" == "dpa2_ft" ]]; then '
-            f"TRAIN_ARGS+=(--finetune {ft_pretrained} --model-branch {ft_branch}); fi"
+            f"TRAIN_ARGS+=({ft_flags}); fi"
         )
         smoke_train_line = (
-            f'if [[ "$ARCH" == "dpa2_ft" ]]; then dp_exec {backend_flag} train input.json '
-            f"--finetune {ft_pretrained} --model-branch {ft_branch}; "
+            f'if [[ "$ARCH" == "dpa2_ft" ]]; then '
+            f"dp_exec {backend_flag} train input.json {ft_flags}; "
             f"else dp_exec {backend_flag} train input.json; fi"
         )
     else:

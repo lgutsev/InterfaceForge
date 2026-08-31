@@ -45,15 +45,18 @@ The generated `run_ensemble.slurm` runs, only for `$ARCH == dpa2_ft` and only on
 the first pass (no local checkpoint yet):
 
 ```
-dp --pt train input.json --finetune <pretrained> --model-branch <model_branch>
+dp --pt train input.json --finetune <pretrained> --model-branch <model_branch> --use-pretrain-script
 ```
 
-`--restart` takes precedence once a `model.ckpt.pt` exists, so continuation runs
-behave like any other architecture. `RANDOM` keeps the pretrained descriptor and
-reinitializes the fitting net — the most robust default across checkpoint
-versions; a named branch requires the input-side descriptor to match that
-branch. Verify `dp --pt train --help` in your DeePMD-kit build lists `--finetune`
-and `--model-branch` before submitting, and run `run_smoke.slurm` first.
+`--use-pretrain-script` makes the trainer take the descriptor and fitting-net
+architecture from the checkpoint and ignore the generated `input.json` model
+shapes (which carry only InterfaceForge's small default dpa2 sizes) — without it,
+fine-tuning a large OpenLAM checkpoint fails with a `KeyError` on a missing
+descriptor parameter. `--restart` takes precedence once a `model.ckpt.pt`
+exists, so continuation runs behave like any other architecture. `RANDOM`
+reinitializes the fitting net (most robust); a named branch warm-starts it from
+that head. Verify `dp --pt train --help` lists `--finetune`, `--model-branch`,
+and `--use-pretrain-script` before submitting, and run `run_smoke.slurm` first.
 
 ## Generated jobs
 

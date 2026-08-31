@@ -149,8 +149,8 @@ class TrainingTests(unittest.TestCase):
             smoke = (root / "models/deepmd/run_smoke.slurm").read_text(encoding="utf-8")
             self.assertIn('elif [[ "$ARCH" == "dpa2_ft" ]]', ensemble)
             self.assertIn("--finetune", ensemble)
-            self.assertIn("--model-branch Domains_Anode", ensemble)
-            self.assertIn("--model-branch Domains_Anode", smoke)
+            self.assertIn("--model-branch Domains_Anode --use-pretrain-script", ensemble)
+            self.assertIn("--model-branch Domains_Anode --use-pretrain-script", smoke)
             # scratch dpa2 must not pick up the finetune flag
             self.assertNotIn("dpa2/model_${MODEL_ID} --finetune", ensemble)
             ft_input = json.loads(
