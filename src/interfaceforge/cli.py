@@ -45,13 +45,13 @@ from .geometry import (
 )
 from .intermat import generate_intermat_interfaces, intermat_status
 from .mace_roi import evaluate_mace_roi_predictions, prepare_mace_roi_dataset
-from .mlip_compare import comparison_status, finalize_comparison, prepare_comparison
 from .mlff_interfaces import (
     discover_mlff_interface_sources,
     generate_mlff_interfaces_campaign,
     mass_audit_mlff_interfaces,
     write_throttled_array_launcher,
 )
+from .mlip_compare import comparison_status, finalize_comparison, prepare_comparison
 from .regfgw import compare_registry_selection, regfgw_status, run_regfgw_optimize
 from .report import build_report
 from .selection import select_from_csv
