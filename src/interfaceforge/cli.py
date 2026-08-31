@@ -45,6 +45,7 @@ from .geometry import (
 )
 from .intermat import generate_intermat_interfaces, intermat_status
 from .mace_roi import evaluate_mace_roi_predictions, prepare_mace_roi_dataset
+from .mlip_compare import comparison_status, finalize_comparison, prepare_comparison
 from .mlff_interfaces import (
     discover_mlff_interface_sources,
     generate_mlff_interfaces_campaign,
@@ -223,6 +224,32 @@ def cmd_train(args: argparse.Namespace) -> int:
     )
     _json(payload)
     return 0
+
+
+def cmd_mlip_compare(args: argparse.Namespace) -> int:
+    campaign = _campaign(args)
+    if args.mlip_compare_command == "prepare":
+        payload = prepare_comparison(
+            campaign.root,
+            output_root=args.output_root,
+            mace_models_root=args.mace_models_root,
+            seeds=tuple(args.seeds),
+            force=args.force,
+        )
+    elif args.mlip_compare_command == "status":
+        payload = comparison_status(
+            campaign.root,
+            output_root=args.output_root,
+            deepmd_eval_root=args.deepmd_eval_root,
+        )
+    else:
+        payload = finalize_comparison(
+            campaign.root,
+            output_root=args.output_root,
+            deepmd_eval_root=args.deepmd_eval_root,
+        )
+    _json(payload)
+    return 0 if payload.get("status") != "INCOMPLETE" else 1
 
 
 def cmd_mace_roi_prepare(args: argparse.Namespace) -> int:
@@ -1125,6 +1152,39 @@ def build_parser() -> argparse.ArgumentParser:
     add_campaign_option(train)
     train.add_argument("--force", action="store_true")
     train.set_defaults(func=cmd_train)
+
+    mlip_compare = commands.add_parser(
+        "mlip-compare",
+        help="Compare MACE and DeePMD committees on exactly matched canonical frames",
+    )
+    mlip_compare_commands = mlip_compare.add_subparsers(
+        dest="mlip_compare_command", required=True
+    )
+    compare_prepare = mlip_compare_commands.add_parser(
+        "prepare", help="Validate frame identity and generate MACE inference"
+    )
+    add_campaign_option(compare_prepare)
+    compare_prepare.add_argument("--output-root")
+    compare_prepare.add_argument("--mace-models-root")
+    compare_prepare.add_argument(
+        "--seeds", nargs="+", type=int, default=[11, 23, 37, 53]
+    )
+    compare_prepare.add_argument("--force", action="store_true")
+    compare_prepare.set_defaults(func=cmd_mlip_compare)
+    compare_status = mlip_compare_commands.add_parser(
+        "status", help="Count complete model/system predictions for both backends"
+    )
+    add_campaign_option(compare_status)
+    compare_status.add_argument("--output-root")
+    compare_status.add_argument("--deepmd-eval-root")
+    compare_status.set_defaults(func=cmd_mlip_compare)
+    compare_finalize = mlip_compare_commands.add_parser(
+        "finalize", help="Write matched micro, macro, grouped, and uncertainty metrics"
+    )
+    add_campaign_option(compare_finalize)
+    compare_finalize.add_argument("--output-root")
+    compare_finalize.add_argument("--deepmd-eval-root")
+    compare_finalize.set_defaults(func=cmd_mlip_compare)
 
     explore = commands.add_parser("explore", help="Expand active-learning conditions")
     add_campaign_option(explore)
