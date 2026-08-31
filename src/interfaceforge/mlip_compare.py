@@ -323,8 +323,24 @@ def prepare_comparison(
 
 
 def _latest_deepmd_eval(campaign: Path) -> Path | None:
-    roots = sorted((campaign / "models" / "deepmd" / "evaluation" / "dpa2").glob("job_*"))
-    return roots[-1] if roots else None
+    """Return the most recent DPA-2 evaluation job directory.
+
+    Slurm job IDs are not zero-padded, so a lexical sort would place ``job_998``
+    after ``job_1002``. Order by the integer job ID when every candidate has one
+    and fall back to modification time otherwise.
+    """
+
+    roots = [
+        path
+        for path in (campaign / "models" / "deepmd" / "evaluation" / "dpa2").glob("job_*")
+        if path.is_dir()
+    ]
+    if not roots:
+        return None
+    job_ids = [path.name.removeprefix("job_") for path in roots]
+    if all(job_id.isdigit() for job_id in job_ids):
+        return max(roots, key=lambda path: int(path.name.removeprefix("job_")))
+    return max(roots, key=lambda path: path.stat().st_mtime)
 
 
 def comparison_status(
