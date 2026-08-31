@@ -54,7 +54,9 @@ Finalization independently checks that the reference columns written by
 - `metrics_by_system.csv`: every committee member and ensemble mean;
 - `metrics_overall.csv`: micro and equal-trajectory macro metrics;
 - `metrics_by_group.csv`: bulk/interface, temperature, family, termination,
-  and oxidation breakdowns;
+  and oxidation breakdowns. Oxidation is `NA` for bulk heritage, `0` for an
+  interface leaf with no `O_x` token, and `O_x1.0`/`O_x1.00` are the same `1`
+  group;
 - `uncertainty_calibration.csv`: committee-spread/error correlation,
   scale factor, and empirical one/two-sigma coverage;
 - `comparison.json`, `comparison.md`, and `comparison.svg`.

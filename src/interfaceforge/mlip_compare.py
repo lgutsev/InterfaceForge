@@ -119,16 +119,31 @@ def _symbols(system: Path) -> list[str]:
         raise SafetyError(f"Invalid type mapping in {system}") from exc
 
 
+def _oxidation(leaf: str, heritage: str) -> str:
+    """Canonical interface oxidation coordinate.
+
+    Bulk heritage has no oxidation coordinate (``NA``). An interface leaf with
+    no ``O_x`` token is unoxidized (``0``), not unknown; ``O_x1.0`` and
+    ``O_x1.00`` collapse to the same ``1`` so the fully oxidized systems are one
+    group rather than two.
+    """
+
+    if heritage == "bulk":
+        return "NA"
+    match = re.search(r"o[_-]?x[_=-]?([01](?:\.\d+)?)", leaf.lower())
+    return f"{float(match.group(1)):g}" if match else "0"
+
+
 def _groups(leaf: str) -> dict[str, str]:
     lower = leaf.lower()
+    heritage = "bulk" if leaf.startswith("bulk/") else "interface"
     temperature = re.search(r"(?<!\d)(300|450|600)k", lower)
-    oxidation = re.search(r"(?:o[_-]?x|ox)[_=-]?([01](?:\.\d+)?)", lower)
     return {
-        "heritage": "bulk" if leaf.startswith("bulk/") else "interface",
+        "heritage": heritage,
         "temperature": f"{temperature.group(1)}K" if temperature else "NA",
         "family": "Ideal" if "ideal" in lower else ("Real" if "real" in lower else "NA"),
         "termination": "Ti_Term" if "ti_term" in lower else ("N_Term" if "n_term" in lower else "NA"),
-        "oxidation": oxidation.group(1) if oxidation else "NA",
+        "oxidation": _oxidation(leaf, heritage),
     }
 
 

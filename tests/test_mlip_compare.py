@@ -14,6 +14,7 @@ from interfaceforge.errors import SafetyError
 from interfaceforge.mlip_compare import (
     DEFAULT_SEEDS,
     MACE_EVALUATOR,
+    _groups,
     _metrics,
     comparison_status,
     finalize_comparison,
@@ -188,6 +189,23 @@ class TestMLIPComparison(unittest.TestCase):
     def test_generated_mace_evaluator_is_valid_python(self) -> None:
         compile(MACE_EVALUATOR, "evaluate_mace.py", "exec")
         self.assertIn('default_dtype="float32"', MACE_EVALUATOR)
+
+    def test_oxidation_grouping_is_canonical(self) -> None:
+        cases = {
+            "bulk/SiN-Bulk_300K": "NA",
+            "bulk/TiN-Bulk_450K/O_x1.00": "NA",
+            "interface/450K/Real/N_Term": "0",
+            "interface/300K/Ideal/Ti_Term/O_x0.25": "0.25",
+            "interface/600K/Real/N_Term/O_x_0.5": "0.5",
+            "interface/450K/Real/Ti_Term/O_x0.75": "0.75",
+            "interface/450K/Real/N_Term/O_x1.0": "1",
+            "interface/600K/Ideal/Ti_Term/O_x1.00": "1",
+        }
+        for leaf, expected in cases.items():
+            self.assertEqual(_groups(leaf)["oxidation"], expected, leaf)
+        self.assertEqual(_groups("interface/300K/Ideal/Ti_Term/O_x1.0")["temperature"], "300K")
+        self.assertEqual(_groups("interface/450K/Real/N_Term")["family"], "Real")
+        self.assertEqual(_groups("interface/450K/Real/N_Term")["termination"], "N_Term")
 
     def test_prepare_status_finalize_end_to_end(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
