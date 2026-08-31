@@ -17,6 +17,7 @@ from interfaceforge.mlip_compare import (
     MACE_EVALUATOR,
     _groups,
     _metrics,
+    _publication_summary_rows,
     comparison_status,
     finalize_comparison,
     prepare_comparison,
@@ -208,6 +209,46 @@ class TestMLIPComparison(unittest.TestCase):
         self.assertEqual(_groups("interface/450K/Real/N_Term")["family"], "Real")
         self.assertEqual(_groups("interface/450K/Real/N_Term")["termination"], "N_Term")
 
+    def test_publication_bins_pool_squared_errors_by_observation(self) -> None:
+        rows = [
+            {
+                "engine": "MACE",
+                "model": "model_000",
+                "seed": 11,
+                "relative_leaf": "bulk/SiN-Bulk_300K",
+                "heritage": "bulk",
+                "family": "NA",
+                "termination": "NA",
+                "frames": 1,
+                "natoms": 1,
+                "energy_rmse_mev_per_atom": 1.0,
+                "force_rmse_mev_per_angstrom": 10.0,
+            },
+            {
+                "engine": "MACE",
+                "model": "model_000",
+                "seed": 11,
+                "relative_leaf": "bulk/SiN-Bulk_450K",
+                "heritage": "bulk",
+                "family": "NA",
+                "termination": "NA",
+                "frames": 3,
+                "natoms": 2,
+                "energy_rmse_mev_per_atom": 3.0,
+                "force_rmse_mev_per_angstrom": 20.0,
+            },
+        ]
+        overall = next(
+            row
+            for row in _publication_summary_rows(rows)
+            if row["physical_group"] == "Overall"
+        )
+        self.assertAlmostEqual(overall["energy_rmse_mev_per_atom"], 7.0**0.5)
+        self.assertAlmostEqual(
+            overall["force_rmse_mev_per_angstrom"],
+            ((3 * 10.0**2 + 18 * 20.0**2) / 21) ** 0.5,
+        )
+
     def test_prepare_status_finalize_end_to_end(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             campaign = _campaign(Path(temporary))
@@ -228,6 +269,7 @@ class TestMLIPComparison(unittest.TestCase):
                 "metrics_overall.csv",
                 "metrics_by_group.csv",
                 "uncertainty_calibration.csv",
+                "publication_rmse_by_group.csv",
                 "comparison.json",
                 "comparison.md",
                 "comparison.svg",
@@ -237,6 +279,9 @@ class TestMLIPComparison(unittest.TestCase):
                 "force_rmse_heatmap_dpa2.svg",
                 "force_rmse_heatmaps.png",
                 "force_rmse_heatmaps.svg",
+                "publication_rmse_summary.png",
+                "publication_rmse_summary.svg",
+                "publication_rmse_summary.pdf",
             ):
                 self.assertTrue((output / name).is_file(), name)
                 self.assertGreater((output / name).stat().st_size, 0, name)
@@ -244,6 +289,7 @@ class TestMLIPComparison(unittest.TestCase):
                 "force_rmse_heatmap_mace.svg",
                 "force_rmse_heatmap_dpa2.svg",
                 "force_rmse_heatmaps.svg",
+                "publication_rmse_summary.svg",
             ):
                 ET.parse(output / name)
             self.assertEqual(
@@ -258,10 +304,55 @@ class TestMLIPComparison(unittest.TestCase):
                     "force_heatmaps_png",
                 },
             )
+            self.assertEqual(
+                set(report["outputs"])
+                & {
+                    "publication_by_group",
+                    "publication_rmse_png",
+                    "publication_rmse_svg",
+                    "publication_rmse_pdf",
+                },
+                {
+                    "publication_by_group",
+                    "publication_rmse_png",
+                    "publication_rmse_svg",
+                    "publication_rmse_pdf",
+                },
+            )
             with (output / "metrics_overall.csv").open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len([row for row in rows if row["engine"] == "MACE"]), 10)
             self.assertEqual(len([row for row in rows if row["engine"] == "DPA2"]), 10)
+
+            with (output / "metrics_by_system.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                system_rows = list(csv.DictReader(handle))
+            publication_rows = _publication_summary_rows(system_rows)
+            self.assertEqual(
+                {row["physical_group"] for row in publication_rows},
+                {
+                    "Overall",
+                    "Bulk SiN",
+                    "Real / N-terminated interface",
+                },
+            )
+            self.assertEqual(len(publication_rows), 30)
+            expected = {
+                "model_000": (1.0, 10.0),
+                "model_001": (2.0, 20.0),
+                "model_002": (3.0, 30.0),
+                "model_003": (4.0, 40.0),
+                "ensemble_mean": (2.5, 25.0),
+            }
+            for row in publication_rows:
+                expected_energy, expected_force = expected[row["model"]]
+                self.assertAlmostEqual(
+                    float(row["energy_rmse_mev_per_atom"]), expected_energy
+                )
+                self.assertAlmostEqual(
+                    float(row["force_rmse_mev_per_angstrom"]), expected_force
+                )
 
     def test_prepare_refuses_unforced_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

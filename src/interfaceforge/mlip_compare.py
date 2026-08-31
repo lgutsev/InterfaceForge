@@ -737,6 +737,305 @@ def _write_force_heatmaps(
     }
 
 
+PUBLICATION_GROUP_ORDER = (
+    "Overall",
+    "Bulk SiN",
+    "Bulk TiN",
+    "Bulk TiO",
+    "Ideal / N-terminated interface",
+    "Ideal / Ti-terminated interface",
+    "Real / N-terminated interface",
+    "Real / Ti-terminated interface",
+)
+
+
+def _publication_group(row: dict[str, Any]) -> str:
+    """Collapse the 48 trajectories into chemically interpretable figure bins."""
+
+    if row["heritage"] == "bulk":
+        leaf = str(row["relative_leaf"])
+        for material in ("SiN", "TiN", "TiO"):
+            if f"/{material}-Bulk" in leaf:
+                return f"Bulk {material}"
+        raise SafetyError(f"Cannot assign publication bulk group: {leaf}")
+    family = str(row["family"])
+    termination = {
+        "N_Term": "N-terminated",
+        "Ti_Term": "Ti-terminated",
+    }.get(str(row["termination"]))
+    if family not in {"Ideal", "Real"} or termination is None:
+        raise SafetyError(
+            "Cannot assign publication interface group: "
+            f'{row["relative_leaf"]}'
+        )
+    return f"{family} / {termination} interface"
+
+
+def _publication_summary_rows(
+    system_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return exact pooled RMSEs for the overall set and physical-system bins.
+
+    RMSEs are pooled from squared per-system RMSEs with their correct numbers
+    of observations. This is algebraically identical to recomputing the metric
+    from all frame predictions in a bin; it is not an average of RMSEs.
+    """
+
+    augmented = [(row, _publication_group(row)) for row in system_rows]
+    groups_present = {group for _, group in augmented}
+    ordered_groups = [
+        group
+        for group in PUBLICATION_GROUP_ORDER
+        if group == "Overall" or group in groups_present
+    ]
+    rows: list[dict[str, Any]] = []
+    engines = [
+        engine
+        for engine in ("MACE", "DPA2")
+        if any(row["engine"] == engine for row in system_rows)
+    ]
+    for engine in engines:
+        model_order = list(
+            dict.fromkeys(
+                str(row["model"])
+                for row in system_rows
+                if row["engine"] == engine
+            )
+        )
+        for model in model_order:
+            candidates = [
+                (row, group)
+                for row, group in augmented
+                if row["engine"] == engine and str(row["model"]) == model
+            ]
+            for group in ordered_groups:
+                selected = [
+                    row
+                    for row, physical_group in candidates
+                    if group == "Overall" or physical_group == group
+                ]
+                if not selected:
+                    continue
+                energy_observations = sum(int(row["frames"]) for row in selected)
+                force_observations = sum(
+                    int(row["frames"]) * int(row["natoms"]) * 3
+                    for row in selected
+                )
+                energy_rmse = math.sqrt(
+                    sum(
+                        int(row["frames"])
+                        * float(row["energy_rmse_mev_per_atom"]) ** 2
+                        for row in selected
+                    )
+                    / energy_observations
+                )
+                force_rmse = math.sqrt(
+                    sum(
+                        int(row["frames"])
+                        * int(row["natoms"])
+                        * 3
+                        * float(row["force_rmse_mev_per_angstrom"]) ** 2
+                        for row in selected
+                    )
+                    / force_observations
+                )
+                rows.append(
+                    {
+                        "engine": engine,
+                        "model": model,
+                        "seed": selected[0]["seed"],
+                        "physical_group": group,
+                        "systems": len(selected),
+                        "frames": energy_observations,
+                        "atom_frames": force_observations // 3,
+                        "energy_rmse_mev_per_atom": energy_rmse,
+                        "force_rmse_mev_per_angstrom": force_rmse,
+                    }
+                )
+    return rows
+
+
+def _write_publication_rmse_figure(
+    output: Path, summary_rows: list[dict[str, Any]]
+) -> dict[str, Path]:
+    """Plot compact, publication-oriented energy and force RMSE panels."""
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+    except ModuleNotFoundError as exc:
+        raise DependencyError(
+            "MLIP comparison figures require matplotlib; "
+            "install InterfaceForge with interfaceforge[report]"
+        ) from exc
+
+    engines = ("MACE", "DPA2")
+    colors = {"MACE": "#0072B2", "DPA2": "#D55E00"}
+    offsets = {"MACE": -0.13, "DPA2": 0.13}
+    groups = [
+        group
+        for group in PUBLICATION_GROUP_ORDER
+        if any(row["physical_group"] == group for row in summary_rows)
+    ]
+    if not groups:
+        raise SafetyError("No physical-system groups available for publication figure")
+    group_counts = {
+        group: int(
+            next(
+                row["systems"]
+                for row in summary_rows
+                if row["physical_group"] == group
+            )
+        )
+        for group in groups
+    }
+    y_positions = np.arange(len(groups), dtype=float)
+    metrics = (
+        ("(a) Energy", "energy_rmse_mev_per_atom", r"RMSE (meV atom$^{-1}$)"),
+        ("(b) Force", "force_rmse_mev_per_angstrom", r"RMSE (meV $\AA^{-1}$)"),
+    )
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.size": 8.0,
+            "axes.titlesize": 9.0,
+            "axes.labelsize": 8.5,
+            "xtick.labelsize": 7.5,
+            "ytick.labelsize": 7.5,
+            "legend.fontsize": 7.5,
+            "axes.linewidth": 0.7,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    ):
+        fig, axes = plt.subplots(
+            1,
+            2,
+            figsize=(7.2, 4.0),
+            sharey=True,
+            layout="constrained",
+        )
+        for ax, (title, metric, xlabel) in zip(axes, metrics, strict=True):
+            maximum = 0.0
+            for engine in engines:
+                for group_index, group in enumerate(groups):
+                    selected = [
+                        row
+                        for row in summary_rows
+                        if row["engine"] == engine
+                        and row["physical_group"] == group
+                    ]
+                    member_values = [
+                        float(row[metric])
+                        for row in selected
+                        if row["model"] != "ensemble_mean"
+                    ]
+                    ensemble_values = [
+                        float(row[metric])
+                        for row in selected
+                        if row["model"] == "ensemble_mean"
+                    ]
+                    if len(member_values) != 4 or len(ensemble_values) != 1:
+                        raise SafetyError(
+                            "Publication figure requires four members and one "
+                            f"ensemble mean for {engine} / {group}"
+                        )
+                    y = y_positions[group_index] + offsets[engine]
+                    maximum = max(maximum, *member_values, ensemble_values[0])
+                    ax.plot(
+                        [min(member_values), max(member_values)],
+                        [y, y],
+                        color=colors[engine],
+                        linewidth=1.0,
+                        zorder=2,
+                    )
+                    ax.scatter(
+                        member_values,
+                        [y] * len(member_values),
+                        marker="o",
+                        s=13,
+                        facecolors="white",
+                        edgecolors=colors[engine],
+                        linewidths=0.75,
+                        zorder=3,
+                    )
+                    ax.scatter(
+                        [ensemble_values[0]],
+                        [y],
+                        marker="D",
+                        s=22,
+                        color=colors[engine],
+                        edgecolors="white",
+                        linewidths=0.45,
+                        zorder=4,
+                    )
+            ax.set_title(title, loc="left", fontweight="bold")
+            ax.set_xlabel(xlabel)
+            ax.set_xlim(left=0.0, right=maximum * 1.08 if maximum else 1.0)
+            ax.set_ylim(len(groups) - 0.5, -0.5)
+            ax.grid(axis="x", color="#D1D5DB", linewidth=0.45, alpha=0.75)
+            ax.set_axisbelow(True)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_visible(False)
+            ax.tick_params(axis="y", length=0)
+            if "Overall" in groups and len(groups) > 1:
+                ax.axhline(0.5, color="#6B7280", linewidth=0.65)
+
+        axes[0].set_yticks(
+            y_positions,
+            labels=[f"{group}  ($n$={group_counts[group]})" for group in groups],
+        )
+        handles = [
+            Line2D([0], [0], color=colors["MACE"], linewidth=1.5, label="MACE"),
+            Line2D([0], [0], color=colors["DPA2"], linewidth=1.5, label="DPA-2"),
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="#4B5563",
+                markerfacecolor="white",
+                linewidth=0,
+                markersize=4.2,
+                label="committee member",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="D",
+                color="#4B5563",
+                markerfacecolor="#4B5563",
+                linewidth=0,
+                markersize=4.6,
+                label="ensemble mean",
+            ),
+        ]
+        fig.legend(
+            handles=handles,
+            loc="outside upper center",
+            ncols=4,
+            frameon=False,
+            handlelength=1.5,
+            columnspacing=1.2,
+        )
+        png = output / "publication_rmse_summary.png"
+        svg = output / "publication_rmse_summary.svg"
+        pdf = output / "publication_rmse_summary.pdf"
+        fig.savefig(png, dpi=300, bbox_inches="tight")
+        fig.savefig(svg, bbox_inches="tight")
+        fig.savefig(pdf, bbox_inches="tight")
+        plt.close(fig)
+    return {
+        "publication_rmse_png": png,
+        "publication_rmse_svg": svg,
+        "publication_rmse_pdf": pdf,
+    }
+
+
 def finalize_comparison(
     campaign_root: str | Path,
     *,
@@ -885,6 +1184,9 @@ def finalize_comparison(
     _write_csv(output / "uncertainty_calibration.csv", uncertainty_rows)
     _write_svg(output / "comparison.svg", overall_rows)
     heatmaps = _write_force_heatmaps(output, system_rows)
+    publication_rows = _publication_summary_rows(system_rows)
+    _write_csv(output / "publication_rmse_by_group.csv", publication_rows)
+    publication_figures = _write_publication_rmse_figure(output, publication_rows)
     headline = [
         row
         for row in overall_rows
@@ -928,9 +1230,11 @@ def finalize_comparison(
             "overall": str(output / "metrics_overall.csv"),
             "by_group": str(output / "metrics_by_group.csv"),
             "uncertainty": str(output / "uncertainty_calibration.csv"),
+            "publication_by_group": str(output / "publication_rmse_by_group.csv"),
             "markdown": str(output / "comparison.md"),
             "svg": str(output / "comparison.svg"),
             **{name: str(path) for name, path in heatmaps.items()},
+            **{name: str(path) for name, path in publication_figures.items()},
         },
     }
     _write_json(output / "comparison.json", payload)
