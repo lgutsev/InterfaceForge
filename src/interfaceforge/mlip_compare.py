@@ -589,6 +589,154 @@ def _write_svg(path: Path, overall: list[dict[str, Any]]) -> None:
     path.write_text("\n".join(svg) + "\n", encoding="utf-8")
 
 
+def _heatmap_label(row: dict[str, Any]) -> str:
+    """Return a compact, unique row label for a canonical test system."""
+
+    if row["heritage"] == "bulk":
+        return f'bulk / {row["relative_leaf"].removeprefix("bulk/")}'
+    return (
+        f'interface / {row["temperature"]} / {row["family"]} / '
+        f'{row["termination"]} / O={row["oxidation"]}'
+    )
+
+
+def _write_force_heatmaps(
+    output: Path, system_rows: list[dict[str, Any]]
+) -> dict[str, Path]:
+    """Plot member-by-system force RMSE using one scale for both engines."""
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise DependencyError(
+            "MLIP comparison heatmaps require matplotlib; "
+            "install InterfaceForge with interfaceforge[report]"
+        ) from exc
+
+    engines = ("MACE", "DPA2")
+    rows = [row for row in system_rows if row["model"] != "ensemble_mean"]
+    model_names = sorted({str(row["model"]) for row in rows})
+    system_ids = sorted(
+        {str(row["system_id"]) for row in rows},
+        key=lambda value: int(value.rsplit("_", 1)[-1]),
+    )
+    lookup = {
+        (str(row["engine"]), str(row["model"]), str(row["system_id"])): row
+        for row in rows
+    }
+    template = {
+        str(row["system_id"]): row
+        for row in rows
+        if row["engine"] == engines[0] and row["model"] == model_names[0]
+    }
+    expected = len(engines) * len(model_names) * len(system_ids)
+    if len(lookup) != expected or len(template) != len(system_ids):
+        raise SafetyError(
+            "Cannot plot force RMSE heatmaps from an incomplete system/member matrix"
+        )
+
+    matrices: dict[str, np.ndarray] = {}
+    for engine in engines:
+        matrices[engine] = np.asarray(
+            [
+                [
+                    float(
+                        lookup[(engine, model, system_id)][
+                            "force_rmse_mev_per_angstrom"
+                        ]
+                    )
+                    / 1000.0
+                    for model in model_names
+                ]
+                for system_id in system_ids
+            ],
+            dtype=float,
+        )
+    labels = [_heatmap_label(template[system_id]) for system_id in system_ids]
+    shared_min = min(float(np.min(matrix)) for matrix in matrices.values())
+    shared_max = max(float(np.max(matrix)) for matrix in matrices.values())
+    if not math.isfinite(shared_min) or not math.isfinite(shared_max):
+        raise SafetyError("Non-finite force RMSE cannot be plotted")
+    if shared_max <= shared_min:
+        shared_max = shared_min + 1.0e-12
+
+    def render(path_stem: str, selected: tuple[str, ...]) -> tuple[Path, Path]:
+        height = max(10.0, 0.31 * len(system_ids) + 2.0)
+        width = 12.0 if len(selected) == 1 else 18.0
+        fig, axes = plt.subplots(
+            1,
+            len(selected),
+            figsize=(width, height),
+            sharey=True,
+            squeeze=False,
+            layout="constrained",
+        )
+        image = None
+        for panel, engine in enumerate(selected):
+            ax = axes[0, panel]
+            matrix = matrices[engine]
+            image = ax.imshow(
+                matrix,
+                aspect="auto",
+                cmap="viridis",
+                vmin=shared_min,
+                vmax=shared_max,
+            )
+            ax.set_title("DPA-2" if engine == "DPA2" else engine, fontsize=14)
+            ax.set_xticks(range(len(model_names)), labels=model_names, rotation=28, ha="right")
+            ax.set_yticks(range(len(labels)), labels=labels)
+            ax.tick_params(axis="y", labelsize=7.2, labelleft=panel == 0)
+            ax.tick_params(axis="x", labelsize=8.5)
+            threshold = shared_min + 0.55 * (shared_max - shared_min)
+            for row_index in range(matrix.shape[0]):
+                for column_index in range(matrix.shape[1]):
+                    value = float(matrix[row_index, column_index])
+                    ax.text(
+                        column_index,
+                        row_index,
+                        f"{value:.4f}",
+                        ha="center",
+                        va="center",
+                        fontsize=6.2,
+                        color="black" if value >= threshold else "white",
+                    )
+            for row_index in range(len(system_ids) + 1):
+                ax.axhline(row_index - 0.5, color="white", linewidth=0.25, alpha=0.45)
+            for column_index in range(len(model_names) + 1):
+                ax.axvline(column_index - 0.5, color="white", linewidth=0.25, alpha=0.45)
+
+        assert image is not None
+        colorbar = fig.colorbar(image, ax=list(axes[0]), shrink=0.78, pad=0.02)
+        colorbar.set_label("Force RMSE (eV/Å)")
+        title = "Per-system force RMSE"
+        if len(selected) == 2:
+            title += " — matched MACE and DPA-2 committees (shared scale)"
+        fig.suptitle(title, fontsize=16)
+        png = output / f"{path_stem}.png"
+        svg = output / f"{path_stem}.svg"
+        fig.savefig(png, dpi=220, bbox_inches="tight")
+        fig.savefig(svg, bbox_inches="tight")
+        plt.close(fig)
+        return png, svg
+
+    mace_png, mace_svg = render("force_rmse_heatmap_mace", ("MACE",))
+    dpa_png, dpa_svg = render("force_rmse_heatmap_dpa2", ("DPA2",))
+    combined_png, combined_svg = render(
+        "force_rmse_heatmaps", ("MACE", "DPA2")
+    )
+    return {
+        "force_heatmap_mace_png": mace_png,
+        "force_heatmap_mace_svg": mace_svg,
+        "force_heatmap_dpa2_png": dpa_png,
+        "force_heatmap_dpa2_svg": dpa_svg,
+        "force_heatmaps_png": combined_png,
+        "force_heatmaps_svg": combined_svg,
+    }
+
+
 def finalize_comparison(
     campaign_root: str | Path,
     *,
@@ -736,6 +884,7 @@ def finalize_comparison(
     _write_csv(output / "metrics_by_group.csv", group_rows)
     _write_csv(output / "uncertainty_calibration.csv", uncertainty_rows)
     _write_svg(output / "comparison.svg", overall_rows)
+    heatmaps = _write_force_heatmaps(output, system_rows)
     headline = [
         row
         for row in overall_rows
@@ -781,6 +930,7 @@ def finalize_comparison(
             "uncertainty": str(output / "uncertainty_calibration.csv"),
             "markdown": str(output / "comparison.md"),
             "svg": str(output / "comparison.svg"),
+            **{name: str(path) for name, path in heatmaps.items()},
         },
     }
     _write_json(output / "comparison.json", payload)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -230,8 +231,33 @@ class TestMLIPComparison(unittest.TestCase):
                 "comparison.json",
                 "comparison.md",
                 "comparison.svg",
+                "force_rmse_heatmap_mace.png",
+                "force_rmse_heatmap_mace.svg",
+                "force_rmse_heatmap_dpa2.png",
+                "force_rmse_heatmap_dpa2.svg",
+                "force_rmse_heatmaps.png",
+                "force_rmse_heatmaps.svg",
             ):
                 self.assertTrue((output / name).is_file(), name)
+                self.assertGreater((output / name).stat().st_size, 0, name)
+            for name in (
+                "force_rmse_heatmap_mace.svg",
+                "force_rmse_heatmap_dpa2.svg",
+                "force_rmse_heatmaps.svg",
+            ):
+                ET.parse(output / name)
+            self.assertEqual(
+                set(report["outputs"]) & {
+                    "force_heatmap_mace_png",
+                    "force_heatmap_dpa2_png",
+                    "force_heatmaps_png",
+                },
+                {
+                    "force_heatmap_mace_png",
+                    "force_heatmap_dpa2_png",
+                    "force_heatmaps_png",
+                },
+            )
             with (output / "metrics_overall.csv").open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len([row for row in rows if row["engine"] == "MACE"]), 10)
