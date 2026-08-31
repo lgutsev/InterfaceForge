@@ -21,6 +21,15 @@ DEFAULT_SEEDS = (11, 23, 37, 53)
 ENERGY_KEY = "REF_energy"
 FORCES_KEY = "REF_forces"
 
+# The DeePMD committee that MACE is compared against. The internal engine key
+# stays "DPA2" for every architecture; only the rendered label changes.
+DEEPMD_DISPLAY = {
+    "dpa2": "DPA-2",
+    "dpa2_ft": "DPA-2 (fine-tuned)",
+    "dpa3": "DPA-3",
+    "dpa4": "DPA-4",
+}
+
 MACE_EVALUATOR = r"""#!/usr/bin/env python3
 import argparse
 import csv
@@ -298,8 +307,14 @@ def prepare_comparison(
     output_root: str | Path | None = None,
     mace_models_root: str | Path | None = None,
     seeds: tuple[int, ...] = DEFAULT_SEEDS,
+    deepmd_arch: str = "dpa2",
     force: bool = False,
 ) -> dict[str, Any]:
+    if deepmd_arch not in DEEPMD_DISPLAY:
+        raise SafetyError(
+            f"Unknown DeePMD architecture {deepmd_arch!r}; expected one of "
+            f"{sorted(DEEPMD_DISPLAY)}"
+        )
     campaign = Path(campaign_root).expanduser().resolve()
     output = Path(output_root).expanduser().resolve() if output_root else campaign / "audit" / "mlip_compare"
     _prepare_output(output, campaign, force)
@@ -327,6 +342,7 @@ def prepare_comparison(
         "status": "READY",
         "benchmark_scope": "in-distribution interpolation",
         "mace_inference_dtype": "float32",
+        "deepmd_architecture": deepmd_arch,
         "campaign_root": str(campaign),
         "output_root": str(output),
         "models": models,
@@ -339,8 +355,8 @@ def prepare_comparison(
     return payload
 
 
-def _latest_deepmd_eval(campaign: Path) -> Path | None:
-    """Return the most recent DPA-2 evaluation job directory.
+def _latest_deepmd_eval(campaign: Path, arch: str = "dpa2") -> Path | None:
+    """Return the most recent evaluation job directory for a DeePMD architecture.
 
     Slurm job IDs are not zero-padded, so a lexical sort would place ``job_998``
     after ``job_1002``. Order by the integer job ID when every candidate has one
@@ -349,7 +365,7 @@ def _latest_deepmd_eval(campaign: Path) -> Path | None:
 
     roots = [
         path
-        for path in (campaign / "models" / "deepmd" / "evaluation" / "dpa2").glob("job_*")
+        for path in (campaign / "models" / "deepmd" / "evaluation" / arch).glob("job_*")
         if path.is_dir()
     ]
     if not roots:
@@ -373,10 +389,11 @@ def comparison_status(
         raise SafetyError(f"Run mlip-compare prepare first: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     systems, models = manifest["systems"], manifest["models"]
+    arch = str(manifest.get("deepmd_architecture", "dpa2"))
     dpa_root = (
         Path(deepmd_eval_root).expanduser().resolve()
         if deepmd_eval_root
-        else _latest_deepmd_eval(campaign)
+        else _latest_deepmd_eval(campaign, arch)
     )
     mace_counts, dpa_counts = {}, {}
     for model in models:
@@ -399,6 +416,7 @@ def comparison_status(
         "schema_version": 1,
         "status": "READY_TO_FINALIZE" if ready else "INCOMPLETE",
         "expected_systems_per_model": expected,
+        "deepmd_architecture": arch,
         "mace": mace_counts,
         "deepmd": dpa_counts,
         "deepmd_eval_root": str(dpa_root) if dpa_root else None,
@@ -547,13 +565,16 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writerows(rows)
 
 
-def _write_svg(path: Path, overall: list[dict[str, Any]]) -> None:
+def _write_svg(
+    path: Path, overall: list[dict[str, Any]], *, deepmd_display: str = "DPA-2"
+) -> None:
     rows = {
         row["engine"]: row
         for row in overall
         if row["model"] == "ensemble_mean" and row["averaging"] == "micro"
     }
     engines = [name for name in ("MACE", "DPA2") if name in rows]
+    labels = {"MACE": "MACE", "DPA2": deepmd_display}
     colors = {"MACE": "#2563eb", "DPA2": "#dc2626"}
     metrics = (
         ("Energy RMSE (meV/atom)", "energy_rmse_mev_per_atom"),
@@ -574,7 +595,7 @@ def _write_svg(path: Path, overall: list[dict[str, Any]]) -> None:
         for index, engine in enumerate(engines):
             y = 180 + index * 105
             width = 350.0 * values[index] / maximum
-            svg.append(f'<text x="{x0}" y="{y + 25}" class="label">{engine}</text>')
+            svg.append(f'<text x="{x0}" y="{y + 25}" class="label">{labels[engine]}</text>')
             svg.append(
                 f'<rect x="{x0 + 70}" y="{y}" width="{width:.1f}" height="38" '
                 f'rx="5" fill="{colors[engine]}"/>'
@@ -602,7 +623,10 @@ def _heatmap_label(row: dict[str, Any]) -> str:
 
 
 def _write_force_heatmaps(
-    output: Path, system_rows: list[dict[str, Any]]
+    output: Path,
+    system_rows: list[dict[str, Any]],
+    *,
+    deepmd_display: str = "DPA-2",
 ) -> dict[str, Path]:
     """Plot member-by-system force RMSE using one scale for both engines."""
 
@@ -686,7 +710,7 @@ def _write_force_heatmaps(
                 vmin=shared_min,
                 vmax=shared_max,
             )
-            ax.set_title("DPA-2" if engine == "DPA2" else engine, fontsize=14)
+            ax.set_title(deepmd_display if engine == "DPA2" else engine, fontsize=14)
             ax.set_xticks(range(len(model_names)), labels=model_names, rotation=28, ha="right")
             ax.set_yticks(range(len(labels)), labels=labels)
             ax.tick_params(axis="y", labelsize=7.2, labelleft=panel == 0)
@@ -714,7 +738,7 @@ def _write_force_heatmaps(
         colorbar.set_label("Force RMSE (eV/Å)")
         title = "Per-system force RMSE"
         if len(selected) == 2:
-            title += " — matched MACE and DPA-2 committees (shared scale)"
+            title += f" — matched MACE and {deepmd_display} committees (shared scale)"
         fig.suptitle(title, fontsize=16)
         png = output / f"{path_stem}.png"
         svg = output / f"{path_stem}.svg"
@@ -947,6 +971,7 @@ def _write_publication_rmse_figure(
     path_stem: str = "publication_rmse_summary",
     output_key: str = "publication_rmse",
     figure_height: float = 4.0,
+    deepmd_display: str = "DPA-2",
 ) -> dict[str, Path]:
     """Plot compact, publication-oriented energy and force RMSE panels."""
 
@@ -1082,7 +1107,7 @@ def _write_publication_rmse_figure(
         )
         handles = [
             Line2D([0], [0], color=colors["MACE"], linewidth=1.5, label="MACE"),
-            Line2D([0], [0], color=colors["DPA2"], linewidth=1.5, label="DPA-2"),
+            Line2D([0], [0], color=colors["DPA2"], linewidth=1.5, label=deepmd_display),
             Line2D(
                 [0],
                 [0],
@@ -1140,6 +1165,8 @@ def finalize_comparison(
     if not manifest_path.is_file():
         raise SafetyError(f"Run mlip-compare prepare first: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    arch = str(manifest.get("deepmd_architecture", "dpa2"))
+    deepmd_display = DEEPMD_DISPLAY.get(arch, arch.upper())
     status = comparison_status(
         campaign, output_root=output, deepmd_eval_root=deepmd_eval_root
     )
@@ -1272,11 +1299,13 @@ def finalize_comparison(
     _write_csv(output / "metrics_overall.csv", overall_rows)
     _write_csv(output / "metrics_by_group.csv", group_rows)
     _write_csv(output / "uncertainty_calibration.csv", uncertainty_rows)
-    _write_svg(output / "comparison.svg", overall_rows)
-    heatmaps = _write_force_heatmaps(output, system_rows)
+    _write_svg(output / "comparison.svg", overall_rows, deepmd_display=deepmd_display)
+    heatmaps = _write_force_heatmaps(output, system_rows, deepmd_display=deepmd_display)
     publication_rows = _publication_summary_rows(system_rows)
     _write_csv(output / "publication_rmse_by_group.csv", publication_rows)
-    publication_figures = _write_publication_rmse_figure(output, publication_rows)
+    publication_figures = _write_publication_rmse_figure(
+        output, publication_rows, deepmd_display=deepmd_display
+    )
     temperature_rows = _temperature_summary_rows(system_rows)
     _write_csv(output / "temperature_rmse_by_group.csv", temperature_rows)
     temperature_figures = _write_publication_rmse_figure(
@@ -1287,6 +1316,7 @@ def finalize_comparison(
         path_stem="temperature_rmse_summary",
         output_key="temperature_rmse",
         figure_height=2.6,
+        deepmd_display=deepmd_display,
     )
     oxidation_rows = _oxidation_summary_rows(system_rows)
     _write_csv(output / "oxidation_rmse_by_group.csv", oxidation_rows)
@@ -1298,14 +1328,16 @@ def finalize_comparison(
         path_stem="oxidation_rmse_summary",
         output_key="oxidation_rmse",
         figure_height=3.6,
+        deepmd_display=deepmd_display,
     )
     headline = [
         row
         for row in overall_rows
         if row["model"] == "ensemble_mean" and row["averaging"] == "micro"
     ]
+    engine_label = {"MACE": "MACE", "DPA2": deepmd_display}
     lines = [
-        "# Matched-frame MACE versus DPA-2 audit",
+        f"# Matched-frame MACE versus {deepmd_display} audit",
         "",
         "**Scope:** in-distribution interpolation on identical synchronized test frames.",
         "",
@@ -1314,7 +1346,8 @@ def finalize_comparison(
     ]
     for row in headline:
         lines.append(
-            f'| {row["engine"]} | {row["energy_rmse_mev_per_atom"]:.4f} | '
+            f'| {engine_label.get(row["engine"], row["engine"])} | '
+            f'{row["energy_rmse_mev_per_atom"]:.4f} | '
             f'{row["energy_centered_rmse_mev_per_atom"]:.4f} | '
             f'{row["force_rmse_mev_per_angstrom"]:.4f} | '
             f'{row["force_relative_rmse_percent"]:.3f} |'
@@ -1334,6 +1367,7 @@ def finalize_comparison(
         "status": "OK",
         "benchmark_scope": "in-distribution interpolation",
         "mace_inference_dtype": "float32",
+        "deepmd_architecture": arch,
         "validation": manifest["validation"],
         "deepmd_reference_max_absolute_delta": ref_delta,
         "headline": headline,
@@ -1369,6 +1403,9 @@ def main(argv: list[str] | None = None) -> int:
         if name == "prepare":
             command.add_argument("--mace-models-root")
             command.add_argument("--seeds", nargs="+", type=int, default=list(DEFAULT_SEEDS))
+            command.add_argument(
+                "--deepmd-arch", default="dpa2", choices=sorted(DEEPMD_DISPLAY)
+            )
             command.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "prepare":
@@ -1377,6 +1414,7 @@ def main(argv: list[str] | None = None) -> int:
             output_root=args.output_root,
             mace_models_root=args.mace_models_root,
             seeds=tuple(args.seeds),
+            deepmd_arch=args.deepmd_arch,
             force=args.force,
         )
     elif args.command == "status":

@@ -234,6 +234,7 @@ def cmd_mlip_compare(args: argparse.Namespace) -> int:
             output_root=args.output_root,
             mace_models_root=args.mace_models_root,
             seeds=tuple(args.seeds),
+            deepmd_arch=args.deepmd_arch,
             force=args.force,
         )
     elif args.mlip_compare_command == "status":
@@ -1168,6 +1169,12 @@ def build_parser() -> argparse.ArgumentParser:
     compare_prepare.add_argument("--mace-models-root")
     compare_prepare.add_argument(
         "--seeds", nargs="+", type=int, default=[11, 23, 37, 53]
+    )
+    compare_prepare.add_argument(
+        "--deepmd-arch",
+        default="dpa2",
+        choices=("dpa2", "dpa2_ft", "dpa3", "dpa4"),
+        help="Which trained DeePMD committee to compare against (default dpa2)",
     )
     compare_prepare.add_argument("--force", action="store_true")
     compare_prepare.set_defaults(func=cmd_mlip_compare)

@@ -95,9 +95,11 @@ def _campaign(tmp_path: Path) -> Path:
     return campaign
 
 
-def _materialize_predictions(campaign: Path, manifest: dict[str, object]) -> Path:
-    output = campaign / "audit" / "mlip_compare"
-    dpa_root = campaign / "models" / "deepmd" / "evaluation" / "dpa2" / "job_1002"
+def _materialize_predictions(
+    campaign: Path, manifest: dict[str, object], arch: str = "dpa2"
+) -> Path:
+    output = Path(str(manifest["output_root"]))
+    dpa_root = campaign / "models" / "deepmd" / "evaluation" / arch / "job_1002"
     models = manifest["models"]
     systems = manifest["systems"]
     assert isinstance(models, list)
@@ -422,6 +424,35 @@ class TestMLIPComparison(unittest.TestCase):
                 self.assertAlmostEqual(
                     float(row["force_rmse_mev_per_angstrom"]), expected_force
                 )
+
+    def test_deepmd_arch_selects_eval_tree_and_relabels(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign = _campaign(Path(temporary))
+            output = campaign / "audit" / "mlip_compare_dpa3"
+            manifest = prepare_comparison(
+                campaign, output_root=output, deepmd_arch="dpa3"
+            )
+            self.assertEqual(manifest["deepmd_architecture"], "dpa3")
+            dpa_root = _materialize_predictions(campaign, manifest, arch="dpa3")
+            # auto-discovery must look under evaluation/dpa3, not dpa2
+            status = comparison_status(campaign, output_root=output)
+            self.assertEqual(status["status"], "READY_TO_FINALIZE")
+            self.assertEqual(status["deepmd_architecture"], "dpa3")
+            self.assertEqual(
+                Path(status["deepmd_eval_root"]).resolve(), dpa_root.resolve()
+            )
+            report = finalize_comparison(campaign, output_root=output)
+            self.assertEqual(report["deepmd_architecture"], "dpa3")
+            markdown = (output / "comparison.md").read_text(encoding="utf-8")
+            self.assertIn("MACE versus DPA-3 audit", markdown)
+            self.assertIn("| DPA-3 |", markdown)
+            self.assertNotIn("| DPA2 |", markdown)
+
+    def test_prepare_rejects_unknown_deepmd_arch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign = _campaign(Path(temporary))
+            with self.assertRaisesRegex(SafetyError, "Unknown DeePMD architecture"):
+                prepare_comparison(campaign, deepmd_arch="dpa9")
 
     def test_prepare_refuses_unforced_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
