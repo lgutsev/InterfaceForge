@@ -3,6 +3,10 @@
 This workflow compares existing MACE and DPA-2 committees on the exact same
 canonical test configurations. It does not retrain either model.
 
+For the current periodic SiN/TiN/TiO committee, the legacy training launcher
+and the generated comparison evaluator both use float32. The inference dtype is
+recorded in `comparison_manifest.json` and `comparison.json`.
+
 The comparison is explicitly an **in-distribution interpolation benchmark**:
 every source trajectory contributed frames to training, validation, and test.
 Use an independent trajectory or physical-regime challenge set before making
