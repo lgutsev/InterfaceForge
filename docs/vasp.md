@@ -108,7 +108,7 @@ Per OPT run:
   `LDAU*` / `LMAXMIX` block are copied **byte-for-byte** from the OPT
   `INCAR` (`LDAUPRINT` is not — it is print verbosity, not a U parameter);
 - every other tag — electronic convergence (a cheaper `ENCUT=400`,
-  `PREC=Med`, `EDIFF=1E-4`), the preheat MD block (`IBRION=0`, `SMASS=-1`,
+  `PREC=Med`, `EDIFF=1E-5`), the preheat MD block (`IBRION=0`, `SMASS=-1`,
   `NBLOCK=4`, `NSW` from the protocol), and output — comes from the packaged
   `INCAR.step1_preheat` template (override with `--template`);
 - `--temperature` (default 300) sets `SYSTEM` / `TEBEG` / `TEEND`;
