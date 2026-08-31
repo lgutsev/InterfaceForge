@@ -14,12 +14,46 @@ system must use the same `type_map.raw`.
 |---|---|---|
 | DPA-1 | `se_atten` (`dpa1` for experimental implementation) | TensorFlow, PyTorch, `pt_expt` |
 | DPA-2 | `dpa2` | PyTorch or `pt_expt` |
+| DPA-2 fine-tune | `dpa2_ft` (dpa2 structure, fine-tuned) | PyTorch or `pt_expt` |
 | DPA-3 | `dpa3` | PyTorch or `pt_expt` |
 | DPA-4 | `dpa4` + `dpa4_ener` | PyTorch or `pt_expt`; experimental deployment |
 | classic | `se_e2_a` | TensorFlow, PyTorch |
 
 The input shapes mirror the supplied modern campaign primer and remain fully
 editable after generation.
+
+### Fine-tuning DPA-2 from a foundation checkpoint
+
+`dpa2_ft` is a fine-tuning run of the `dpa2` architecture. It coexists with a
+from-scratch `dpa2` entry in the same committee (own `models/deepmd/dpa2_ft/`
+tree and evaluation), so the two can be compared directly. It requires a
+`finetune` block:
+
+```yaml
+models:
+  deepmd:
+    backend: pt_expt
+    architectures: [dpa2, dpa2_ft, dpa3]
+    committee: 4
+    seeds: [11, 23, 37, 53]
+    finetune:
+      pretrained: /project/lgutsev/models/dpa2_openlam.pt   # a DPA-2 checkpoint
+      model_branch: RANDOM     # a named multi-task head, or RANDOM to reinit fitting
+```
+
+The generated `run_ensemble.slurm` runs, only for `$ARCH == dpa2_ft` and only on
+the first pass (no local checkpoint yet):
+
+```
+dp --pt train input.json --finetune <pretrained> --model-branch <model_branch>
+```
+
+`--restart` takes precedence once a `model.ckpt.pt` exists, so continuation runs
+behave like any other architecture. `RANDOM` keeps the pretrained descriptor and
+reinitializes the fitting net — the most robust default across checkpoint
+versions; a named branch requires the input-side descriptor to match that
+branch. Verify `dp --pt train --help` in your DeePMD-kit build lists `--finetune`
+and `--model-branch` before submitting, and run `run_smoke.slurm` first.
 
 ## Generated jobs
 

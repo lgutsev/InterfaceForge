@@ -353,6 +353,10 @@ def validate_deepmd_dataset(root: Path) -> tuple[list[str], dict[str, list[str]]
 
 
 def _deepmd_descriptor(name: str, backend: str, seed: int) -> dict[str, Any]:
+    # dpa2_ft is a fine-tuning run of the dpa2 architecture: identical model
+    # structure, only the training command differs.
+    if name == "dpa2_ft":
+        name = "dpa2"
     if name == "dpa1":
         descriptor_type = "dpa1" if backend == "pt_expt" else "se_atten"
         return {
@@ -486,7 +490,7 @@ def deepmd_input(
         }
         if not model["type_embedding"]:
             model.pop("type_embedding")
-    modern = architecture in {"dpa2", "dpa3", "dpa4"}
+    modern = architecture in {"dpa2", "dpa2_ft", "dpa3", "dpa4"}
     return {
         "_comment": "InterfaceForge energy/force model; raw DFT force labels.",
         "model": model,
@@ -649,6 +653,25 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
             f'|| echo "WARNING: freeze failed; {checkpoint} remains valid for auditing, '
             'but deployment is not approved."; fi'
         )
+    finetune = dict(settings.get("finetune", {}))
+    if "dpa2_ft" in architectures:
+        ft_pretrained = shlex.quote(str(finetune["pretrained"]))
+        ft_branch = shlex.quote(str(finetune.get("model_branch", "RANDOM")))
+        train_dispatch = (
+            f'if [[ -s {restart_marker} ]]; then TRAIN_ARGS+=(--restart {checkpoint}); '
+            f'elif [[ "$ARCH" == "dpa2_ft" ]]; then '
+            f"TRAIN_ARGS+=(--finetune {ft_pretrained} --model-branch {ft_branch}); fi"
+        )
+        smoke_train_line = (
+            f'if [[ "$ARCH" == "dpa2_ft" ]]; then dp_exec {backend_flag} train input.json '
+            f"--finetune {ft_pretrained} --model-branch {ft_branch}; "
+            f"else dp_exec {backend_flag} train input.json; fi"
+        )
+    else:
+        train_dispatch = (
+            f'if [[ -s {restart_marker} ]]; then TRAIN_ARGS+=(--restart {checkpoint}); fi'
+        )
+        smoke_train_line = f"dp_exec {backend_flag} train input.json"
     command = "\n".join(
         [
             prefix,
@@ -662,7 +685,7 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
             f'RUN_DIR={shlex.quote(str(root))}/${{ARCH}}/model_${{MODEL_ID}}',
             'cd "${RUN_DIR}"',
             f"TRAIN_ARGS=({backend_flag} train input.json)",
-            f'if [[ -s {restart_marker} ]]; then TRAIN_ARGS+=(--restart {checkpoint}); fi',
+            train_dispatch,
             'dp_exec "${TRAIN_ARGS[@]}"',
             freeze_command,
             "mkdir -p test_results",
@@ -731,7 +754,7 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
             'target.write_text(json.dumps(data, indent=2) + "\\n")',
             "PY",
             'cd "$SMOKE_DIR"',
-            f"dp_exec {backend_flag} train input.json",
+            smoke_train_line,
             freeze_command,
             "mkdir -p test_results",
             f"MODEL_FILE={shlex.quote(evaluation_model)}",
@@ -836,6 +859,15 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
             "container_image": str(settings.get("container_image", "")),
         },
         "architectures": architectures,
+        "finetune": (
+            {
+                "architecture": "dpa2_ft",
+                "pretrained": str(finetune["pretrained"]),
+                "model_branch": str(finetune.get("model_branch", "RANDOM")),
+            }
+            if "dpa2_ft" in architectures
+            else None
+        ),
         "dataset_root": str(dataset_root),
         "type_map": type_map,
         "split_systems": {name: len(values) for name, values in split_systems.items()},

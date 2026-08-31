@@ -93,6 +93,80 @@ class TrainingTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_dpa2_finetune_requires_pretrained_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for split in ("train", "valid", "test"):
+                make_deepmd_system(root, split)
+            deepmd = {
+                "enabled": True,
+                "profile": "deepmd_gpu",
+                "backend": "pt_expt",
+                "architectures": ["dpa2_ft"],
+                "committee": 1,
+                "seeds": [11],
+            }
+            campaign_path = write_campaign(root, deepmd=deepmd)
+            with self.assertRaisesRegex(ConfigurationError, "finetune.pretrained"):
+                load_campaign(campaign_path)
+
+    def test_dpa2_finetune_emits_gated_finetune_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for split in ("train", "valid", "test"):
+                make_deepmd_system(root, split)
+            pretrained = root / "pretrained" / "dpa2_openlam.pt"
+            pretrained.parent.mkdir(parents=True)
+            pretrained.write_bytes(b"placeholder checkpoint")
+            deepmd = {
+                "enabled": True,
+                "profile": "deepmd_gpu",
+                "backend": "pt_expt",
+                "architectures": ["dpa2", "dpa2_ft"],
+                "committee": 2,
+                "seeds": [11, 23],
+                "numb_steps": 100,
+                "batch_atoms": 64,
+                "max_concurrent": 1,
+                "finetune": {
+                    "pretrained": str(pretrained),
+                    "model_branch": "Domains_Anode",
+                },
+            }
+            campaign = load_campaign(write_campaign(root, deepmd=deepmd))
+            manifest = generate_deepmd_training(campaign)
+            self.assertEqual(
+                manifest["finetune"],
+                {
+                    "architecture": "dpa2_ft",
+                    "pretrained": str(pretrained),
+                    "model_branch": "Domains_Anode",
+                },
+            )
+            ensemble = (root / "models/deepmd/run_ensemble.slurm").read_text(
+                encoding="utf-8"
+            )
+            smoke = (root / "models/deepmd/run_smoke.slurm").read_text(encoding="utf-8")
+            self.assertIn('elif [[ "$ARCH" == "dpa2_ft" ]]', ensemble)
+            self.assertIn("--finetune", ensemble)
+            self.assertIn("--model-branch Domains_Anode", ensemble)
+            self.assertIn("--model-branch Domains_Anode", smoke)
+            # scratch dpa2 must not pick up the finetune flag
+            self.assertNotIn("dpa2/model_${MODEL_ID} --finetune", ensemble)
+            ft_input = json.loads(
+                (root / "models/deepmd/dpa2_ft/model_000/input.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(ft_input["model"]["descriptor"]["type"], "dpa2")
+            for name in manifest["execution_order"]:
+                result = subprocess.run(
+                    ["bash", "-n", root / "models/deepmd" / name],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_pytorch_audit_uses_checkpoint_and_records_export_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

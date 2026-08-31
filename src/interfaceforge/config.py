@@ -150,16 +150,33 @@ def _validate_models(models: dict[str, Any]) -> None:
             str(item).lower()
             for item in deepmd.get("architectures", [descriptor])
         ]
-        supported = {"dpa1", "dpa2", "dpa3", "dpa4", "se_e2_a"}
+        supported = {"dpa1", "dpa2", "dpa2_ft", "dpa3", "dpa4", "se_e2_a"}
         if not architectures or any(item not in supported for item in architectures):
             raise ConfigurationError(
-                "models.deepmd.architectures supports dpa1, dpa2, dpa3, "
+                "models.deepmd.architectures supports dpa1, dpa2, dpa2_ft, dpa3, "
                 "dpa4, or se_e2_a"
             )
         if len(set(architectures)) != len(architectures):
             raise ConfigurationError("models.deepmd.architectures contains duplicates")
-        if any(item in {"dpa2", "dpa3", "dpa4"} for item in architectures) and backend == "tensorflow":
+        if (
+            any(item in {"dpa2", "dpa2_ft", "dpa3", "dpa4"} for item in architectures)
+            and backend == "tensorflow"
+        ):
             raise ConfigurationError("DPA-2/3/4 campaigns require a PyTorch backend")
+        finetune: dict[str, Any] = {}
+        if "dpa2_ft" in architectures:
+            finetune = _mapping(deepmd.get("finetune"), "models.deepmd.finetune")
+            pretrained = str(finetune.get("pretrained", "")).strip()
+            if not pretrained:
+                raise ConfigurationError(
+                    "models.deepmd.finetune.pretrained is required when "
+                    "models.deepmd.architectures includes dpa2_ft"
+                )
+            finetune = {
+                "pretrained": pretrained,
+                "model_branch": str(finetune.get("model_branch", "RANDOM")).strip()
+                or "RANDOM",
+            }
         deepmd.update(
             {
                 "committee": committee,
@@ -167,6 +184,7 @@ def _validate_models(models: dict[str, Any]) -> None:
                 "backend": backend,
                 "descriptor": descriptor,
                 "architectures": architectures,
+                "finetune": finetune,
             }
         )
         models["deepmd"] = deepmd
