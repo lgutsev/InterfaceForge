@@ -17,6 +17,7 @@ from interfaceforge.mlip_compare import (
     MACE_EVALUATOR,
     _groups,
     _metrics,
+    _oxidation_summary_rows,
     _publication_summary_rows,
     _temperature_summary_rows,
     comparison_status,
@@ -272,6 +273,7 @@ class TestMLIPComparison(unittest.TestCase):
                 "uncertainty_calibration.csv",
                 "publication_rmse_by_group.csv",
                 "temperature_rmse_by_group.csv",
+                "oxidation_rmse_by_group.csv",
                 "comparison.json",
                 "comparison.md",
                 "comparison.svg",
@@ -287,6 +289,9 @@ class TestMLIPComparison(unittest.TestCase):
                 "temperature_rmse_summary.png",
                 "temperature_rmse_summary.svg",
                 "temperature_rmse_summary.pdf",
+                "oxidation_rmse_summary.png",
+                "oxidation_rmse_summary.svg",
+                "oxidation_rmse_summary.pdf",
             ):
                 self.assertTrue((output / name).is_file(), name)
                 self.assertGreater((output / name).stat().st_size, 0, name)
@@ -296,6 +301,7 @@ class TestMLIPComparison(unittest.TestCase):
                 "force_rmse_heatmaps.svg",
                 "publication_rmse_summary.svg",
                 "temperature_rmse_summary.svg",
+                "oxidation_rmse_summary.svg",
             ):
                 ET.parse(output / name)
             self.assertEqual(
@@ -340,6 +346,33 @@ class TestMLIPComparison(unittest.TestCase):
                     "publication_rmse_pdf",
                 },
             )
+            self.assertEqual(
+                set(report["outputs"])
+                & {
+                    "oxidation_by_group",
+                    "oxidation_rmse_png",
+                    "oxidation_rmse_svg",
+                    "oxidation_rmse_pdf",
+                },
+                {
+                    "oxidation_by_group",
+                    "oxidation_rmse_png",
+                    "oxidation_rmse_svg",
+                    "oxidation_rmse_pdf",
+                },
+            )
+            with (output / "metrics_by_system.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                oxidation_rows = _oxidation_summary_rows(list(csv.DictReader(handle)))
+            self.assertEqual(
+                {row["oxidation_group"] for row in oxidation_rows},
+                {"Overall", "Bulk", "O = 0.25"},
+            )
+            for row in oxidation_rows:
+                if row["oxidation_group"] == "Bulk":
+                    self.assertEqual(row["engine"] in {"MACE", "DPA2"}, True)
+                    self.assertGreater(int(row["frames"]), 0)
             with (output / "metrics_overall.csv").open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len([row for row in rows if row["engine"] == "MACE"]), 10)

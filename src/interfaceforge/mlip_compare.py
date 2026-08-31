@@ -751,6 +751,16 @@ PUBLICATION_GROUP_ORDER = (
 
 TEMPERATURE_GROUP_ORDER = ("Overall", "300 K", "450 K")
 
+OXIDATION_GROUP_ORDER = (
+    "Overall",
+    "Bulk",
+    "O = 0",
+    "O = 0.25",
+    "O = 0.5",
+    "O = 0.75",
+    "O = 1",
+)
+
 
 def _publication_group(row: dict[str, Any]) -> str:
     """Collapse the 48 trajectories into chemically interpretable figure bins."""
@@ -806,6 +816,37 @@ def _temperature_summary_rows(
         group_key="temperature_group",
         group_order=TEMPERATURE_GROUP_ORDER,
         group_for=_temperature_group,
+    )
+
+
+def _oxidation_group(row: dict[str, Any]) -> str:
+    """Bin trajectories by interface oxygen coverage; bulk is its own bin."""
+
+    if row["heritage"] == "bulk":
+        return "Bulk"
+    oxidation = str(row["oxidation"])
+    if oxidation == "NA":
+        raise SafetyError(
+            f'Interface trajectory has no oxidation coordinate: {row["relative_leaf"]}'
+        )
+    return f"O = {oxidation}"
+
+
+def _oxidation_summary_rows(
+    system_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return exact pooled RMSEs for the overall set, bulk, and each coverage.
+
+    Bulk trajectories have no oxidation coordinate; they are pooled into a
+    single ``Bulk`` bin so every test system still lands in exactly one bin and
+    the ``Overall`` row stays identical to the other summary figures.
+    """
+
+    return _pooled_summary_rows(
+        system_rows,
+        group_key="oxidation_group",
+        group_order=OXIDATION_GROUP_ORDER,
+        group_for=_oxidation_group,
     )
 
 
@@ -1247,6 +1288,17 @@ def finalize_comparison(
         output_key="temperature_rmse",
         figure_height=2.6,
     )
+    oxidation_rows = _oxidation_summary_rows(system_rows)
+    _write_csv(output / "oxidation_rmse_by_group.csv", oxidation_rows)
+    oxidation_figures = _write_publication_rmse_figure(
+        output,
+        oxidation_rows,
+        group_key="oxidation_group",
+        group_order=OXIDATION_GROUP_ORDER,
+        path_stem="oxidation_rmse_summary",
+        output_key="oxidation_rmse",
+        figure_height=3.6,
+    )
     headline = [
         row
         for row in overall_rows
@@ -1292,11 +1344,13 @@ def finalize_comparison(
             "uncertainty": str(output / "uncertainty_calibration.csv"),
             "publication_by_group": str(output / "publication_rmse_by_group.csv"),
             "temperature_by_group": str(output / "temperature_rmse_by_group.csv"),
+            "oxidation_by_group": str(output / "oxidation_rmse_by_group.csv"),
             "markdown": str(output / "comparison.md"),
             "svg": str(output / "comparison.svg"),
             **{name: str(path) for name, path in heatmaps.items()},
             **{name: str(path) for name, path in publication_figures.items()},
             **{name: str(path) for name, path in temperature_figures.items()},
+            **{name: str(path) for name, path in oxidation_figures.items()},
         },
     }
     _write_json(output / "comparison.json", payload)

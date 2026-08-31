@@ -75,6 +75,11 @@ Finalization independently checks that the reference columns written by
 - `temperature_rmse_by_group.csv`: pooled RMSE for Overall, 300 K, and 450 K;
 - `temperature_rmse_summary.{png,svg,pdf}`: separate publication figure using
   the same energy/force and committee visual encoding for temperature;
+- `oxidation_rmse_by_group.csv`: pooled RMSE for Overall, a single `Bulk` bin,
+  and each interface oxygen coverage `O = 0`, `0.25`, `0.5`, `0.75`, `1`;
+- `oxidation_rmse_summary.{png,svg,pdf}`: same encoding again, resolving whether
+  accuracy is coverage-dependent (e.g. worse at full oxidation) for either
+  engine;
 - `force_rmse_heatmap_mace.{png,svg}` and
   `force_rmse_heatmap_dpa2.{png,svg}`: annotated member-by-system heatmaps;
 - `force_rmse_heatmaps.{png,svg}`: both committees side by side with identical
@@ -96,6 +101,11 @@ the four independently trained models, the connecting segment is their range,
 and the filled diamond is the RMSE of the committee-averaged prediction. The
 diamond is not the arithmetic mean of the four member RMSEs and may lie below
 their range when member errors cancel.
+
+The oxidation summary pools the 8 bulk trajectories into one `Bulk` bin (they
+have no oxygen-coverage coordinate) and the 40 interface trajectories into
+eight-system bins by coverage. Its Overall row is again identical to the other
+two figures.
 
 The temperature summary separately pools all 24 test systems at 300 K and all
 24 at 450 K. Its Overall row is identical to the Overall row in the physical-
