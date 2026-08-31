@@ -9,17 +9,21 @@ SYSTEM = Step1_preheat_300K
 ISTART = 1
 
 # ----------------------------
-# Electronic structure
+# Electronic structure (tuned for MD, not a high-accuracy OPT)
+# Each MD step reuses the previous step's wavefunction and charge, so the
+# SCF loop is short and cheap approximations are fine.
 # ----------------------------
 ISMEAR = 0
 SIGMA  = 0.05
 ENCUT  = 400
-PREC   = Med
+PREC   = Normal
 EDIFF  = 1E-5
-NELM   = 100
+NELM   = 60
 NELMIN = 4
+NELMDL = -5
 ALGO   = Fast
 LREAL  = Auto
+MAXMIX = 40
 IVDW   = 11
 ISYM   = 0
 
@@ -40,16 +44,16 @@ TEEND  = 300
 ISIF = 2
 
 # ----------------------------
-# Output
+# Output (keep I/O light during the run)
 # ----------------------------
 NWRITE = 1
 LWAVE  = .TRUE.
 LCHARG = .FALSE.
 
 # ----------------------------
-# Parallelization
+# Parallelization (tune NCORE / KPAR to the machine)
 # ----------------------------
-NCORE = 1
+NCORE = 4
 
 # GGA, ISPIN, LASPH, MAGMOM and the full LDAU* / LMAXMIX block are inherited
 # verbatim from each OPT run's INCAR by `iface vasp step1-prepare`.
