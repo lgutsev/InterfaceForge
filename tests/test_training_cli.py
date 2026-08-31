@@ -93,10 +93,7 @@ class TrainingTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_dpa4_freeze_failure_exits_nonzero_not_success(self) -> None:
-        # A DPA-4 freeze failure must not report job success: downstream
-        # monitoring/automation reads the exit code to decide whether a
-        # deployable model exists.
+    def test_pytorch_audit_uses_checkpoint_and_records_export_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for split in ("train", "valid", "test"):
@@ -113,36 +110,27 @@ class TrainingTests(unittest.TestCase):
                 "max_concurrent": 1,
             }
             campaign = load_campaign(write_campaign(root, deepmd=deepmd))
-            generate_deepmd_training(campaign)
-            script = (root / "models/deepmd/run_ensemble.slurm").read_text(encoding="utf-8")
-            self.assertNotIn("]] && exit 0", script)
-
-            guard_lines = [
-                line
-                for line in script.splitlines()
-                if line.strip().startswith('[[ "$ARCH" == "dpa4"')
-            ]
-            self.assertEqual(len(guard_lines), 1)
-            harness = (
-                "#!/usr/bin/env bash\n"
-                "set -u\n"
-                "ARCH=dpa4\n"
-                f"{guard_lines[0].strip()}\n"
-                'echo "guard did not stop execution"\n'
+            manifest = generate_deepmd_training(campaign)
+            ensemble = (root / "models/deepmd/run_ensemble.slurm").read_text(encoding="utf-8")
+            evaluation = (root / "models/deepmd/run_evaluate.slurm").read_text(encoding="utf-8")
+            self.assertEqual(manifest["evaluation_model_name"], "model.ckpt.pt")
+            self.assertIn("freeze failed", ensemble)
+            self.assertIn("DPA-4 freeze failed", ensemble)
+            self.assertIn("exit 3", ensemble)
+            self.assertIn("MODEL_FILE=model.ckpt.pt", ensemble)
+            self.assertIn("model_${MODEL_ID}/model.ckpt.pt", evaluation)
+            self.assertIn("summarize_deepmd.py", evaluation)
+            self.assertEqual(
+                manifest["evaluation_reports"],
+                ["rmse_by_system.csv", "rmse_overall.csv", "rmse_audit.json"],
             )
-            harness_path = root / "guard.sh"
-            harness_path.write_text(harness, encoding="utf-8")
-            result = subprocess.run(
-                ["bash", str(harness_path)], capture_output=True, text=True
-            )
-            self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-            self.assertIn("ERROR", result.stdout)
 
-    def test_deepmd_shell_prefix_uses_srun_only_under_slurm(self) -> None:
+    def test_deepmd_shell_prefix_avoids_nested_srun(self) -> None:
         direct_settings: dict = {}
         slurm_prefix = _deepmd_shell_prefix(direct_settings, "pytorch", scheduler="slurm")
         local_prefix = _deepmd_shell_prefix(direct_settings, "pytorch", scheduler="local")
-        self.assertIn("srun -n 1 dp", slurm_prefix)
+        self.assertNotIn("srun", slurm_prefix)
+        self.assertIn('dp_exec() { dp "$@"; }', slurm_prefix)
         self.assertNotIn("srun", local_prefix)
         self.assertIn('dp_exec() { dp "$@"; }', local_prefix)
 

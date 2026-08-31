@@ -539,12 +539,14 @@ def _backend_flag(backend: str) -> tuple[str, str]:
 def _deepmd_shell_prefix(settings: Mapping[str, Any], backend: str, *, scheduler: str) -> str:
     """Return portable direct/container helpers for generated jobs.
 
-    `srun` only exists under Slurm; a local profile has no job step launcher,
-    so dp_exec/container_python must invoke the binaries directly there.
+    The LONI DeePMD module is itself a container/MPI wrapper.  Starting that
+    wrapper inside a second ``srun`` step can leave PMI uninitialised during
+    follow-up commands such as ``dp freeze``.  A batch allocation already
+    exposes the requested GPU, so generated jobs invoke DeePMD directly for
+    both Slurm and local profiles.
     """
 
     image = str(settings.get("container_image", "")).strip()
-    runner = "srun -n 1 " if scheduler == "slurm" else ""
     python_check = (
         "import tensorflow as tf; g=tf.config.list_physical_devices('GPU'); "
         "print('TensorFlow-visible GPUs:',g); assert g"
@@ -555,8 +557,8 @@ def _deepmd_shell_prefix(settings: Mapping[str, Any], backend: str, *, scheduler
     if not image:
         return "\n".join(
             [
-                f'dp_exec() {{ {runner}dp "$@"; }}',
-                f'container_python() {{ {runner}python "$@"; }}',
+                'dp_exec() { dp "$@"; }',
+                'container_python() { python "$@"; }',
                 f"container_python -c {shlex.quote(python_check)}",
             ]
         )
@@ -570,10 +572,10 @@ def _deepmd_shell_prefix(settings: Mapping[str, Any], backend: str, *, scheduler
             "for bind_dir in /ddnB /project; do",
             '  [[ -d "$bind_dir" ]] && DEEPMD_BIND_ARGS+=(--bind "$bind_dir:$bind_dir")',
             "done",
-            f'dp_exec() {{ {runner}"$CONTAINER_RUNTIME" exec --nv '
+            'dp_exec() { "$CONTAINER_RUNTIME" exec --nv '
             '"${DEEPMD_BIND_ARGS[@]}" "$DEEPMD_IMAGE" dp "$@"; }',
             "container_python() {",
-            f'  {runner}"$CONTAINER_RUNTIME" exec --nv '
+            '  "$CONTAINER_RUNTIME" exec --nv '
             '"${DEEPMD_BIND_ARGS[@]}" "$DEEPMD_IMAGE" python "$@"',
             "}",
             f"container_python -c {shlex.quote(python_check)}",
@@ -635,6 +637,18 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
     checkpoint = "model.ckpt" if backend == "tensorflow" else "model.ckpt.pt"
     restart_marker = "model.ckpt.index" if backend == "tensorflow" else checkpoint
     freeze_checkpoint = "." if backend == "tensorflow" else checkpoint
+    evaluation_model = frozen_name if backend == "tensorflow" else checkpoint
+    if backend == "tensorflow":
+        freeze_command = f"dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name}"
+    else:
+        freeze_command = (
+            f'if [[ "$ARCH" == "dpa4" ]]; then '
+            f"dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name} "
+            f'|| {{ echo "ERROR: DPA-4 freeze failed; deployment is not approved."; exit 3; }}; '
+            f"else dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name} "
+            f'|| echo "WARNING: freeze failed; {checkpoint} remains valid for auditing, '
+            'but deployment is not approved."; fi'
+        )
     command = "\n".join(
         [
             prefix,
@@ -650,16 +664,10 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
             f"TRAIN_ARGS=({backend_flag} train input.json)",
             f'if [[ -s {restart_marker} ]]; then TRAIN_ARGS+=(--restart {checkpoint}); fi',
             'dp_exec "${TRAIN_ARGS[@]}"',
-            (
-                f'if [[ "$ARCH" == "dpa4" ]]; then '
-                f"dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name} "
-                f'|| echo "WARNING: DPA-4 freeze failed; deployment is not approved."; '
-                f"else dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name}; fi"
-            ),
-            '[[ "$ARCH" == "dpa4" && ! -s ' + frozen_name + " ]] && "
-            '{ echo "ERROR: DPA-4 training completed but freeze produced no deployable model"; exit 3; }',
+            freeze_command,
             "mkdir -p test_results",
-            f"MODEL_FILE={shlex.quote(frozen_name)}",
+            f"MODEL_FILE={shlex.quote(evaluation_model)}",
+            '[[ -s "$MODEL_FILE" ]] || { echo "ERROR: missing evaluation model $MODEL_FILE"; exit 3; }',
             f"mapfile -t TEST_SYSTEMS < {shlex.quote(str(root / 'test_systems.txt'))}",
             'for TEST_INDEX in "${!TEST_SYSTEMS[@]}"; do',
             "  printf -v TEST_LABEL 'system_%03d' \"$TEST_INDEX\"",
@@ -724,20 +732,15 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
             "PY",
             'cd "$SMOKE_DIR"',
             f"dp_exec {backend_flag} train input.json",
-            (
-                f'if [[ "$ARCH" == "dpa4" ]]; then '
-                f"dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name} "
-                f'|| echo "WARNING: DPA-4 smoke trained but freeze failed."; '
-                f"else dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name}; fi"
-            ),
-            '[[ "$ARCH" == "dpa4" && ! -s ' + frozen_name + " ]] && "
-            '{ echo "ERROR: DPA-4 training completed but freeze produced no deployable model"; exit 3; }',
+            freeze_command,
             "mkdir -p test_results",
+            f"MODEL_FILE={shlex.quote(evaluation_model)}",
+            '[[ -s "$MODEL_FILE" ]] || { echo "ERROR: missing smoke evaluation model $MODEL_FILE"; exit 3; }',
             f"mapfile -t TEST_SYSTEMS < {shlex.quote(str(root / 'test_systems.txt'))}",
             'for TEST_INDEX in "${!TEST_SYSTEMS[@]}"; do',
             "  printf -v TEST_LABEL 'system_%03d' \"$TEST_INDEX\"",
             '  mkdir -p "test_results/${TEST_LABEL}"',
-            f'  dp_exec {backend_flag} test -m {frozen_name} '
+            f'  dp_exec {backend_flag} test -m "$MODEL_FILE" '
             '-s "${TEST_SYSTEMS[$TEST_INDEX]}" -n 100 '
             '-d "test_results/${TEST_LABEL}/detail" '
             '> "test_results/${TEST_LABEL}.log" 2>&1',
@@ -755,18 +758,26 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
     )
     write_job(root / "run_smoke.slurm", smoke, force=force)
 
+    audit_script = root / "summarize_deepmd.py"
+    audit_script.write_text(
+        Path(__file__).with_name("deepmd_audit.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
     evaluation_command = "\n".join(
         [
             prefix,
             f"ARCHITECTURES=({architectures_array})",
             f"NMODELS={committee}",
+            "SEEDS=(" + " ".join(str(value) for value in seeds) + ")",
+            "MODEL_DEVIATION_FAILED=0",
             'ARCH="${ARCHITECTURES[${SLURM_ARRAY_TASK_ID:?Submit with sbatch}]}"',
             f'EVAL_ROOT={shlex.quote(str(root))}/evaluation/${{ARCH}}/job_${{SLURM_JOB_ID}}',
             'mkdir -p "$EVAL_ROOT/by_system"',
             "MODELS=()",
             'for MODEL_INDEX in $(seq 0 $((NMODELS - 1))); do',
             "  printf -v MODEL_ID '%03d' \"$MODEL_INDEX\"",
-            f'  MODEL={shlex.quote(str(root))}/${{ARCH}}/model_${{MODEL_ID}}/{frozen_name}',
+            f'  MODEL={shlex.quote(str(root))}/${{ARCH}}/model_${{MODEL_ID}}/{evaluation_model}',
             '  [[ -s "$MODEL" ]] || { echo "ERROR: missing $MODEL"; exit 2; }',
             '  MODELS+=("$MODEL")',
             "done",
@@ -782,11 +793,19 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
             '-d "$SYSTEM_ROOT/${MODEL_LABEL}_detail" '
             '> "$SYSTEM_ROOT/${MODEL_LABEL}.log" 2>&1',
             "  done",
-            f'  dp_exec {backend_flag} model-devi -m "${{MODELS[@]}}" '
+            f'  if ! dp_exec {backend_flag} model-devi -m "${{MODELS[@]}}" '
             '-s "${TEST_SYSTEMS[$TEST_INDEX]}" '
             '-o "$SYSTEM_ROOT/model_devi.out" --real_error '
-            '> "$SYSTEM_ROOT/model_devi.log" 2>&1',
+            '> "$SYSTEM_ROOT/model_devi.log" 2>&1; then',
+            '    echo "WARNING: model deviation failed for $TEST_LABEL" >&2',
+            "    MODEL_DEVIATION_FAILED=1",
+            "  fi",
             "done",
+            f"container_python {shlex.quote(str(audit_script))} "
+            f"--eval-root \"$EVAL_ROOT\" --systems {shlex.quote(str(root / 'test_systems.txt'))} "
+            '--architecture "$ARCH" --seeds "${SEEDS[@]}"',
+            '[[ "$MODEL_DEVIATION_FAILED" -eq 0 ]] || { '
+            'echo "ERROR: RMSE reports were written, but committee deviation failed." >&2; exit 4; }',
             'echo "DeepMD committee evaluation completed for $ARCH"',
         ]
     )
@@ -833,6 +852,9 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
         ],
         "test_systems": str(test_systems_path),
         "frozen_model_name": frozen_name,
+        "evaluation_model_name": evaluation_model,
+        "evaluation_reports": ["rmse_by_system.csv", "rmse_overall.csv", "rmse_audit.json"],
+        "evaluation_audit_script": str(audit_script),
         "gpu_memory_controls": {
             "DP_INFER_BATCH_SIZE": "profile-controlled; default 4096",
             "TF_FORCE_GPU_ALLOW_GROWTH": "profile-controlled; default true",

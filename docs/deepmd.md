@@ -25,12 +25,12 @@ editable after generation.
 
 1. `run_preflight.slurm` verifies the container/runtime, a visible GPU, the
    DeePMD version and backend help.
-2. `run_smoke.slurm` runs one isolated short model per architecture, freezes it,
-   and tests up to 100 frames from each test system.
+2. `run_smoke.slurm` runs one isolated short model per architecture, attempts an
+   export, and tests up to 100 frames from each test system.
 3. `run_ensemble.slurm` trains every architecture/seed pair as a bounded Slurm
-   array, resumes existing checkpoints, freezes models and evaluates test data.
+   array, resumes existing checkpoints, attempts exports and evaluates test data.
 4. `run_evaluate.slurm` runs per-model tests and committee `model-devi` on every
-   test system.
+   test system, then writes exact component-weighted RMSE reports.
 
 Smoke output is written under a job-specific directory and never overwrites a
 full model.
@@ -50,6 +50,24 @@ DEEPMD_IMAGE=/new/path/deepmd.sif sbatch models/deepmd/run_preflight.slurm
 Do not infer production readiness from training success alone. Verify the
 frozen model with `dp test`, committee deviation, and the exact downstream MD
 engine.
+
+For PyTorch, audit jobs use `model.ckpt.pt` directly. This avoids making model
+quality assessment depend on TorchScript export compatibility. Export remains
+a separate deployment gate: a failed or unreadable `frozen_model.pth` does not
+invalidate a working training checkpoint, but that checkpoint is not yet
+approved for LAMMPS. TensorFlow audits continue to use the frozen model.
+
+The evaluation directory contains:
+
+- `rmse_by_system.csv`: energy, force and optional virial errors for every
+  model/system pair;
+- `rmse_overall.csv`: committee-member metrics accumulated from the underlying
+  squared errors over all test observations;
+- `rmse_audit.json`: the same results with full structure and provenance.
+
+Energy RMSE is reported per atom, force RMSE over Cartesian force components,
+and virial RMSE per atom. InterfaceForge never averages already-computed system
+RMSE values.
 
 ## LONI DeePMD-kit 3.2 module
 
@@ -92,8 +110,13 @@ sbatch models/deepmd/run_evaluate.slurm
 ```
 
 Wait for each preceding stage to succeed. In particular, do not submit the full
-ensemble until the smoke job has trained, frozen, and tested its short DPA-2
-model. The ensemble manifest records the exact scheduler profile and module.
+ensemble until the smoke job has trained and tested its short DPA-2 checkpoint.
+The ensemble manifest records the exact scheduler profile, module, evaluation
+artifact and expected reports.
+
+The LONI DeePMD module already wraps its executable in a container/MPI runtime.
+Generated jobs therefore call `dp` directly inside the batch allocation rather
+than nesting that wrapper inside a second `srun` job step.
 
 ## Auditing the older LAMMPS/DeePMD module
 

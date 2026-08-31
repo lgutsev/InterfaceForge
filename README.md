@@ -165,6 +165,11 @@ sbatch models/deepmd/run_ensemble.slurm
 sbatch models/deepmd/run_evaluate.slurm
 ```
 
+PyTorch evaluation uses the restartable `model.ckpt.pt` artifacts and writes
+component-weighted `rmse_by_system.csv`, `rmse_overall.csv`, and
+`rmse_audit.json` reports. Freeze/export and LAMMPS compatibility remain
+separate deployment gates; see [the DeePMD guide](docs/deepmd.md).
+
 DPA-4 stays labeled experimental. A trained checkpoint is not considered
 deployable until freeze/export and the target LAMMPS path are independently
 verified.
