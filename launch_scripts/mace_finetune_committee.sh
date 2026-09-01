@@ -66,6 +66,9 @@ PT_TRAIN_FILE="${MACE_PT_TRAIN_FILE:-}"
 # leaves the loaded weights in float64 while the compiled e3nn layers run
 # float32 -> "both inputs should have same dtype". Match the checkpoint.
 DEFAULT_DTYPE="${MACE_DEFAULT_DTYPE:-float64}"
+# Unset -> MACE default (0.01). Lower to 1e-3 if the first epochs make forces
+# worse instead of better (the foundation prior being overwritten too fast).
+LR="${MACE_LR:-}"
 MAX_EPOCHS="${MACE_MAX_EPOCHS:-20}"
 START_STAGE_TWO="${MACE_START_STAGE_TWO:-16}"
 PATIENCE="${MACE_PATIENCE:-10}"
@@ -158,6 +161,7 @@ FT_ARGS=(--foundation_model "$FOUNDATION_MODEL")
 if grep -q -- "--multiheads_finetuning" <<< "$HELP_TXT"; then
     FT_ARGS+=(--multiheads_finetuning "$MULTIHEADS")
 fi
+[[ -n "$LR" ]] && FT_ARGS+=(--lr "$LR")
 if [[ -n "$PT_TRAIN_FILE" ]] && grep -q -- "--pt_train_file" <<< "$HELP_TXT"; then
     FT_ARGS+=(--pt_train_file "$PT_TRAIN_FILE")
 fi
