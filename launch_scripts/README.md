@@ -104,11 +104,20 @@ done
 
 Defaults: naive fine-tuning (`MACE_MULTIHEADS=False` — specialise to this
 dataset, no replay head), `MACE_E0S=foundation` (reuse the foundation's atomic
-energies; set `MACE_E0S=average` if the reference DFT is not MP-compatible). The
-architecture (`r_max`, channels, `max_L`, `correlation`, interactions) is
-inherited from the foundation model. Other knobs:
+energies; set `MACE_E0S=average` if the reference DFT is not MP-compatible),
+`MACE_DEFAULT_DTYPE=float64`. The architecture (`r_max`, channels, `max_L`,
+`correlation`, interactions) and float precision are inherited from / matched to
+the foundation model — the MP/MPA/OMAT checkpoints are float64, and fine-tuning
+at float32 fails with `both inputs should have same dtype`. Other knobs:
 `MACE_MULTIHEADS=True` with `MACE_PT_TRAIN_FILE=<replay data>` for replay
 fine-tuning, `MACE_MAX_EPOCHS`, `MACE_START_STAGE_TWO`, `MACE_MODEL_PREFIX`.
+
+**Comparison confounds to state in the writeup:** the fine-tuned committee
+differs from the from-scratch `mace_committee/` in (a) architecture — MACE-MPA-0
+medium is `L=1`, `r_max=6`, Agnesi radial, vs the from-scratch `L=2`, `r_max=5`,
+Bessel radial — and (b) precision — float64 here vs float32 there. Both are
+inherent to fine-tuning a foundation model; neither the accuracy gain nor any
+gap can be attributed purely to the fine-tuning itself.
 
 To fold the fine-tuned committee into the matched comparison, point
 `iface mlip-compare` at it:

@@ -56,6 +56,10 @@ E0S="${MACE_E0S:-foundation}"
 # keep a replay head against the pretraining data.
 MULTIHEADS="${MACE_MULTIHEADS:-False}"
 PT_TRAIN_FILE="${MACE_PT_TRAIN_FILE:-}"
+# The MP/MPA/OMAT foundation checkpoints are float64. Fine-tuning at float32
+# leaves the loaded weights in float64 while the compiled e3nn layers run
+# float32 -> "both inputs should have same dtype". Match the checkpoint.
+DEFAULT_DTYPE="${MACE_DEFAULT_DTYPE:-float64}"
 MAX_EPOCHS="${MACE_MAX_EPOCHS:-20}"
 START_STAGE_TWO="${MACE_START_STAGE_TWO:-16}"
 PATIENCE="${MACE_PATIENCE:-10}"
@@ -126,6 +130,7 @@ echo "Fine-tune committee member:"
 echo "  seed:             $SEED"
 echo "  model name:       $MODEL_NAME"
 echo "  foundation model: $FOUNDATION_MODEL"
+echo "  default dtype:    $DEFAULT_DTYPE"
 echo "  E0s:              $E0S"
 echo "  multiheads:       $MULTIHEADS"
 echo "  run dir:          $RUN_DIR"
@@ -189,7 +194,7 @@ srun --ntasks=2 --kill-on-bad-exit=1 \
     --patience "$PATIENCE" \
     --loss "weighted" \
     --error_table "PerAtomRMSE" \
-    --default_dtype "float32" \
+    --default_dtype "$DEFAULT_DTYPE" \
     --ema --ema_decay 0.99 \
     --amsgrad \
     --device cuda \
