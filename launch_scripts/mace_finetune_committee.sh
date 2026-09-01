@@ -1,14 +1,20 @@
 #!/bin/bash
 #SBATCH -p gpu2
 #SBATCH -N 1
-#SBATCH --ntasks-per-node=2
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH -t 72:00:00
 #SBATCH -A loni_perovsk27
 #SBATCH -J mace.ft.committee
 #SBATCH -o mace.ft.committee.%j.out
 #SBATCH -e mace.ft.committee.%j.err
+
+# Single-GPU by design. Fine-tuning a periodic-table foundation model on a
+# 4-element dataset leaves the linear-layer rows for absent elements without a
+# gradient; DDP (find_unused_parameters=False) then aborts the first step with
+# "parameters that were not used in producing loss". MPA-0 medium fine-tunes
+# comfortably on one A100.
 
 # Fine-tune one member of a MACE committee from a foundation model, on the same
 # fixed canonical split used by mace_train_committee.sh. Submit four seeds:
@@ -156,11 +162,6 @@ if [[ -n "$PT_TRAIN_FILE" ]] && grep -q -- "--pt_train_file" <<< "$HELP_TXT"; th
     FT_ARGS+=(--pt_train_file "$PT_TRAIN_FILE")
 fi
 
-export MASTER_ADDR
-MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | sed -n '1p')"
-export MASTER_PORT
-MASTER_PORT="$((10000 + SLURM_JOB_ID % 50000))"
-
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
 echo
 
@@ -173,8 +174,7 @@ trap cleanup EXIT INT TERM
 echo "Starting fine-tune for seed $SEED from $FOUNDATION_MODEL ..."
 echo
 
-srun --ntasks=2 --kill-on-bad-exit=1 \
-    "$MACE_TRAIN_BIN" \
+"$MACE_TRAIN_BIN" \
     --name "$MODEL_NAME" \
     --seed "$SEED" \
     --model "MACE" \
@@ -198,7 +198,6 @@ srun --ntasks=2 --kill-on-bad-exit=1 \
     --ema --ema_decay 0.99 \
     --amsgrad \
     --device cuda \
-    --distributed \
     --restart_latest \
     "${FT_ARGS[@]}" \
     "${STAGE_TWO_ARGS[@]}" \
