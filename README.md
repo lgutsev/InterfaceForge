@@ -218,6 +218,7 @@ iface vasp submit run/ --ml-capacity-recovery --increase-eps-low  # optional 10x
 iface audit runs/vasp --readiness-profile perovskite
 iface vasp beef-plot runs/vasp --individual
 iface vasp band scf/ bands/ --kpoints KPOINTS.line
+iface vasp slab-align slab_campaign --config slab_alignment.json --run-sumo
 iface vasp workfunction LOCPOT OUTCAR --plot-output workfunction.png
 iface vasp adhesion prepare interface_run --method mlff --distances 0.5 1 2 3 4 6 8
 iface vasp adhesion audit interface_run_adhesion_mlff  # after VASP finishes

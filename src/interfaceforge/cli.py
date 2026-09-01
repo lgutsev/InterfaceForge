@@ -55,6 +55,7 @@ from .mlip_compare import comparison_status, finalize_comparison, prepare_compar
 from .regfgw import compare_registry_selection, regfgw_status, run_regfgw_optimize
 from .report import build_report
 from .selection import select_from_csv
+from .slab_alignment import analyze_slab_alignment
 from .surface import (
     analyze_surface,
     audit_surface_runs,
@@ -876,6 +877,18 @@ def cmd_workfunction(args: argparse.Namespace) -> int:
         )
     )
     return 0
+
+
+def cmd_slab_alignment(args: argparse.Namespace) -> int:
+    payload = analyze_slab_alignment(
+        args.root,
+        config=args.config,
+        run_sumo=args.run_sumo,
+        write_dipole_fixes=args.write_dipole_fixes,
+        only=args.only,
+    )
+    _json(payload)
+    return 1 if payload["failures"] else 0
 
 
 def cmd_adhesion_prepare(args: argparse.Namespace) -> int:
@@ -1914,6 +1927,37 @@ def build_parser() -> argparse.ArgumentParser:
     workfunction.add_argument("--plot-output")
     workfunction.add_argument("--summary-output")
     workfunction.set_defaults(func=cmd_workfunction)
+
+    slab_alignment = vasp_commands.add_parser(
+        "slab-align",
+        help="Vacuum-align slab band edges across a calculation family",
+    )
+    slab_alignment.add_argument(
+        "root",
+        nargs="?",
+        default=".",
+        help="Root whose immediate children are VASP calculations (default: .)",
+    )
+    slab_alignment.add_argument(
+        "--config",
+        default="slab_alignment.json",
+        help="JSON configuration path, relative to root by default",
+    )
+    slab_alignment.add_argument(
+        "--run-sumo",
+        action="store_true",
+        help="Run sumo-dosplot in each analyzed calculation directory",
+    )
+    slab_alignment.add_argument(
+        "--write-dipole-fixes",
+        action="store_true",
+        help="Write non-destructive INCAR.dipole_fix previews for non-flat cases",
+    )
+    slab_alignment.add_argument(
+        "--only",
+        help="Analyze only this immediate child directory",
+    )
+    slab_alignment.set_defaults(func=cmd_slab_alignment)
 
     adhesion = vasp_commands.add_parser(
         "adhesion", help="Prepare work-of-adhesion calculations (MLFF or DFT)"

@@ -40,6 +40,7 @@ dependencies = [
 
 [project.optional-dependencies]
 vasp = ["ase>=3.23"]
+slab-align = ["matplotlib>=3.7"]
 mace-roi = ["ase>=3.23", "mace-torch>=0.3.17,<0.4"]
 allegro = ["ase>=3.23", "nequip>=0.18.0", "nequip-allegro"]
 report = ["matplotlib>=3.7", "openpyxl>=3.1"]

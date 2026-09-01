@@ -26,6 +26,9 @@ environment paths, wall time, job name, executable, and resource counts before r
   unrelated user-level `lmp`. With a model-list file and one canonical DeePMD
   system, it performs a one-step inference test and verifies committee model
   deviation.
+- `run_slab_alignment_single.sbatch`: one-core `single`-partition launcher for
+  `iface vasp slab-align`; it analyzes immediate child calculations and runs
+  `sumo-dosplot` in each matched folder.
 - `restart_daughter_jobs.sh`: one-level campaign helper for immediate VASP daughter
   directories. It can run either `Restart <daughter>` or `TotalRestart <daughter>`,
   copies root `INCAR`, `KPOINTS`, and `runvasp.sh`, verifies the expected restart

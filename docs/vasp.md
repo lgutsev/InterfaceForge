@@ -7,6 +7,10 @@
 InterfaceForge separates three concerns: generating new stages, auditing
 existing runs, and mutating a failed/finished run for recovery.
 
+For campaign-level vacuum alignment of pristine and passivated slabs, including
+side-specific LOCPOT plateau checks and VBM/CBM reference subtraction, see the
+[slab-alignment example](../examples/vasp/slab-alignment/README.md).
+
 ## Audit and launch a generated OPT batch
 
 `iface vasp opt-prepare` turns an existing tree of slab-relaxation inputs into

@@ -1,0 +1,736 @@
+"""Auditable vacuum alignment for families of asymmetric VASP slabs."""
+
+from __future__ import annotations
+
+import csv
+import json
+import re
+import shutil
+import subprocess
+import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from .errors import DependencyError, SafetyError
+
+ATOMIC_MASS = {
+    "H": 1.008,
+    "B": 10.81,
+    "C": 12.011,
+    "N": 14.007,
+    "O": 15.999,
+    "F": 18.998,
+    "Na": 22.990,
+    "Mg": 24.305,
+    "Al": 26.982,
+    "Si": 28.085,
+    "P": 30.974,
+    "S": 32.06,
+    "Cl": 35.45,
+    "K": 39.098,
+    "Ca": 40.078,
+    "Ti": 47.867,
+    "V": 50.942,
+    "Cr": 51.996,
+    "Mn": 54.938,
+    "Fe": 55.845,
+    "Co": 58.933,
+    "Ni": 58.693,
+    "Cu": 63.546,
+    "Zn": 65.38,
+    "Br": 79.904,
+    "Sr": 87.62,
+    "Zr": 91.224,
+    "Ag": 107.87,
+    "Cd": 112.41,
+    "In": 114.82,
+    "Sn": 118.71,
+    "I": 126.904,
+    "Cs": 132.905,
+    "Ba": 137.33,
+    "Pt": 195.08,
+    "Au": 196.97,
+    "Pb": 207.2,
+    "Bi": 208.98,
+}
+
+OUTPUT_FIELDS = [
+    "folder",
+    "reference",
+    "status",
+    "error",
+    "selected_side",
+    "efermi_eV",
+    "vacuum_eV",
+    "vacuum_minus_ef_eV",
+    "vbm_eV",
+    "cbm_eV",
+    "gap_eV",
+    "vbm_vac_eV",
+    "cbm_vac_eV",
+    "delta_vbm_eV",
+    "delta_cbm_eV",
+    "pdos_review_required",
+    "selected_slope_eV_per_A",
+    "selected_swing_eV",
+    "selected_std_eV",
+    "low_vacuum_eV",
+    "high_vacuum_eV",
+    "high_minus_low_vacuum_eV",
+    "low_slope_eV_per_A",
+    "high_slope_eV_per_A",
+    "suggested_DIPOL_z",
+    "compactness_R",
+    "current_LDIPOL",
+    "current_IDIPOL",
+    "current_DIPOL",
+    "sumo_status",
+]
+
+
+@dataclass
+class Structure:
+    cell: np.ndarray
+    species: list[str]
+    counts: list[int]
+    fractional: np.ndarray
+    coordinate_end_line: int
+
+    @property
+    def c_length(self) -> float:
+        return float(np.linalg.norm(self.cell[2]))
+
+    @property
+    def z_angstrom(self) -> np.ndarray:
+        return np.mod(self.fractional[:, 2], 1.0) * self.c_length
+
+    @property
+    def elements(self) -> list[str]:
+        values: list[str] = []
+        for symbol, count in zip(self.species, self.counts, strict=True):
+            values.extend([symbol] * count)
+        return values
+
+
+@dataclass
+class Plateau:
+    side: str
+    plateau_eV: float
+    slope_eV_per_A: float
+    swing_eV: float
+    residual_std_eV: float
+    window_start_A: float
+    window_end_A: float
+    window_width_A: float
+    npoints: int
+
+
+@dataclass
+class ProfileAnalysis:
+    cut_A: float
+    c_length_A: float
+    atom_low_A: float
+    atom_high_A: float
+    low: Plateau
+    high: Plateau
+
+
+def _next_nonempty(lines: list[str], index: int) -> int:
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    return index
+
+
+def _all_integers(tokens: list[str]) -> bool:
+    try:
+        [int(token) for token in tokens]
+    except ValueError:
+        return False
+    return True
+
+
+def parse_poscar_lines(lines: list[str]) -> Structure:
+    """Parse the structure header shared by POSCAR and LOCPOT."""
+
+    if len(lines) < 8:
+        raise SafetyError("VASP structure header is too short")
+    scale_values = [float(value) for value in lines[1].split()]
+    raw_cell = np.array([[float(value) for value in lines[index].split()[:3]] for index in range(2, 5)])
+    if len(scale_values) == 1:
+        scale = scale_values[0]
+        if scale < 0:
+            scale = (abs(scale) / abs(np.linalg.det(raw_cell))) ** (1.0 / 3.0)
+        cell = raw_cell * scale
+        cart_scale = np.array([scale, scale, scale])
+    elif len(scale_values) == 3:
+        cart_scale = np.array(scale_values)
+        cell = raw_cell * cart_scale[np.newaxis, :]
+    else:
+        raise SafetyError("Unsupported POSCAR scale line")
+
+    line5 = lines[5].split()
+    if _all_integers(line5):
+        species = [f"X{index + 1}" for index in range(len(line5))]
+        counts = [int(value) for value in line5]
+        counts_index = 5
+    else:
+        species = line5
+        counts_index = _next_nonempty(lines, 6)
+        counts = [int(value) for value in lines[counts_index].split()]
+    if len(species) != len(counts):
+        raise SafetyError("Species/count mismatch in VASP structure")
+
+    mode_index = _next_nonempty(lines, counts_index + 1)
+    if lines[mode_index].strip().lower().startswith("s"):
+        mode_index = _next_nonempty(lines, mode_index + 1)
+    mode = lines[mode_index].strip().lower()
+    start = _next_nonempty(lines, mode_index + 1)
+    coordinates: list[list[float]] = []
+    index = start
+    while len(coordinates) < sum(counts) and index < len(lines):
+        if lines[index].strip():
+            fields = lines[index].split()
+            coordinates.append([float(fields[0]), float(fields[1]), float(fields[2])])
+        index += 1
+    if len(coordinates) != sum(counts):
+        raise SafetyError("Fewer coordinates than declared atoms")
+    coordinate_array = np.array(coordinates)
+    if mode.startswith("d"):
+        fractional = coordinate_array
+    elif mode.startswith(("c", "k")):
+        fractional = (coordinate_array * cart_scale) @ np.linalg.inv(cell)
+    else:
+        raise SafetyError(f"Unknown coordinate mode: {lines[mode_index]}")
+    return Structure(cell, species, counts, fractional, index)
+
+
+def read_locpot(path: str | Path) -> tuple[Structure, np.ndarray, np.ndarray]:
+    """Read the raw LOCPOT and return its z-planar average in eV."""
+
+    input_path = Path(path)
+    lines = input_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    structure = parse_poscar_lines(lines)
+    grid_index = _next_nonempty(lines, structure.coordinate_end_line)
+    try:
+        grid = [int(value) for value in lines[grid_index].split()[:3]]
+    except (IndexError, ValueError) as exc:
+        raise SafetyError(f"LOCPOT grid dimensions not found in {input_path}") from exc
+    if len(grid) != 3:
+        raise SafetyError(f"LOCPOT grid dimensions not found in {input_path}")
+    nx, ny, nz = grid
+    required = nx * ny * nz
+    values = np.fromstring(" ".join(lines[grid_index + 1 :]), sep=" ", count=required)
+    if values.size != required:
+        raise SafetyError(f"{input_path} has {values.size} grid values; expected {required}")
+    # VASP writes x fastest, then y, then z. LOCPOT is already in eV and must
+    # not receive the volume rescaling that ASE applies to charge densities.
+    potential = values.reshape((nz, ny, nx)).mean(axis=(1, 2))
+    z_grid = np.arange(nz, dtype=float) * structure.c_length / nz
+    return structure, z_grid, potential
+
+
+def efermi_from_outcar(path: str | Path) -> float:
+    matches = re.findall(
+        r"E-fermi\s*:\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?)",
+        Path(path).read_text(encoding="utf-8", errors="replace"),
+    )
+    if not matches:
+        raise SafetyError(f"E-fermi not found in {path}")
+    return float(matches[-1])
+
+
+def band_edges_from_vasprun(path: str | Path) -> tuple[float, float, float, float]:
+    root = ET.parse(path).getroot()
+    efermi_values = [float(node.text.split()[0]) for node in root.findall(".//i[@name='efermi']") if node.text]
+    if not efermi_values:
+        raise SafetyError(f"E-fermi not found in {path}")
+    blocks = root.findall(".//eigenvalues")
+    if not blocks:
+        raise SafetyError(f"Eigenvalues not found in {path}")
+    energies: list[float] = []
+    occupancies: list[float] = []
+    for record in blocks[-1].findall(".//r"):
+        if record.text:
+            fields = record.text.split()
+            if len(fields) >= 2:
+                energies.append(float(fields[0]))
+                occupancies.append(float(fields[1]))
+    if not energies:
+        raise SafetyError(f"Final eigenvalue block is empty in {path}")
+    energy = np.array(energies)
+    occupancy = np.array(occupancies)
+    maximum = float(np.max(occupancy))
+    if maximum <= 0:
+        raise SafetyError(f"All eigenvalue occupations are zero in {path}")
+    occupied = occupancy > 0.5 * maximum
+    if not occupied.any() or occupied.all():
+        raise SafetyError(f"Could not separate occupied and unoccupied bands in {path}")
+    vbm = float(np.max(energy[occupied]))
+    cbm = float(np.min(energy[~occupied]))
+    return float(efermi_values[-1]), vbm, cbm, max(0.0, cbm - vbm)
+
+
+def largest_periodic_gap(z_values: np.ndarray, length: float) -> tuple[float, float, float]:
+    values = np.sort(np.unique(np.mod(z_values, length)))
+    if values.size < 2:
+        raise SafetyError("At least two distinct z coordinates are required")
+    next_values = np.r_[values[1:], values[0] + length]
+    gaps = next_values - values
+    index = int(np.argmax(gaps))
+    return float(values[index]), float(next_values[index]), float(gaps[index])
+
+
+def _fit_plateau(
+    side: str,
+    shifted_z: np.ndarray,
+    potential: np.ndarray,
+    start: float,
+    end: float,
+) -> Plateau:
+    mask = (shifted_z >= start) & (shifted_z <= end)
+    if np.count_nonzero(mask) < 5:
+        raise SafetyError(f"{side} vacuum window contains fewer than five points")
+    x_values = shifted_z[mask]
+    y_values = potential[mask]
+    order = np.argsort(x_values)
+    x_values, y_values = x_values[order], y_values[order]
+    slope, intercept = np.polyfit(x_values, y_values, 1)
+    residual = y_values - (slope * x_values + intercept)
+    width = float(x_values[-1] - x_values[0])
+    return Plateau(
+        side=side,
+        plateau_eV=float(np.median(y_values)),
+        slope_eV_per_A=float(slope),
+        swing_eV=float(abs(slope) * width),
+        residual_std_eV=float(np.std(residual)),
+        window_start_A=float(start),
+        window_end_A=float(end),
+        window_width_A=width,
+        npoints=int(x_values.size),
+    )
+
+
+def analyze_profile(
+    structure: Structure,
+    z_grid: np.ndarray,
+    potential: np.ndarray,
+    buffer_angstrom: float = 2.0,
+    minimum_window_angstrom: float = 2.0,
+) -> tuple[ProfileAnalysis, np.ndarray, np.ndarray]:
+    """Fit the two physical vacuum sides independently across a periodic cell."""
+
+    length = structure.c_length
+    gap_start, _gap_end, gap_width = largest_periodic_gap(structure.z_angstrom, length)
+    if gap_width < 2 * (buffer_angstrom + minimum_window_angstrom):
+        raise SafetyError(f"Total periodic vacuum gap {gap_width:.3f} A is too small to analyze both sides")
+    cut = (gap_start + 0.5 * gap_width) % length
+    atom_shifted = np.mod(structure.z_angstrom - cut, length)
+    grid_shifted = np.mod(z_grid - cut, length)
+    order = np.argsort(grid_shifted)
+    grid_shifted, potential_shifted = grid_shifted[order], potential[order]
+    atom_low = float(np.min(atom_shifted))
+    atom_high = float(np.max(atom_shifted))
+    low_start, low_end = buffer_angstrom, atom_low - buffer_angstrom
+    high_start, high_end = atom_high + buffer_angstrom, length - buffer_angstrom
+    if low_end - low_start < minimum_window_angstrom:
+        raise SafetyError(f"Low-z vacuum window is only {low_end - low_start:.3f} A")
+    if high_end - high_start < minimum_window_angstrom:
+        raise SafetyError(f"High-z vacuum window is only {high_end - high_start:.3f} A")
+    low = _fit_plateau("low-z", grid_shifted, potential_shifted, low_start, low_end)
+    high = _fit_plateau("high-z", grid_shifted, potential_shifted, high_start, high_end)
+    return (
+        ProfileAnalysis(cut, length, atom_low, atom_high, low, high),
+        grid_shifted,
+        potential_shifted,
+    )
+
+
+def ionic_center_fraction(structure: Structure) -> tuple[float, float, list[str]]:
+    """Return a periodic mass-weighted center suitable for VASP's DIPOL tag."""
+
+    z_fraction = np.mod(structure.fractional[:, 2], 1.0)
+    masses: list[float] = []
+    missing: list[str] = []
+    for element in structure.elements:
+        mass = ATOMIC_MASS.get(element)
+        if mass is None:
+            missing.append(element)
+            mass = 1.0
+        masses.append(mass)
+    weights = np.array(masses, dtype=float)
+    angles = 2 * np.pi * z_fraction
+    cosine = np.sum(weights * np.cos(angles)) / np.sum(weights)
+    sine = np.sum(weights * np.sin(angles)) / np.sum(weights)
+    center = float((np.arctan2(sine, cosine) % (2 * np.pi)) / (2 * np.pi))
+    compactness = float(np.hypot(cosine, sine))
+    return center, compactness, sorted(set(missing))
+
+
+def parse_incar(path: str | Path) -> dict[str, Any]:
+    result: dict[str, Any] = {"LDIPOL": None, "IDIPOL": None, "DIPOL": None}
+    input_path = Path(path)
+    if not input_path.is_file():
+        return result
+    for raw in input_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.split("#", 1)[0].split("!", 1)[0].strip()
+        if not line or "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        key = key.upper()
+        if key == "LDIPOL":
+            result[key] = value.strip(". ").upper().startswith("T")
+        elif key == "IDIPOL":
+            result[key] = int(value.split()[0])
+        elif key == "DIPOL":
+            result[key] = [float(item) for item in value.split()[:3]]
+    return result
+
+
+def write_dipole_preview(calc_dir: str | Path, suggested_z: float) -> Path:
+    """Write INCAR.dipole_fix without modifying the calculation's INCAR."""
+
+    directory = Path(calc_dir)
+    source = directory / "INCAR"
+    lines = source.read_text(encoding="utf-8").splitlines() if source.is_file() else []
+    replacements = {
+        "LDIPOL": "LDIPOL = .TRUE.",
+        "IDIPOL": "IDIPOL = 3",
+        "DIPOL": f"DIPOL  = 0.500000 0.500000 {suggested_z:.6f}",
+    }
+    seen: set[str] = set()
+    output: list[str] = []
+    for line in lines:
+        match = re.match(r"^\s*(LDIPOL|IDIPOL|DIPOL)\s*=", line, flags=re.I)
+        if match:
+            key = match.group(1).upper()
+            output.append(replacements[key])
+            seen.add(key)
+        else:
+            output.append(line)
+    if seen != set(replacements):
+        output.extend(["", "# Dipole correction preview generated by InterfaceForge"])
+        for key in ("LDIPOL", "IDIPOL", "DIPOL"):
+            if key not in seen:
+                output.append(replacements[key])
+    destination = directory / "INCAR.dipole_fix"
+    destination.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    return destination
+
+
+def load_alignment_config(path: str | Path) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "side": "high-z",
+        "buffer_angstrom": 2.0,
+        "minimum_window_angstrom": 2.0,
+        "swing_warn_eV": 0.03,
+        "swing_fail_eV": 0.10,
+        "std_warn_eV": 0.02,
+        "std_fail_eV": 0.05,
+        "references": [
+            {"prefix": "MAPI_MAI_Surf", "reference": "MAPI_MAI_Surf"},
+            {"prefix": "MAPI_PbI2_Surf", "reference": "MAPI_PbI2_Surf"},
+        ],
+    }
+    input_path = Path(path)
+    if input_path.is_file():
+        supplied = json.loads(input_path.read_text(encoding="utf-8"))
+        if not isinstance(supplied, dict):
+            raise SafetyError("Slab-alignment configuration must be a JSON object")
+        config.update(supplied)
+    if config["side"] not in ("high-z", "low-z"):
+        raise SafetyError("Configuration side must be high-z or low-z")
+    if not isinstance(config["references"], list) or not config["references"]:
+        raise SafetyError("Configuration references must be a nonempty list")
+    return config
+
+
+def reference_for(name: str, config: dict[str, Any]) -> str | None:
+    for rule in config["references"]:
+        prefix = rule["prefix"]
+        if name == prefix or name.startswith(prefix + "_"):
+            return str(rule["reference"])
+    return None
+
+
+def plateau_status(plateau: Plateau, config: dict[str, Any]) -> str:
+    if plateau.swing_eV >= config["swing_fail_eV"] or plateau.residual_std_eV >= config["std_fail_eV"]:
+        return "FAILED_FLATNESS"
+    if plateau.swing_eV >= config["swing_warn_eV"] or plateau.residual_std_eV >= config["std_warn_eV"]:
+        return "SUSPECT_FLATNESS"
+    return "OK"
+
+
+def _plot_profile(
+    calc_dir: Path,
+    shifted_z: np.ndarray,
+    potential: np.ndarray,
+    profile: ProfileAnalysis,
+    efermi: float,
+) -> None:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise DependencyError("matplotlib is required for slab alignment. Install interfaceforge[slab-align].") from exc
+    figure, axes = plt.subplots(figsize=(8.0, 4.8))
+    axes.plot(shifted_z, potential - efermi, color="black", linewidth=1.4)
+    axes.axvspan(
+        profile.low.window_start_A,
+        profile.low.window_end_A,
+        color="#3B82F6",
+        alpha=0.18,
+        label="low-z vacuum",
+    )
+    axes.axvspan(
+        profile.high.window_start_A,
+        profile.high.window_end_A,
+        color="#EF4444",
+        alpha=0.18,
+        label="high-z vacuum",
+    )
+    axes.axvspan(
+        profile.atom_low_A,
+        profile.atom_high_A,
+        color="0.7",
+        alpha=0.18,
+        label="atomic region",
+    )
+    axes.set(
+        xlabel="Shifted distance along c (Å)",
+        ylabel=r"Planar potential $-E_F$ (eV)",
+        xlim=(0, profile.c_length_A),
+        title=calc_dir.name,
+    )
+    axes.legend(frameon=False, ncol=3, fontsize=8)
+    figure.tight_layout()
+    figure.savefig(calc_dir / "vacuum_profile.png", dpi=250)
+    plt.close(figure)
+
+
+def _run_sumo(calc_dir: Path) -> str:
+    executable = shutil.which("sumo-dosplot")
+    if not executable:
+        return "NOT_FOUND"
+    with (calc_dir / "sumo_dosplot.log").open("w", encoding="utf-8") as log:
+        result = subprocess.run(
+            [executable],
+            cwd=calc_dir,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    return "OK" if result.returncode == 0 else f"FAILED_{result.returncode}"
+
+
+def _analyze_folder(
+    calc_dir: Path,
+    config: dict[str, Any],
+    *,
+    run_sumo: bool,
+    write_fixes: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    row: dict[str, Any] = {
+        "folder": calc_dir.name,
+        "reference": reference_for(calc_dir.name, config) or "",
+        "status": "OK",
+        "error": "",
+        "selected_side": config["side"],
+        "pdos_review_required": True,
+        "sumo_status": "NOT_REQUESTED",
+    }
+    details: dict[str, Any] = {}
+    try:
+        structure, z_grid, potential = read_locpot(calc_dir / "LOCPOT")
+        profile, shifted_z, shifted_potential = analyze_profile(
+            structure,
+            z_grid,
+            potential,
+            buffer_angstrom=config["buffer_angstrom"],
+            minimum_window_angstrom=config["minimum_window_angstrom"],
+        )
+        efermi_outcar = efermi_from_outcar(calc_dir / "OUTCAR")
+        efermi_xml, vbm, cbm, gap = band_edges_from_vasprun(calc_dir / "vasprun.xml")
+        selected = profile.high if config["side"] == "high-z" else profile.low
+        selected_status = plateau_status(selected, config)
+        center, compactness, missing_mass = ionic_center_fraction(structure)
+        incar = parse_incar(calc_dir / "INCAR")
+        row.update(
+            {
+                "status": selected_status,
+                "efermi_eV": efermi_xml,
+                "vacuum_eV": selected.plateau_eV,
+                "vacuum_minus_ef_eV": selected.plateau_eV - efermi_outcar,
+                "vbm_eV": vbm,
+                "cbm_eV": cbm,
+                "gap_eV": gap,
+                "vbm_vac_eV": vbm - selected.plateau_eV,
+                "cbm_vac_eV": cbm - selected.plateau_eV,
+                "selected_slope_eV_per_A": selected.slope_eV_per_A,
+                "selected_swing_eV": selected.swing_eV,
+                "selected_std_eV": selected.residual_std_eV,
+                "low_vacuum_eV": profile.low.plateau_eV,
+                "high_vacuum_eV": profile.high.plateau_eV,
+                "high_minus_low_vacuum_eV": profile.high.plateau_eV - profile.low.plateau_eV,
+                "low_slope_eV_per_A": profile.low.slope_eV_per_A,
+                "high_slope_eV_per_A": profile.high.slope_eV_per_A,
+                "suggested_DIPOL_z": center,
+                "compactness_R": compactness,
+                "current_LDIPOL": incar["LDIPOL"],
+                "current_IDIPOL": incar["IDIPOL"],
+                "current_DIPOL": incar["DIPOL"],
+            }
+        )
+        if abs(efermi_xml - efermi_outcar) > 1e-3:
+            row["status"] = "FAILED_EFERMI_MISMATCH"
+            row["error"] = f"OUTCAR/XML E-fermi differ by {efermi_xml - efermi_outcar:.6f} eV"
+        if missing_mass:
+            row["error"] = "Missing masses: " + ",".join(missing_mass)
+        _plot_profile(calc_dir, shifted_z, shifted_potential, profile, efermi_outcar)
+        data = "\n".join(
+            f"{position:.8f} {value:.8f} {value - efermi_outcar:.8f}"
+            for position, value in zip(shifted_z, shifted_potential, strict=True)
+        )
+        (calc_dir / "locpot.dat").write_text(
+            "# shifted_z_A potential_eV potential_minus_EF_eV\n" + data + "\n",
+            encoding="utf-8",
+        )
+        if write_fixes and selected_status != "OK":
+            write_dipole_preview(calc_dir, center)
+        if run_sumo:
+            row["sumo_status"] = _run_sumo(calc_dir)
+        details = {
+            "folder": calc_dir.name,
+            "profile": asdict(profile),
+            "selected_side": config["side"],
+            "suggested_DIPOL_z": center,
+            "compactness_R": compactness,
+        }
+    except (OSError, ValueError, ET.ParseError, SafetyError, DependencyError) as exc:
+        row["status"] = "FAILED_ANALYSIS"
+        row["error"] = str(exc).replace("\t", " ").replace("\n", " ")
+    return row, details
+
+
+def add_alignment_deltas(rows: list[dict[str, Any]]) -> None:
+    by_name = {row["folder"]: row for row in rows}
+    for row in rows:
+        row["delta_vbm_eV"] = ""
+        row["delta_cbm_eV"] = ""
+        reference = by_name.get(row.get("reference", ""))
+        if row.get("status") not in ("OK", "SUSPECT_FLATNESS") or not reference:
+            continue
+        if reference.get("status") not in ("OK", "SUSPECT_FLATNESS"):
+            continue
+        row["delta_vbm_eV"] = row["vbm_vac_eV"] - reference["vbm_vac_eV"]
+        row["delta_cbm_eV"] = row["cbm_vac_eV"] - reference["cbm_vac_eV"]
+
+
+def _format_field(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, float):
+        return f"{value:.8f}"
+    if isinstance(value, list):
+        return " ".join(str(item) for item in value)
+    return str(value)
+
+
+def _write_outputs(root: Path, rows: list[dict[str, Any]], details: list[dict[str, Any]]) -> dict[str, str]:
+    tsv_path = root / "band_edge_alignment.tsv"
+    with tsv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: _format_field(row.get(field, "")) for field in OUTPUT_FIELDS})
+    json_path = root / "band_edge_alignment.json"
+    json_path.write_text(
+        json.dumps({"rows": rows, "details": details}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    text_path = root / "band_edge_alignment.txt"
+    lines = [
+        "Vacuum-aligned slab band edges",
+        "===============================",
+        "Positive delta means movement upward, toward vacuum.",
+        "Global VASP edges are reported; inspect SUMO PDOS before assigning a perovskite-derived CBM.",
+        "",
+        f"{'folder':40s} {'status':21s} {'CBMvac':>10s} {'dCBM':>10s} {'VBMvac':>10s} {'dVBM':>10s} {'swing':>9s}",
+    ]
+
+    def number(row: dict[str, Any], key: str) -> str:
+        value = row.get(key, "")
+        return f"{value:10.4f}" if isinstance(value, float) else f"{'--':>10s}"
+
+    for row in rows:
+        lines.append(
+            f"{row['folder'][:40]:40s} {row['status'][:21]:21s} "
+            f"{number(row, 'cbm_vac_eV')} {number(row, 'delta_cbm_eV')} "
+            f"{number(row, 'vbm_vac_eV')} {number(row, 'delta_vbm_eV')} "
+            f"{number(row, 'selected_swing_eV')}"
+        )
+        if row.get("error"):
+            lines.append(f"  note: {row['error']}")
+    text_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {
+        "tsv": str(tsv_path),
+        "json": str(json_path),
+        "text": str(text_path),
+    }
+
+
+def analyze_slab_alignment(
+    root: str | Path = ".",
+    *,
+    config: str | Path = "slab_alignment.json",
+    run_sumo: bool = False,
+    write_dipole_fixes: bool = False,
+    only: str | None = None,
+) -> dict[str, Any]:
+    """Analyze all configured immediate child calculations and align band edges."""
+
+    root_path = Path(root).expanduser().resolve()
+    config_path = Path(config).expanduser()
+    if not config_path.is_absolute():
+        config_path = root_path / config_path
+    settings = load_alignment_config(config_path)
+    calculation_dirs = sorted(
+        path
+        for path in root_path.iterdir()
+        if path.is_dir()
+        and (path / "LOCPOT").is_file()
+        and reference_for(path.name, settings)
+        and (only is None or path.name == only)
+    )
+    if not calculation_dirs:
+        raise SafetyError("No matching immediate subfolder contains LOCPOT")
+    rows: list[dict[str, Any]] = []
+    details: list[dict[str, Any]] = []
+    for calculation_dir in calculation_dirs:
+        row, detail = _analyze_folder(
+            calculation_dir,
+            settings,
+            run_sumo=run_sumo,
+            write_fixes=write_dipole_fixes,
+        )
+        rows.append(row)
+        if detail:
+            details.append(detail)
+    add_alignment_deltas(rows)
+    outputs = _write_outputs(root_path, rows, details)
+    failures = sum(row["status"].startswith("FAILED") for row in rows)
+    suspects = sum(row["status"] == "SUSPECT_FLATNESS" for row in rows)
+    return {
+        "root": str(root_path),
+        "config": str(config_path),
+        "count": len(rows),
+        "failures": failures,
+        "suspects": suspects,
+        "status": "FAILED" if failures else ("SUSPECT" if suspects else "OK"),
+        "outputs": outputs,
+        "rows": rows,
+    }

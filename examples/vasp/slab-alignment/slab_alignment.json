@@ -1,0 +1,19 @@
+{
+  "side": "high-z",
+  "buffer_angstrom": 2.0,
+  "minimum_window_angstrom": 2.0,
+  "swing_warn_eV": 0.03,
+  "swing_fail_eV": 0.10,
+  "std_warn_eV": 0.02,
+  "std_fail_eV": 0.05,
+  "references": [
+    {
+      "prefix": "MAPI_MAI_Surf",
+      "reference": "MAPI_MAI_Surf"
+    },
+    {
+      "prefix": "MAPI_PbI2_Surf",
+      "reference": "MAPI_PbI2_Surf"
+    }
+  ]
+}
