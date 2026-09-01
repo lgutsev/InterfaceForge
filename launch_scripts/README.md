@@ -69,6 +69,62 @@ sbatch \
 The preflight reads reference labels directly from `atoms.info` and
 `atoms.arrays`. It does not require an ASE calculator to be attached to frames.
 
+### Fine-tune a MACE committee from a foundation model
+
+`mace_finetune_committee.sh` is the fine-tuning counterpart of
+`mace_train_committee.sh`: same fixed `train/valid/test.extxyz` split, same
+seeds, but every member starts from a foundation model instead of random
+initialization. Output goes to `mace_finetune_committee/seed_<seed>/` so it
+never collides with the from-scratch committee.
+
+First download a foundation model to a compute-node-readable path (a bare
+`small|medium|large` name only works with outbound network access):
+
+```bash
+# MACE-MPA-0 medium (MPtrj + sAlex, PBE(+U)) — recommended, needs mace >= 0.3.10
+wget -P /project/lgutsev/foundational_models/mace/ \
+  https://github.com/ACEsuit/mace-foundations/releases/download/mace_mpa_0/mace-mpa-0-medium.model
+# older mace: MACE-MP-0 medium instead
+#   .../mace_mp_0/2023-12-03-mace-128-L1_epoch-199.model
+```
+
+Check `python -c "import mace; print(mace.__version__)"` in `mace_env` first.
+
+Then submit four seeds **from the same directory that holds the committee's
+`train.extxyz` / `valid.extxyz` / `test.extxyz`** (the parent of the existing
+`mace_committee/`):
+
+```bash
+FM=/project/lgutsev/foundational_models/mace/mace-mpa-0-medium.model
+for seed in 11 23 37 53; do
+    sbatch --export=ALL,MACE_SEED="$seed",MACE_FOUNDATION_MODEL="$FM" \
+        mace_finetune_committee.sh
+done
+```
+
+Defaults: naive fine-tuning (`MACE_MULTIHEADS=False` — specialise to this
+dataset, no replay head), `MACE_E0S=foundation` (reuse the foundation's atomic
+energies; set `MACE_E0S=average` if the reference DFT is not MP-compatible). The
+architecture (`r_max`, channels, `max_L`, `correlation`, interactions) is
+inherited from the foundation model. Other knobs:
+`MACE_MULTIHEADS=True` with `MACE_PT_TRAIN_FILE=<replay data>` for replay
+fine-tuning, `MACE_MAX_EPOCHS`, `MACE_START_STAGE_TWO`, `MACE_MODEL_PREFIX`.
+
+To fold the fine-tuned committee into the matched comparison, point
+`iface mlip-compare` at it:
+
+```bash
+iface mlip-compare prepare \
+  --mace-models-root "<committee dir>/mace_finetune_committee" \
+  --deepmd-arch dpa2 \
+  --output-root "$CAMP/audit/mlip_compare_mace_ft" --force
+```
+
+`_discover_models` globs `seed_<seed>/mace_model/*_stagetwo.model`, which
+matches the `*_ft_seed<seed>_stagetwo.model` files this script produces. The
+MACE rows in that run are the fine-tuned committee's numbers; compare them
+against the MACE rows in the from-scratch `audit/mlip_compare/`.
+
 ## Restart immediate daughter calculations
 
 Use `restart_daughter_jobs.sh` when the campaign root directly contains the VASP
