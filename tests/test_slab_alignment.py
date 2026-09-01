@@ -33,7 +33,14 @@ Direct
 """
 
 
-def _write_calculation(folder: Path, high_vacuum: float, vbm: float, cbm: float) -> None:
+def _write_calculation(
+    folder: Path,
+    high_vacuum: float,
+    vbm: float,
+    cbm: float,
+    *,
+    high_slope: float = 0.0,
+) -> None:
     folder.mkdir()
     nz = 80
     z_grid = np.arange(nz) * 40.0 / nz
@@ -41,7 +48,7 @@ def _write_calculation(folder: Path, high_vacuum: float, vbm: float, cbm: float)
     planar = np.where(
         shifted < 13.0,
         4.8,
-        np.where(shifted > 27.0, high_vacuum, 2.0),
+        np.where(shifted > 27.0, high_vacuum + high_slope * (shifted - 27.0), 2.0),
     )
     raw = [value for value in planar for _ in range(4)]
     (folder / "LOCPOT").write_text(
@@ -171,14 +178,14 @@ Direct
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             incar = root / "INCAR"
-            original = "ENCUT = 520\nLDIPOL = .FALSE.\n"
+            original = "ENCUT = 520\nLDIPOL = .FALSE.\nDIPOL = 0.25 0.75 0.5\n"
             incar.write_text(original, encoding="utf-8")
             preview = write_dipole_preview(root, 0.625)
             self.assertEqual(incar.read_text(encoding="utf-8"), original)
             generated = preview.read_text(encoding="utf-8")
             self.assertIn("LDIPOL = .TRUE.", generated)
             self.assertIn("IDIPOL = 3", generated)
-            self.assertIn("DIPOL  = 0.500000 0.500000 0.625000", generated)
+            self.assertIn("DIPOL  = 0.250000 0.750000 0.625000", generated)
 
     def test_two_folder_campaign(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -208,6 +215,62 @@ Direct
             self.assertAlmostEqual(float(case["delta_cbm_eV"]), 0.3)
             self.assertAlmostEqual(float(case["delta_vbm_eV"]), 0.3)
             self.assertTrue((root / "MAPI_MAI_Surf_BPDCA" / "vacuum_profile.png").is_file())
+            self.assertTrue((root / "MAPI_MAI_Surf_BPDCA" / "Workfunction.png").is_file())
+            self.assertTrue((root / "MAPI_MAI_Surf_BPDCA" / "LOCPOT_FLATNESS_OK").is_file())
+            self.assertFalse((root / "MAPI_MAI_Surf_BPDCA" / "INCAR.dipole_fix").exists())
+            self.assertTrue((root / "dipole_flatness_audit.tsv").is_file())
+            self.assertTrue((root / "relaunch_review_queue.txt").is_file())
+
+    def test_nonflat_case_is_flagged_and_gets_preview_automatically(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            case = root / "MAPI_MAI_Surf_BPDCA"
+            _write_calculation(case, 5.2, -0.9, 1.1, high_slope=0.03)
+            config_path = root / "slab_alignment.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "side": "high-z",
+                        "references": [
+                            {"prefix": "MAPI_MAI_Surf", "reference": "MAPI_MAI_Surf"}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = analyze_slab_alignment(root, config=config_path)
+            row = payload["rows"][0]
+            self.assertEqual(row["flatness_status"], "FAILED_FLATNESS")
+            self.assertTrue(row["relaunch_review_required"])
+            self.assertTrue((case / "RELAUNCH_REVIEW_REQUIRED").is_file())
+            self.assertTrue((case / "INCAR.dipole_fix").is_file())
+            self.assertFalse((case / "LOCPOT_FLATNESS_OK").exists())
+            self.assertIn("MAPI_MAI_Surf_BPDCA", (root / "relaunch_review_queue.txt").read_text())
+
+    def test_flatness_audit_survives_missing_band_edge_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            case = root / "MAPI_MAI_Surf"
+            _write_calculation(case, 5.4, -1.0, 1.0)
+            (case / "vasprun.xml").unlink()
+            config_path = root / "slab_alignment.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "side": "high-z",
+                        "references": [
+                            {"prefix": "MAPI_MAI_Surf", "reference": "MAPI_MAI_Surf"}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = analyze_slab_alignment(root, config=config_path)
+            row = payload["rows"][0]
+            self.assertEqual(row["flatness_status"], "OK")
+            self.assertEqual(row["band_edge_status"], "FAILED_BAND_EDGES")
+            self.assertFalse(row["relaunch_review_required"])
+            self.assertTrue((case / "LOCPOT_FLATNESS_OK").is_file())
 
 
 if __name__ == "__main__":

@@ -62,6 +62,13 @@ OUTPUT_FIELDS = [
     "reference",
     "status",
     "error",
+    "flatness_status",
+    "flat_enough",
+    "audit_action",
+    "relaunch_review_required",
+    "dipole_fix_path",
+    "review_flag_path",
+    "band_edge_status",
     "selected_side",
     "efermi_eV",
     "vacuum_eV",
@@ -89,6 +96,30 @@ OUTPUT_FIELDS = [
     "current_DIPOL",
     "sumo_status",
 ]
+
+AUDIT_FIELDS = [
+    "folder",
+    "flatness_status",
+    "flat_enough",
+    "selected_side",
+    "selected_slope_eV_per_A",
+    "selected_swing_eV",
+    "selected_std_eV",
+    "suggested_DIPOL_z",
+    "compactness_R",
+    "current_LDIPOL",
+    "current_IDIPOL",
+    "current_DIPOL",
+    "audit_action",
+    "relaunch_review_required",
+    "dipole_fix_path",
+    "review_flag_path",
+    "error",
+]
+
+OK_MARKER = "LOCPOT_FLATNESS_OK"
+REVIEW_MARKER = "RELAUNCH_REVIEW_REQUIRED"
+AUDIT_FAILED_MARKER = "LOCPOT_AUDIT_FAILED"
 
 
 @dataclass
@@ -395,10 +426,13 @@ def write_dipole_preview(calc_dir: str | Path, suggested_z: float) -> Path:
     directory = Path(calc_dir)
     source = directory / "INCAR"
     lines = source.read_text(encoding="utf-8").splitlines() if source.is_file() else []
+    current = parse_incar(source).get("DIPOL")
+    x_value = current[0] if current and len(current) >= 3 else 0.5
+    y_value = current[1] if current and len(current) >= 3 else 0.5
     replacements = {
         "LDIPOL": "LDIPOL = .TRUE.",
         "IDIPOL": "IDIPOL = 3",
-        "DIPOL": f"DIPOL  = 0.500000 0.500000 {suggested_z:.6f}",
+        "DIPOL": f"DIPOL  = {x_value:.6f} {y_value:.6f} {suggested_z:.6f}",
     }
     seen: set[str] = set()
     output: list[str] = []
@@ -468,7 +502,7 @@ def _plot_profile(
     shifted_z: np.ndarray,
     potential: np.ndarray,
     profile: ProfileAnalysis,
-    efermi: float,
+    efermi: float | None,
 ) -> None:
     try:
         import matplotlib
@@ -478,7 +512,8 @@ def _plot_profile(
     except ModuleNotFoundError as exc:
         raise DependencyError("matplotlib is required for slab alignment. Install interfaceforge[slab-align].") from exc
     figure, axes = plt.subplots(figsize=(8.0, 4.8))
-    axes.plot(shifted_z, potential - efermi, color="black", linewidth=1.4)
+    offset = efermi if efermi is not None else 0.0
+    axes.plot(shifted_z, potential - offset, color="black", linewidth=1.4)
     axes.axvspan(
         profile.low.window_start_A,
         profile.low.window_end_A,
@@ -502,7 +537,7 @@ def _plot_profile(
     )
     axes.set(
         xlabel="Shifted distance along c (Å)",
-        ylabel=r"Planar potential $-E_F$ (eV)",
+        ylabel=r"Planar potential $-E_F$ (eV)" if efermi is not None else "Planar potential (eV)",
         xlim=(0, profile.c_length_A),
         title=calc_dir.name,
     )
@@ -510,6 +545,118 @@ def _plot_profile(
     figure.tight_layout()
     figure.savefig(calc_dir / "vacuum_profile.png", dpi=250)
     plt.close(figure)
+
+
+def _plot_workfunction_profile(
+    calc_dir: Path,
+    shifted_z: np.ndarray,
+    potential: np.ndarray,
+    profile: ProfileAnalysis,
+    selected: Plateau,
+    efermi: float | None,
+) -> None:
+    """Write a simple work-function-style profile adapted from the user tool."""
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise DependencyError("matplotlib is required for slab alignment. Install interfaceforge[slab-align].") from exc
+    offset = efermi if efermi is not None else 0.0
+    values = potential - offset
+    plateau = selected.plateau_eV - offset
+    figure, axes = plt.subplots(figsize=(8.0, 4.8))
+    axes.plot(shifted_z, values, color="black", linewidth=1.2)
+    axes.axhline(plateau, color="#B91C1C", linestyle="--", linewidth=1.0, label="selected vacuum")
+    axes.axvspan(
+        selected.window_start_A,
+        selected.window_end_A,
+        color="#F59E0B",
+        alpha=0.18,
+        label=f"{selected.side} fit window",
+    )
+    axes.grid(color="gray", linestyle="-.", alpha=0.45)
+    axes.minorticks_on()
+    axes.set_xlim(0, profile.c_length_A)
+    upper = float(np.max(values)) + 0.5
+    axes.set_ylim(upper - 2.5, upper)
+    axes.set_xlabel("Shifted distance along c (Å)")
+    axes.set_ylabel("Potential - $E_F$ (eV)" if efermi is not None else "Potential (eV)")
+    axes.set_title(calc_dir.name)
+    axes.legend(frameon=False, fontsize=8)
+    figure.tight_layout()
+    figure.savefig(calc_dir / "Workfunction.png", dpi=400)
+    plt.close(figure)
+
+
+def _remove_generated_marker(calc_dir: Path, name: str) -> None:
+    marker = calc_dir / name
+    if marker.is_file():
+        marker.unlink()
+
+
+def _write_audit_markers(
+    calc_dir: Path,
+    row: dict[str, Any],
+    *,
+    write_fix: bool,
+) -> None:
+    """Flag the calculation without modifying INCAR or submitting anything."""
+
+    flatness = str(row.get("flatness_status", "FAILED_ANALYSIS"))
+    for marker in (OK_MARKER, REVIEW_MARKER, AUDIT_FAILED_MARKER):
+        if marker != (
+            OK_MARKER
+            if flatness == "OK"
+            else AUDIT_FAILED_MARKER
+            if flatness == "FAILED_ANALYSIS"
+            else REVIEW_MARKER
+        ):
+            _remove_generated_marker(calc_dir, marker)
+
+    if flatness == "OK":
+        marker = calc_dir / OK_MARKER
+        marker.write_text(
+            "LOCPOT selected-side vacuum passed the InterfaceForge flatness audit.\n",
+            encoding="utf-8",
+        )
+        row["audit_action"] = "NONE_FLAT_ENOUGH"
+        row["relaunch_review_required"] = False
+        row["review_flag_path"] = str(marker)
+        return
+
+    if flatness == "FAILED_ANALYSIS":
+        marker = calc_dir / AUDIT_FAILED_MARKER
+        marker.write_text(
+            "InterfaceForge could not audit this LOCPOT. Review the reported error before relaunch.\n"
+            f"error: {row.get('error', '')}\n",
+            encoding="utf-8",
+        )
+        row["audit_action"] = "REVIEW_AUDIT_FAILURE"
+        row["relaunch_review_required"] = True
+        row["review_flag_path"] = str(marker)
+        return
+
+    fix_path = write_dipole_preview(calc_dir, float(row["suggested_DIPOL_z"])) if write_fix else None
+    marker = calc_dir / REVIEW_MARKER
+    marker.write_text(
+        "LOCPOT vacuum is not flat enough for automatic acceptance.\n"
+        f"flatness_status: {flatness}\n"
+        f"selected_side: {row.get('selected_side', '')}\n"
+        f"selected_swing_eV: {row.get('selected_swing_eV', '')}\n"
+        f"selected_std_eV: {row.get('selected_std_eV', '')}\n"
+        f"suggested_DIPOL_z: {row.get('suggested_DIPOL_z', '')}\n"
+        f"compactness_R: {row.get('compactness_R', '')}\n"
+        f"proposed_incar: {fix_path or 'disabled'}\n"
+        "No calculation was submitted and INCAR was not modified.\n",
+        encoding="utf-8",
+    )
+    row["audit_action"] = "REVIEW_PROPOSED_INCAR"
+    row["relaunch_review_required"] = True
+    row["dipole_fix_path"] = str(fix_path) if fix_path else ""
+    row["review_flag_path"] = str(marker)
 
 
 def _run_sumo(calc_dir: Path) -> str:
@@ -537,8 +684,15 @@ def _analyze_folder(
     row: dict[str, Any] = {
         "folder": calc_dir.name,
         "reference": reference_for(calc_dir.name, config) or "",
-        "status": "OK",
+        "status": "FAILED_ANALYSIS",
         "error": "",
+        "flatness_status": "FAILED_ANALYSIS",
+        "flat_enough": False,
+        "audit_action": "REVIEW_AUDIT_FAILURE",
+        "relaunch_review_required": True,
+        "dipole_fix_path": "",
+        "review_flag_path": "",
+        "band_edge_status": "NOT_ANALYZED",
         "selected_side": config["side"],
         "pdos_review_required": True,
         "sumo_status": "NOT_REQUESTED",
@@ -553,8 +707,6 @@ def _analyze_folder(
             buffer_angstrom=config["buffer_angstrom"],
             minimum_window_angstrom=config["minimum_window_angstrom"],
         )
-        efermi_outcar = efermi_from_outcar(calc_dir / "OUTCAR")
-        efermi_xml, vbm, cbm, gap = band_edges_from_vasprun(calc_dir / "vasprun.xml")
         selected = profile.high if config["side"] == "high-z" else profile.low
         selected_status = plateau_status(selected, config)
         center, compactness, missing_mass = ionic_center_fraction(structure)
@@ -562,14 +714,9 @@ def _analyze_folder(
         row.update(
             {
                 "status": selected_status,
-                "efermi_eV": efermi_xml,
+                "flatness_status": selected_status,
+                "flat_enough": selected_status == "OK",
                 "vacuum_eV": selected.plateau_eV,
-                "vacuum_minus_ef_eV": selected.plateau_eV - efermi_outcar,
-                "vbm_eV": vbm,
-                "cbm_eV": cbm,
-                "gap_eV": gap,
-                "vbm_vac_eV": vbm - selected.plateau_eV,
-                "cbm_vac_eV": cbm - selected.plateau_eV,
                 "selected_slope_eV_per_A": selected.slope_eV_per_A,
                 "selected_swing_eV": selected.swing_eV,
                 "selected_std_eV": selected.residual_std_eV,
@@ -585,22 +732,61 @@ def _analyze_folder(
                 "current_DIPOL": incar["DIPOL"],
             }
         )
-        if abs(efermi_xml - efermi_outcar) > 1e-3:
-            row["status"] = "FAILED_EFERMI_MISMATCH"
-            row["error"] = f"OUTCAR/XML E-fermi differ by {efermi_xml - efermi_outcar:.6f} eV"
         if missing_mass:
             row["error"] = "Missing masses: " + ",".join(missing_mass)
+        try:
+            efermi_outcar = efermi_from_outcar(calc_dir / "OUTCAR")
+        except (OSError, SafetyError):
+            efermi_outcar = None
         _plot_profile(calc_dir, shifted_z, shifted_potential, profile, efermi_outcar)
+        _plot_workfunction_profile(
+            calc_dir,
+            shifted_z,
+            shifted_potential,
+            profile,
+            selected,
+            efermi_outcar,
+        )
         data = "\n".join(
-            f"{position:.8f} {value:.8f} {value - efermi_outcar:.8f}"
+            (
+                f"{position:.8f} {value:.8f} {value - efermi_outcar:.8f}"
+                if efermi_outcar is not None
+                else f"{position:.8f} {value:.8f} nan"
+            )
             for position, value in zip(shifted_z, shifted_potential, strict=True)
         )
         (calc_dir / "locpot.dat").write_text(
             "# shifted_z_A potential_eV potential_minus_EF_eV\n" + data + "\n",
             encoding="utf-8",
         )
-        if write_fixes and selected_status != "OK":
-            write_dipole_preview(calc_dir, center)
+        _write_audit_markers(calc_dir, row, write_fix=write_fixes)
+
+        try:
+            if efermi_outcar is None:
+                efermi_outcar = efermi_from_outcar(calc_dir / "OUTCAR")
+            efermi_xml, vbm, cbm, gap = band_edges_from_vasprun(calc_dir / "vasprun.xml")
+            if abs(efermi_xml - efermi_outcar) > 1e-3:
+                row["band_edge_status"] = "FAILED_EFERMI_MISMATCH"
+                row["status"] = "FAILED_EFERMI_MISMATCH"
+                row["error"] = f"OUTCAR/XML E-fermi differ by {efermi_xml - efermi_outcar:.6f} eV"
+            else:
+                row.update(
+                    {
+                        "band_edge_status": "OK",
+                        "efermi_eV": efermi_xml,
+                        "vacuum_minus_ef_eV": selected.plateau_eV - efermi_outcar,
+                        "vbm_eV": vbm,
+                        "cbm_eV": cbm,
+                        "gap_eV": gap,
+                        "vbm_vac_eV": vbm - selected.plateau_eV,
+                        "cbm_vac_eV": cbm - selected.plateau_eV,
+                    }
+                )
+        except (OSError, ValueError, ET.ParseError, SafetyError) as exc:
+            row["band_edge_status"] = "FAILED_BAND_EDGES"
+            row["status"] = "FAILED_BAND_EDGES"
+            note = str(exc).replace("\t", " ").replace("\n", " ")
+            row["error"] = f"{row['error']}; {note}".strip("; ")
         if run_sumo:
             row["sumo_status"] = _run_sumo(calc_dir)
         details = {
@@ -612,7 +798,9 @@ def _analyze_folder(
         }
     except (OSError, ValueError, ET.ParseError, SafetyError, DependencyError) as exc:
         row["status"] = "FAILED_ANALYSIS"
+        row["flatness_status"] = "FAILED_ANALYSIS"
         row["error"] = str(exc).replace("\t", " ").replace("\n", " ")
+        _write_audit_markers(calc_dir, row, write_fix=False)
     return row, details
 
 
@@ -676,10 +864,63 @@ def _write_outputs(root: Path, rows: list[dict[str, Any]], details: list[dict[st
         if row.get("error"):
             lines.append(f"  note: {row['error']}")
     text_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    audit_tsv = root / "dipole_flatness_audit.tsv"
+    with audit_tsv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=AUDIT_FIELDS, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: _format_field(row.get(field, "")) for field in AUDIT_FIELDS})
+    audit_text = root / "dipole_flatness_audit.txt"
+    audit_lines = [
+        "LOCPOT vacuum-flatness audit",
+        "============================",
+        "OK calculations need no dipole improvement. REVIEW rows were not relaunched; inspect the proposed INCAR.",
+        "",
+        f"{'folder':40s} {'flatness':20s} {'swing/eV':>10s} {'std/eV':>10s} {'action':>24s}",
+    ]
+    review_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("relaunch_review_required"):
+            review_rows.append(row)
+        audit_lines.append(
+            f"{row['folder'][:40]:40s} {str(row.get('flatness_status', ''))[:20]:20s} "
+            f"{_format_field(row.get('selected_swing_eV', '')):>10.10s} "
+            f"{_format_field(row.get('selected_std_eV', '')):>10.10s} "
+            f"{str(row.get('audit_action', '')):>24s}"
+        )
+    audit_text.write_text("\n".join(audit_lines) + "\n", encoding="utf-8")
+    review_queue = root / "relaunch_review_queue.txt"
+    queue_lines = [
+        "InterfaceForge relaunch review queue",
+        "====================================",
+        "This is a review queue only. No INCAR was overwritten and no VASP job was submitted.",
+        "",
+    ]
+    if not review_rows:
+        queue_lines.append("All analyzed LOCPOT selected-side plateaus are flat enough; no relaunch review is needed.")
+    for row in review_rows:
+        queue_lines.extend(
+            [
+                row["folder"],
+                f"  flatness: {row.get('flatness_status', '')}",
+                f"  action: {row.get('audit_action', '')}",
+                f"  flag: {row.get('review_flag_path', '')}",
+                f"  proposed INCAR: {row.get('dipole_fix_path', '') or 'not available'}",
+            ]
+        )
+        if row.get("dipole_fix_path"):
+            queue_lines.append(
+                f"  inspect: diff -u {row['folder']}/INCAR {row['folder']}/INCAR.dipole_fix"
+            )
+        queue_lines.append("")
+    review_queue.write_text("\n".join(queue_lines) + "\n", encoding="utf-8")
     return {
         "tsv": str(tsv_path),
         "json": str(json_path),
         "text": str(text_path),
+        "flatness_tsv": str(audit_tsv),
+        "flatness_text": str(audit_text),
+        "review_queue": str(review_queue),
     }
 
 
@@ -688,7 +929,7 @@ def analyze_slab_alignment(
     *,
     config: str | Path = "slab_alignment.json",
     run_sumo: bool = False,
-    write_dipole_fixes: bool = False,
+    write_dipole_fixes: bool = True,
     only: str | None = None,
 ) -> dict[str, Any]:
     """Analyze all configured immediate child calculations and align band edges."""
@@ -724,12 +965,16 @@ def analyze_slab_alignment(
     outputs = _write_outputs(root_path, rows, details)
     failures = sum(row["status"].startswith("FAILED") for row in rows)
     suspects = sum(row["status"] == "SUSPECT_FLATNESS" for row in rows)
+    flat_enough = sum(row.get("flatness_status") == "OK" for row in rows)
+    review_required = sum(bool(row.get("relaunch_review_required")) for row in rows)
     return {
         "root": str(root_path),
         "config": str(config_path),
         "count": len(rows),
         "failures": failures,
         "suspects": suspects,
+        "flat_enough": flat_enough,
+        "review_required": review_required,
         "status": "FAILED" if failures else ("SUSPECT" if suspects else "OK"),
         "outputs": outputs,
         "rows": rows,

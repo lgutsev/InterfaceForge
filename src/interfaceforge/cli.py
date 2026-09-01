@@ -1950,13 +1950,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     slab_alignment.add_argument(
         "--write-dipole-fixes",
+        dest="write_dipole_fixes",
         action="store_true",
-        help="Write non-destructive INCAR.dipole_fix previews for non-flat cases",
+        help="Write non-destructive INCAR.dipole_fix previews for flagged cases (default)",
+    )
+    slab_alignment.add_argument(
+        "--no-write-dipole-fixes",
+        dest="write_dipole_fixes",
+        action="store_false",
+        help="Audit and flag non-flat cases without writing proposed INCAR files",
     )
     slab_alignment.add_argument(
         "--only",
         help="Analyze only this immediate child directory",
     )
+    slab_alignment.set_defaults(write_dipole_fixes=True)
     slab_alignment.set_defaults(func=cmd_slab_alignment)
 
     adhesion = vasp_commands.add_parser(
