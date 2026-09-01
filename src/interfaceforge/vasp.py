@@ -2097,9 +2097,13 @@ def prepare_step1_series(
             for name in STEP1_INHERITED_FILES
             if (path := _resolve_step2_input(run, source_root, name)) is not None
         }
-        for required in ("KPOINTS", "POTCAR"):
-            if required not in resolved_inputs:
-                raise SafetyError(f"No nonempty {required} found for OPT run {run}")
+        if "KPOINTS" not in resolved_inputs:
+            raise SafetyError(f"No nonempty KPOINTS found for OPT run {run}")
+        if "POTCAR" not in resolved_inputs:
+            warnings.append(
+                f"{relative.as_posix() or '.'}: no OPT POTCAR; Step1 is prepared "
+                "without one (generate it at launch time)"
+            )
         if not ({"runvasp.sh", "run.slurm"} & resolved_inputs.keys()):
             raise SafetyError(f"No runvasp.sh or run.slurm found for OPT run {run}")
 

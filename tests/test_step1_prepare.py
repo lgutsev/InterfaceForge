@@ -17,7 +17,13 @@ _OPT_INCAR = (
 )
 
 
-def _opt_tree(root: Path, *, magmom: str = "2*2.0 3*-2.0", wavecar: bool = True) -> Path:
+def _opt_tree(
+    root: Path,
+    *,
+    magmom: str = "2*2.0 3*-2.0",
+    wavecar: bool = True,
+    potcar: bool = True,
+) -> Path:
     opt = root / "OPT"
     run = opt / "NiO_m110_Big_U46"
     run.mkdir(parents=True)
@@ -30,7 +36,8 @@ def _opt_tree(root: Path, *, magmom: str = "2*2.0 3*-2.0", wavecar: bool = True)
     (run / "CONTCAR").write_text(
         f"opt\n1.0\n10 0 0\n0 10 0\n0 0 40\nNi O\n3 2\nDirect\n{coords}\n", encoding="utf-8"
     )
-    (run / "POTCAR").write_text("licensed fixture Ni O\n", encoding="utf-8")
+    if potcar:
+        (run / "POTCAR").write_text("licensed fixture Ni O\n", encoding="utf-8")
     if wavecar:
         (run / "WAVECAR").write_text("x" * 4096, encoding="utf-8")
     return opt
@@ -94,6 +101,20 @@ class Step1PrepareTests(unittest.TestCase):
             self.assertEqual(incar["LMAXMIX"], "4")
             self.assertEqual(incar["GGA"], "PE")
             self.assertFalse((run / "WAVECAR").exists())
+            audit = json.loads((root / "Step1" / "step1_audit.json").read_text(encoding="utf-8"))
+            self.assertEqual(audit["status"], "PASS")
+
+    def test_prepares_without_potcar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            opt = _opt_tree(root, potcar=False)
+            result = prepare_step1_series(opt, protocol="training")
+            self.assertEqual(result["mode"], "prepared-and-audited")
+            self.assertTrue(any("POTCAR" in w for w in result["warnings"]))
+            run = root / "Step1" / "NiO_m110_Big_U46"
+            self.assertTrue((run / "INCAR").is_file())
+            self.assertTrue((run / "KPOINTS").is_file())
+            self.assertFalse((run / "POTCAR").exists())
             audit = json.loads((root / "Step1" / "step1_audit.json").read_text(encoding="utf-8"))
             self.assertEqual(audit["status"], "PASS")
 

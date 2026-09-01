@@ -112,14 +112,17 @@ Per OPT run:
   `LDAU*` / `LMAXMIX` block are copied **byte-for-byte** from the OPT
   `INCAR` (`LDAUPRINT` is not — it is print verbosity, not a U parameter);
 - every other tag — MD-tuned electronic settings (`ENCUT=400`,
-  `PREC=Normal`, `EDIFF=1E-5`, `ALGO=Fast`, `LREAL=Auto`, `MAXMIX=40`,
-  `NELM=60`; each step reuses the previous wavefunction so the SCF loop is
-  short), the preheat MD block (`IBRION=0`, `SMASS=-1`,
+  `PREC=Normal`, `EDIFF=1E-4` (the VASP default; plenty for MD forces),
+  `ALGO=Fast`, `LREAL=Auto`, `MAXMIX=40`, `NELM=60`; each step reuses the
+  previous wavefunction so the SCF loop is short), the preheat MD block
+  (`IBRION=0`, `SMASS=-1`,
   `NBLOCK=4`, `NSW` from the protocol), and output — comes from the packaged
   `INCAR.step1_preheat` template (override with `--template`);
 - `--temperature` (default 300) sets `SYSTEM` / `TEBEG` / `TEEND`;
-- `KPOINTS`, `POTCAR`, and the launcher are copied from the nearest
-  run-specific or shared ancestor.
+- `KPOINTS` and the launcher (`runvasp.sh` / `run.slurm`) are copied from
+  the nearest run-specific or shared ancestor; `POTCAR` is copied too when
+  present, but is **optional** — if the OPT tree has none, Step1 is prepared
+  without one (with a warning) for workflows that build `POTCAR` at launch.
 
 `LDAU*` array lengths and `MAGMOM` length are checked against the species /
 ion count in the `CONTCAR`. `Step1/` receives `step1_manifest.json` plus
