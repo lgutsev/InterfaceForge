@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,12 +24,13 @@ def _opt_tree(
     magmom: str = "2*2.0 3*-2.0",
     wavecar: bool = True,
     potcar: bool = True,
+    launcher_dir: Path | None = None,
 ) -> Path:
     opt = root / "OPT"
     run = opt / "NiO_m110_Big_U46"
     run.mkdir(parents=True)
     (opt / "KPOINTS").write_text("Gamma\n0\nGamma\n2 2 1\n0 0 0\n", encoding="utf-8")
-    launcher = opt / "runvasp.sh"
+    launcher = (launcher_dir if launcher_dir is not None else opt) / "runvasp.sh"
     launcher.write_text("#!/usr/bin/env bash\nsbatch payload\n", encoding="utf-8")
     launcher.chmod(0o755)
     (run / "INCAR").write_text(_OPT_INCAR.replace("2*2.0 3*-2.0", magmom), encoding="utf-8")
@@ -117,6 +119,21 @@ class Step1PrepareTests(unittest.TestCase):
             self.assertFalse((run / "POTCAR").exists())
             audit = json.loads((root / "Step1" / "step1_audit.json").read_text(encoding="utf-8"))
             self.assertEqual(audit["status"], "PASS")
+
+    def test_launcher_is_found_in_the_invocation_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            opt = _opt_tree(root, launcher_dir=root)  # runvasp.sh sits above OPT/, not inside it
+            cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                result = prepare_step1_series(opt, protocol="training")
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(result["mode"], "prepared-and-audited")
+            launcher = root / "Step1" / "NiO_m110_Big_U46" / "runvasp.sh"
+            self.assertTrue(launcher.is_file())
+            self.assertTrue(os.access(launcher, os.X_OK))
 
     def test_missing_wavecar_is_rejected_with_require_wavecar(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

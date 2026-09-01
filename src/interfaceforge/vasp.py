@@ -397,8 +397,15 @@ def _step2_excluded(path: Path) -> bool:
     return False
 
 
-def _resolve_step2_input(run: Path, source_root: Path, name: str) -> Path | None:
-    """Resolve a run-specific input first, then a shared ancestor input."""
+def _resolve_step2_input(
+    run: Path, source_root: Path, name: str, *, extra_roots: Iterable[Path] = ()
+) -> Path | None:
+    """Resolve a run-specific input first, then a shared ancestor input.
+
+    ``extra_roots`` are checked last, after the ``run`` -> ``source_root``
+    ancestor chain is exhausted — e.g. the directory the command was
+    invoked from, for a launcher shared above the OPT root itself.
+    """
 
     current = run
     while True:
@@ -406,8 +413,13 @@ def _resolve_step2_input(run: Path, source_root: Path, name: str) -> Path | None
         if candidate.is_file() and candidate.stat().st_size:
             return candidate
         if current == source_root:
-            return None
+            break
         current = current.parent
+    for root in extra_roots:
+        candidate = root / name
+        if candidate.is_file() and candidate.stat().st_size:
+            return candidate
+    return None
 
 
 def _vasp_list_length(value: str) -> int:
@@ -2013,6 +2025,11 @@ def prepare_step1_series(
     warning. ``fresh_start=True`` forces the fresh start for every run even
     when a ``WAVECAR`` exists; ``require_wavecar=True`` restores the old
     strict behaviour and refuses any run without one.
+
+    A launcher (``runvasp.sh`` / ``run.slurm``) is also accepted from the
+    current working directory — the folder the command is run from — even
+    when it sits above ``source`` and so falls outside the normal
+    ``run`` -> ``source_root`` ancestor search.
     """
 
     if fresh_start and require_wavecar:
@@ -2021,6 +2038,7 @@ def prepare_step1_series(
     from .aimd import resolve_protocol
 
     nsw = int(resolve_protocol(protocol)["step1"]["nsw"])
+    invocation_dir = Path.cwd().resolve()
     source_root = Path(source).expanduser().resolve()
     if not source_root.is_dir():
         raise FileNotFoundError(source_root)
@@ -2092,11 +2110,12 @@ def prepare_step1_series(
                 "preparing a fresh electronic start (ISTART=0)"
             )
         istart = 1 if use_wavecar else 0
-        resolved_inputs = {
-            name: path
-            for name in STEP1_INHERITED_FILES
-            if (path := _resolve_step2_input(run, source_root, name)) is not None
-        }
+        resolved_inputs: dict[str, Path] = {}
+        for input_name in STEP1_INHERITED_FILES:
+            extra_roots = (invocation_dir,) if input_name in {"runvasp.sh", "run.slurm"} else ()
+            path = _resolve_step2_input(run, source_root, input_name, extra_roots=extra_roots)
+            if path is not None:
+                resolved_inputs[input_name] = path
         if "KPOINTS" not in resolved_inputs:
             raise SafetyError(f"No nonempty KPOINTS found for OPT run {run}")
         if "POTCAR" not in resolved_inputs:

@@ -123,6 +123,9 @@ Per OPT run:
   the nearest run-specific or shared ancestor; `POTCAR` is copied too when
   present, but is **optional** — if the OPT tree has none, Step1 is prepared
   without one (with a warning) for workflows that build `POTCAR` at launch.
+  The launcher is also accepted from the **current working directory** — the
+  folder `step1-prepare` is run from — even when it sits above `source`
+  itself (e.g. `runvasp.sh` in `OH0/` while `source` is `OH0/OPT`).
 
 `LDAU*` array lengths and `MAGMOM` length are checked against the species /
 ion count in the `CONTCAR`. `Step1/` receives `step1_manifest.json` plus
