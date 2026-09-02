@@ -43,6 +43,8 @@ from .geometry import (
     structure_summary,
     write_summary,
 )
+from .interface_energy import interface_energy
+from .interface_energy import write_reports as write_interface_energy_reports
 from .intermat import generate_intermat_interfaces, intermat_status
 from .mace_roi import evaluate_mace_roi_predictions, prepare_mace_roi_dataset
 from .mlff_interfaces import (
@@ -330,6 +332,16 @@ def cmd_validate(args: argparse.Namespace) -> int:
         payload = adhesion_from_csv(args.source, args.output)
     elif args.validation == "separation":
         payload = separation_curve_from_csv(args.source, args.output)
+    elif args.validation == "interface-energy":
+        payload = interface_energy(
+            _campaign(args).root,
+            dataset_root=args.dataset_root,
+            equilibration_frames=args.equilibration_frames,
+            n_interfaces=args.n_interfaces,
+            blocks=args.blocks,
+            stacking_axis=args.stacking_axis,
+        )
+        payload["outputs"] = write_interface_energy_reports(payload, args.output)
     else:
         payload = stratified_parity_from_csv(
             args.source,
@@ -1280,6 +1292,18 @@ def build_parser() -> argparse.ArgumentParser:
     separation.add_argument("source")
     separation.add_argument("output")
     separation.set_defaults(func=cmd_validate)
+    interface_energy_parser = validation.add_parser(
+        "interface-energy",
+        help="Bulk-referenced interfacial energy (J/m2) from the canonical dataset",
+    )
+    add_campaign_option(interface_energy_parser)
+    interface_energy_parser.add_argument("output", help="Directory for interface_energy.{json,csv,md}")
+    interface_energy_parser.add_argument("--dataset-root")
+    interface_energy_parser.add_argument("--equilibration-frames", type=int, default=100)
+    interface_energy_parser.add_argument("--n-interfaces", type=int, default=2)
+    interface_energy_parser.add_argument("--blocks", type=int, default=10)
+    interface_energy_parser.add_argument("--stacking-axis", choices=("a", "b", "c"))
+    interface_energy_parser.set_defaults(func=cmd_validate)
     stratified = validation.add_parser(
         "stratified",
         help="Report parity errors per geometry class (kind/high-temperature/low-coordination) "
