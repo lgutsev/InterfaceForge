@@ -358,7 +358,8 @@ class AdhesionAuditTests(unittest.TestCase):
 
 def _fake_adhesion_tree(
     root: Path, name: str, *, method: str, e_interface: float, e_lower: float, e_upper: float,
-    area: float = 100.0, ready: bool = True,
+    area: float = 100.0, ready: bool = True, slab_mode: str = "relax",
+    interface_static_energy: float | None = None,
 ) -> Path:
     """An 'adhesion prepare' output tree without the symlink prepare_adhesion makes."""
     tree = root / name
@@ -370,17 +371,26 @@ def _fake_adhesion_tree(
         directory.mkdir(parents=True)
         if ready:
             (directory / "OUTCAR").write_text(_fake_outcar(energy), encoding="utf-8")
+    interface_static = None
+    if interface_static_energy is not None:
+        (tree / "interface_static").mkdir(parents=True)
+        (tree / "interface_static" / "OUTCAR").write_text(
+            _fake_outcar(interface_static_energy), encoding="utf-8"
+        )
+        interface_static = {"directory": "interface_static", "formula": "Si4Ti4N8", "natoms": 16}
     (tree / "manifest.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "method": method,
+                "slab_mode": slab_mode,
                 "reference_directory": str(reference),
                 "interface_area_A2": area,
                 "slabs": [
                     {"name": "lower", "directory": "slabs/lower", "formula": "Si4N4"},
                     {"name": "upper", "directory": "slabs/upper", "formula": "Ti4N4"},
                 ],
+                "interface_static": interface_static,
                 "rigid_curve": [],
             }
         ),
@@ -430,14 +440,58 @@ class AdhesionSummaryTests(unittest.TestCase):
             )
             rows = payload["interfaces"]
             self.assertEqual([r["interface"] for r in rows], ["SiN_TiN_N-term", "SiN-TiN-Ti-term"])
-            # WoA(N) = (-90 + -95 - -200)/100 = 0.15 eV/A^2 -> 0.15 * 16.02176634
-            self.assertAlmostEqual(rows[0]["work_of_adhesion_j_per_m2"], 0.15 * 16.02176634)
+            # W(N) = (-90 + -95 - -200)/100 = 0.15 eV/A^2 -> 0.15 * 16.02176634
+            self.assertAlmostEqual(
+                rows[0]["methods"]["mlff"]["value_j_per_m2"], 0.15 * 16.02176634
+            )
             self.assertEqual(rows[0]["literature"][0]["reference_j_per_m2"], 1.24)
             self.assertEqual(rows[1]["literature"][0]["reference_j_per_m2"], 3.28)
             for key in ("csv", "markdown", "figure_png", "figure_svg", "figure_pdf", "json"):
                 self.assertTrue(Path(payload["outputs"][key]).is_file())
             csv_text = Path(payload["outputs"]["csv"]).read_text(encoding="utf-8")
             self.assertIn("sharifi2026", csv_text)
+
+    def test_same_interface_dft_and_mlff_land_on_one_row_with_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            leaf = "interface/450K/Real/Ti_Term/SiN-TiN-Ti-term"
+            dft = _fake_adhesion_tree(
+                root, "ti_dft", method="dft", e_interface=-210.0, e_lower=-90.0, e_upper=-95.0,
+                slab_mode="static",
+            )
+            mlff = _fake_adhesion_tree(
+                root, "ti_mlff", method="mlff", e_interface=-209.0, e_lower=-90.0, e_upper=-95.0,
+                slab_mode="static",
+            )
+            payload = summarize_adhesion(
+                [(leaf, dft), (leaf, mlff)], root / "s", campaign_validation=_VALIDATION
+            )
+            self.assertEqual(len(payload["interfaces"]), 1)
+            group = payload["interfaces"][0]
+            self.assertEqual(set(group["methods"]), {"dft", "mlff"})
+            self.assertEqual(group["quantity"], "work_of_separation")
+            # mlff interface 1 eV less bound -> W smaller by 1/100*conv
+            self.assertAlmostEqual(
+                group["delta_vs_dft_j_per_m2"]["mlff"], -1.0 / 100.0 * 16.02176634
+            )
+            md = Path(payload["outputs"]["markdown"]).read_text(encoding="utf-8")
+            self.assertIn("Work of separation summary", md)
+            self.assertIn("MLIP - DFT", Path(payload["outputs"]["figure_svg"]).read_text(encoding="utf-8"))
+
+    def test_interface_static_energy_is_preferred_over_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tree = _fake_adhesion_tree(
+                root, "n", method="dft", e_interface=-190.0, e_lower=-90.0, e_upper=-95.0,
+                slab_mode="static", interface_static_energy=-200.0,
+            )
+            payload = audit_adhesion(tree)
+            self.assertEqual(payload["interface_energy_source"], "interface_static")
+            # uses -200 (static), not -190 (reference): W = (-90-95+200)/100
+            self.assertAlmostEqual(
+                payload["work_of_adhesion"]["rows"][0]["work_of_adhesion_ev_a2"], 0.15
+            )
+            self.assertEqual(payload["quantity"], "work_of_separation")
 
     def test_pending_interface_is_reported_without_a_figure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -448,7 +502,7 @@ class AdhesionSummaryTests(unittest.TestCase):
             payload = summarize_adhesion(
                 [("interface/450K/Real/N_Term/x", pending)], root / "s"
             )
-            self.assertFalse(payload["interfaces"][0]["ready"])
+            self.assertFalse(payload["interfaces"][0]["methods"]["dft"]["ready"])
             self.assertIn("skipped", payload["outputs"]["figure"])
             self.assertTrue(Path(payload["outputs"]["csv"]).is_file())
 

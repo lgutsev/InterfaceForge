@@ -641,6 +641,15 @@ gap), then generates:
   regardless of how well the interface itself is described, so inspect each
   slab's `CONTCAR` under `relax` before trusting the result, especially for
   an MLIP.
+- **`interface_static/`** (only with `--interface-sp`): a fresh single-point
+  of the *whole* interface at the slab INCAR settings. `adhesion audit` then
+  takes the interface energy from here rather than the reference directory's
+  own `OUTCAR`, so all three energies share one electronic setup — important
+  when the reference is a loose-`EDIFF` MD run. With `--slab-mode static
+  --interface-sp` the audited quantity is the ideal **work of separation**
+  W_sep (frozen slabs); `--slab-mode relax` gives the **work of adhesion**
+  W_ad. This is the right pairing for a clean DFT-vs-MLIP comparison: the
+  same three frozen structures go through DFT and the committee.
 - **`rigid_curve/sep_XXX.XX_A/`**: one static single-point (`IBRION=-1,
   NSW=1`) per `--distances` value, with the upper fragment and the cell's
   *c* vector both translated along the interface normal by that separation —
@@ -751,34 +760,39 @@ CSV path adds `literature_key` / `literature_j_per_m2` /
 bundled Sharifi et al. (2026) Si₃N₄/TiN profile is `reference_profiles:
 [sharifi2026]` — see `iface reference show sharifi2026`.
 
-### Summary across interfaces
+### Summary across interfaces (DFT vs MLIP)
 
 `iface vasp adhesion summary` rolls several prepared adhesion trees into one
-W_ad table and a publication figure:
+table and a publication figure:
 
 ```bash
-iface vasp adhesion summary \
+iface vasp adhesion summary -o audit/adhesion_summary -c campaign.yaml \
+  --title "Si3N4/TiN work of separation" \
+  "interface/450K/Real/N_Term/SiN_TiN_N-term=runs/N_term_adhesion_dft" \
   "interface/450K/Real/N_Term/SiN_TiN_N-term=runs/N_term_adhesion_mlff" \
-  "interface/450K/Real/Ti_Term/SiN-TiN-Ti-term=runs/Ti_term_adhesion_mlff" \
-  -c campaign.yaml -o audit/adhesion_summary --title "Si3N4/TiN work of adhesion"
+  "interface/450K/Real/Ti_Term/SiN-TiN-Ti-term=runs/Ti_term_adhesion_dft" \
+  "interface/450K/Real/Ti_Term/SiN-TiN-Ti-term=runs/Ti_term_adhesion_mlff"
 ```
 
 Each positional is an `adhesion prepare` output directory, optionally prefixed
 `<interface leaf>=` so its `validation.interfaces` metadata picks the literature
-overlay. Every tree is re-audited (so the table reflects current run state and
-marks unfinished interfaces `pending`). Outputs in `-o`:
+overlay. **Give the same leaf twice** — once for a `--method dft` tree, once for
+`--method mlff` — and both land on one interface row, with `delta_vs_dft` and a
+"MLIP − DFT" figure panel. Every tree is re-audited (so the table reflects
+current run state and marks unfinished methods `pending`). Outputs in `-o`:
 
 ```text
-adhesion_summary.json         # per-interface W_ad, sigma, and literature matches
-adhesion_summary.csv          # one row per (interface, matched reference)
-adhesion_summary.md           # the same as a table
-adhesion_summary.{png,svg,pdf}  # (a) W_ad vs literature, (b) deviation vs tolerance band
+adhesion_summary.json           # per-interface: every method's value/sigma, delta_vs_dft, literature
+adhesion_summary.csv            # one row per (interface, method)
+adhesion_summary.md             # the same as a table
+adhesion_summary.{png,svg,pdf}  # (a) W per interface (DFT, MLIP, literature); (b) MLIP - DFT
 ```
 
-The figure uses the same style as `iface mlip-compare`'s
-`publication_rmse_summary`: computed W_ad with its σ error bar per interface,
-the literature value as an open diamond with a ±tolerance whisker, and a second
-panel of `W_ad − W_ad^lit` against the shaded tolerance band.
+The figure uses the `iface mlip-compare` `publication_rmse_summary` style: each
+method's value with its σ error bar per interface, the literature value as an
+open diamond with a ±tolerance whisker, and a second panel that shows
+`W^MLIP − W^DFT` when both are present (else deviation from literature). The
+axis is labelled W_sep or W_ad depending on the trees' `slab_mode`.
 
 ## Audit
 

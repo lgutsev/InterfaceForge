@@ -1009,6 +1009,7 @@ def cmd_adhesion_prepare(args: argparse.Namespace) -> int:
             launcher=args.launcher,
             propagate_launcher=not args.no_launcher,
             slab_mode=args.slab_mode,
+            interface_static=args.interface_sp,
         )
     )
     return 0
@@ -2332,6 +2333,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="relax (default) lets each isolated slab relax; static evaluates it at the "
         "as-cut geometry with no ionic motion -- use this when the driving model "
         "extrapolates poorly for an isolated fragment (e.g. it collapses on relaxation)",
+    )
+    adhesion_prepare.add_argument(
+        "--interface-sp",
+        action="store_true",
+        help="also generate interface_static/: a fresh single-point of the whole "
+        "interface at the slab INCAR settings, so all three energies share one "
+        "electronic setup (recommended with --slab-mode static -> ideal work of "
+        "separation; avoids reusing a loose-EDIFF MD energy)",
     )
     adhesion_prepare.add_argument(
         "--distances",
