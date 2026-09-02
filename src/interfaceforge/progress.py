@@ -76,19 +76,32 @@ def _lcurve_tail(path: Path) -> dict[str, Any] | None:
             last = fields
     if not last:
         return None
-    position = {name: index for index, name in enumerate(header)}
 
-    def column(*names: str) -> float | None:
-        for name in names:
-            index = position.get(name)
-            if index is not None and index < len(last) and _is_number(last[index]):
-                return float(last[index])
-        return None
+    def quantity(letter: str) -> float | None:
+        """Column for the per-atom energy (``e``) or force (``f``) error.
+
+        DeePMD names these ``rmse_f_val`` / ``rmse_f_trn`` / ``rmse_f`` across
+        backends and versions; match any header token that carries an error
+        prefix and a lone ``f``/``e`` token, preferring the validation column.
+        """
+
+        error = re.compile(r"rmse|l2|mae")
+        token_letter = re.compile(rf"(?:^|_){letter}(?:$|_)")
+        best: tuple[int, int] | None = None
+        for index, name in enumerate(header):
+            low = name.lower()
+            if index >= len(last) or not _is_number(last[index]):
+                continue
+            if error.search(low) and token_letter.search(low):
+                rank = 0 if "val" in low else 1
+                if best is None or rank < best[0]:
+                    best = (rank, index)
+        return float(last[best[1]]) if best else None
 
     return {
         "step": int(float(last[0])),
-        "rmse_f_val_ev_ang": column("rmse_f_val", "rmse_f_trn", "rmse_f"),
-        "rmse_e_val_ev_atom": column("rmse_e_val", "rmse_e_trn", "rmse_e"),
+        "rmse_f_val_ev_ang": quantity("f"),
+        "rmse_e_val_ev_atom": quantity("e"),
     }
 
 
