@@ -31,7 +31,7 @@ from typing import Any
 
 from .audit import audit_run
 from .errors import SafetyError
-from .validation import adhesion_from_csv, separation_curve_from_csv
+from .validation import adhesion_from_csv, compare_to_references, separation_curve_from_csv
 
 EV_A2_TO_J_M2 = 16.02176634
 METHODS = ("mlff", "dft")
@@ -658,7 +658,12 @@ def _is_ready(row: dict[str, Any]) -> bool:
     return bool(row.get("finished_normally")) and row.get("sigma0_energy_ev") is not None
 
 
-def audit_adhesion(output_dir: str | Path) -> dict[str, Any]:
+def audit_adhesion(
+    output_dir: str | Path,
+    *,
+    references: list[dict[str, Any]] | None = None,
+    attrs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Audit a prepared work-of-adhesion tree once VASP has run on it.
 
     Reads ``manifest.json`` from a directory ``prepare_adhesion`` created,
@@ -744,6 +749,13 @@ def audit_adhesion(output_dir: str | Path) -> dict[str, Any]:
                 )
         curve_result = separation_curve_from_csv(separation_csv, audit_dir / "separation_curve.csv")
 
+    literature_comparison: list[dict[str, Any]] | None = None
+    if adhesion_result is not None and references and attrs:
+        computed_j_m2 = float(adhesion_result["rows"][0]["work_of_adhesion_j_m2"])
+        literature_comparison = compare_to_references(
+            computed_j_m2, references, attrs, quantity="work_of_adhesion"
+        )
+
     payload: dict[str, Any] = {
         "schema_version": 1,
         "output_directory": str(output),
@@ -756,6 +768,7 @@ def audit_adhesion(output_dir: str | Path) -> dict[str, Any]:
         "rigid_curve_points_total": len(curve_rows),
         "work_of_adhesion": adhesion_result,
         "separation_curve": curve_result,
+        "literature_comparison": literature_comparison,
     }
 
     markdown = [f"# Work-of-adhesion audit: {output.name}\n"]
@@ -785,6 +798,26 @@ def audit_adhesion(output_dir: str | Path) -> dict[str, Any]:
         )
     else:
         markdown.append("## Work of adhesion\n\nNot yet available: reference and both slabs must finish first.\n")
+    if literature_comparison:
+        markdown.append("## Literature comparison\n")
+        markdown.append("| Reference | Match | Literature (J/m^2) | Computed (J/m^2) | Delta | Within tol. |")
+        markdown.append("|---|---|---:|---:|---:|:--:|")
+        for item in literature_comparison:
+            selector = ", ".join(f"{key}={value}" for key, value in item["match"].items()) or "(any)"
+            markdown.append(
+                f"| {item.get('key', '')} | {selector} | {item['reference_j_per_m2']:.2f} | "
+                f"{item['computed_j_per_m2']:.3f} | {item['delta_j_per_m2']:+.3f} | "
+                f"{'yes' if item['within_tolerance'] else 'NO'} |"
+            )
+        markdown.append("")
+        citation = next((item.get("citation") for item in literature_comparison if item.get("citation")), None)
+        if citation:
+            markdown.append(f"> {citation}\n")
+    elif references and attrs and adhesion_result is not None:
+        markdown.append(
+            "## Literature comparison\n\nNo reference value matched this interface's "
+            f"attributes ({', '.join(f'{k}={v}' for k, v in attrs.items()) or 'none given'}).\n"
+        )
     if curve_result is not None:
         markdown.append(
             f"## Rigid-separation curve\n\n{len(finished_curve_rows)} of {len(curve_rows)} "

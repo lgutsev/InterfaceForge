@@ -14,7 +14,27 @@ VASP or MLIP jobs.
 iface validate interface-energy audit/interface_energy
 ```
 
-Writes `interface_energy.{json,csv,md}` to that directory.
+Writes `interface_energy.{json,csv,md}` to that directory. It reads
+`validation.interfaces` from the campaign for the per-interface stacking axis,
+`n_interfaces`, orientation/termination labels, and the `polar_termination`
+skip (see below).
+
+## Polar-terminated interfaces are skipped
+
+A `validation.interfaces` entry with `polar_termination: true` is excluded from
+the γ_int table and listed under `skipped` in the report. A TiN(111) or
+Si₃N₄(0001) slab stacks as alternating pure-element planes, so it is never an
+integer number of bulk formula units: matching the interface's Ti and Si counts
+to bulk TiN and Si₃N₄ leaves an unbalanced N (or Ti) excess that gets valued at
+the full bulk per-formula-unit energy, and the result is off by one to two
+orders of magnitude. The report's `nitrogen_balanced: false` flag catches this
+even without the metadata, but the flag still emits the (meaningless) number;
+`polar_termination` stops it at the source.
+
+For those interfaces use `iface validate adhesion` — the work of adhesion
+references the two relaxed slabs directly, so their non-stoichiometry cancels.
+A grand-canonical γ(μ_N, μ_Ti) treatment that would give a meaningful band for
+polar and oxidized interfaces is a planned follow-up.
 
 ## Method
 
@@ -30,9 +50,12 @@ Writes `interface_energy.{json,csv,md}` to that directory.
   dataset shares an identical INCAR apart from `TEBEG`/`TEEND` (same ENCUT,
   `IVDW`, POTCAR, k-density).
 - **Area** is `|a × b|` for the two lattice vectors perpendicular to the
-  stacking axis, taken as the longest cell vector unless `--stacking-axis` is
-  given.
-- **`n_interfaces`** defaults to 2 (a coherent periodic A/B/A stack).
+  stacking axis. The stacking axis comes from the matching
+  `validation.interfaces` entry (`stacking_axis:`), else `--stacking-axis`,
+  else the longest cell vector.
+- **`n_interfaces`** comes from the matching `validation.interfaces` entry
+  (`n_interfaces:`), else `--n-interfaces`, else 2 (a coherent periodic A/B/A
+  stack).
 - **Error bars** are block-average standard errors (`--blocks`, default 10)
   propagated through the excess and the division.
 

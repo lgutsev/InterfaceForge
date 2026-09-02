@@ -27,7 +27,7 @@ from .audit import READINESS_PROFILES, run_audit
 from .beef import plot_beef_campaign
 from .campaign import build_plan, prepare_campaign, submit_campaign
 from .committee import collect_committee, verify_committee_bundle
-from .config import load_campaign
+from .config import load_campaign, merge_interface_metadata, references_for
 from .data import collect_dataset
 from .errors import InterfaceForgeError, SafetyError
 from .exploration import generate_exploration
@@ -56,6 +56,12 @@ from .mlff_interfaces import (
 from .mlip_compare import comparison_status, finalize_comparison, prepare_comparison
 from .progress import mlip_progress
 from .progress import render as render_progress
+from .reference_import import (
+    activate_reference_profile,
+    expand_reference_profile,
+    list_reference_profiles,
+    load_reference_profile,
+)
 from .regfgw import compare_registry_selection, regfgw_status, run_regfgw_optimize
 from .report import build_report
 from .selection import select_from_csv
@@ -330,18 +336,26 @@ def cmd_validate(args: argparse.Namespace) -> int:
             group_columns=args.group,
         )
     elif args.validation == "adhesion":
-        payload = adhesion_from_csv(args.source, args.output)
+        references = None
+        if getattr(args, "campaign_file", None) and Path(args.campaign_file).is_file():
+            references = references_for(
+                load_campaign(args.campaign_file).validation.get("references"),
+                "work_of_adhesion",
+            )
+        payload = adhesion_from_csv(args.source, args.output, references=references)
     elif args.validation == "separation":
         payload = separation_curve_from_csv(args.source, args.output)
     elif args.validation == "interface-energy":
+        campaign = _campaign(args)
         payload = interface_energy(
-            _campaign(args).root,
+            campaign.root,
             dataset_root=args.dataset_root,
             predictions_root=args.predictions,
             equilibration_frames=args.equilibration_frames,
             n_interfaces=args.n_interfaces,
             blocks=args.blocks,
             stacking_axis=args.stacking_axis,
+            interface_metadata=campaign.validation.get("interfaces"),
         )
         payload["outputs"] = write_interface_energy_reports(payload, args.output)
     else:
@@ -967,7 +981,38 @@ def cmd_adhesion_prepare(args: argparse.Namespace) -> int:
 
 
 def cmd_adhesion_audit(args: argparse.Namespace) -> int:
-    _json(audit_adhesion(args.output_dir))
+    references = None
+    attrs = None
+    if args.campaign and Path(args.campaign).is_file():
+        validation = load_campaign(args.campaign).validation
+        references = references_for(validation.get("references"), "work_of_adhesion")
+        if args.interface:
+            attrs = merge_interface_metadata(validation.get("interfaces"), args.interface)
+    _json(audit_adhesion(args.output_dir, references=references, attrs=attrs))
+    return 0
+
+
+def cmd_reference(args: argparse.Namespace) -> int:
+    if args.reference_command == "list":
+        _json({"bundled": list_reference_profiles()})
+        return 0
+    if args.reference_command == "activate":
+        result = activate_reference_profile(args.campaign, args.name, write=args.write)
+        _json(result)
+        if not args.write and result["changed"]:
+            print(
+                "\n# dry run -- pass --write to apply the above to "
+                f"{result['campaign']}",
+                file=sys.stderr,
+            )
+        return 0
+    profile = load_reference_profile(args.name)
+    _json(
+        {
+            "profile": profile,
+            "validation_references": expand_reference_profile(profile),
+        }
+    )
     return 0
 
 
@@ -1301,6 +1346,14 @@ def build_parser() -> argparse.ArgumentParser:
     adhesion = validation.add_parser("adhesion")
     adhesion.add_argument("source")
     adhesion.add_argument("output")
+    adhesion.add_argument(
+        "-c",
+        "--campaign",
+        dest="campaign_file",
+        default=None,
+        help="campaign.yaml whose validation.references (quantity: work_of_adhesion) "
+        "are matched against each row's own columns (e.g. orientation, termination)",
+    )
     adhesion.set_defaults(func=cmd_validate)
     separation = validation.add_parser("separation")
     separation.add_argument("source")
@@ -1319,9 +1372,19 @@ def build_parser() -> argparse.ArgumentParser:
         "test-split frames alongside the DFT value",
     )
     interface_energy_parser.add_argument("--equilibration-frames", type=int, default=100)
-    interface_energy_parser.add_argument("--n-interfaces", type=int, default=2)
+    interface_energy_parser.add_argument(
+        "--n-interfaces",
+        type=int,
+        default=None,
+        help="override; the default per interface comes from validation.interfaces "
+        "in the campaign (else 2)",
+    )
     interface_energy_parser.add_argument("--blocks", type=int, default=10)
-    interface_energy_parser.add_argument("--stacking-axis", choices=("a", "b", "c"))
+    interface_energy_parser.add_argument(
+        "--stacking-axis",
+        choices=("a", "b", "c"),
+        help="override; the default per interface comes from validation.interfaces",
+    )
     interface_energy_parser.set_defaults(func=cmd_validate)
     stratified = validation.add_parser(
         "stratified",
@@ -1343,6 +1406,35 @@ def build_parser() -> argparse.ArgumentParser:
         "low-coordination cutoff (default: 10)",
     )
     stratified.set_defaults(func=cmd_validate)
+
+    reference = commands.add_parser(
+        "reference",
+        help="Bundled literature reference profiles (validation.reference_profiles)",
+    )
+    reference_commands = reference.add_subparsers(dest="reference_command", required=True)
+    reference_commands.add_parser("list", help="List the bundled reference profiles")
+    reference_show = reference_commands.add_parser(
+        "show",
+        help="Print a profile and the validation.references entries it expands to",
+    )
+    reference_show.add_argument(
+        "name", help="Bundled profile name, or a path to a profile YAML file"
+    )
+    reference_activate = reference_commands.add_parser(
+        "activate",
+        help="Add a profile to validation.reference_profiles in a campaign file "
+        "(dry run unless --write)",
+    )
+    reference_activate.add_argument(
+        "name", help="Bundled profile name, or a path to a profile YAML file"
+    )
+    add_campaign_option(reference_activate)
+    reference_activate.add_argument(
+        "--write",
+        action="store_true",
+        help="Apply the edit; without it the resulting file is only printed",
+    )
+    reference.set_defaults(func=cmd_reference)
 
     report = commands.add_parser("report", help="Build a self-contained HTML dashboard")
     add_campaign_option(report)
@@ -2161,6 +2253,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     adhesion_audit.add_argument(
         "output_dir", help="Directory previously created by 'adhesion prepare'"
+    )
+    adhesion_audit.add_argument(
+        "-c",
+        "--campaign",
+        default=None,
+        help="campaign.yaml providing validation.references (quantity: work_of_adhesion) "
+        "for a literature comparison of the computed work of adhesion",
+    )
+    adhesion_audit.add_argument(
+        "--interface",
+        help="interface leaf / id, fnmatched against validation.interfaces; its "
+        "orientation/termination select which reference values apply",
     )
     adhesion_audit.set_defaults(func=cmd_adhesion_audit)
 

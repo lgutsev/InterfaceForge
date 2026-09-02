@@ -694,6 +694,29 @@ replacement:
 - **`iface validate separation energies.csv results.csv`** expects columns
   `model`, `distance_a`, `energy_ev`, and optional `area_a2`.
 
+### Literature comparison
+
+Pass `-c campaign.yaml` to either `iface vasp adhesion audit` or
+`iface validate adhesion` to check the computed work of adhesion against the
+campaign's `validation.references` (and any `reference_profiles`) entries of
+`quantity: work_of_adhesion`:
+
+```bash
+iface vasp adhesion audit path/to/interface_run_adhesion_dft \
+  -c campaign.yaml --interface "interface/450K/Real/Ti_Term/SiN-TiN-Ti-term"
+```
+
+`--interface` is fnmatched against `validation.interfaces`; its
+`orientation`/`termination` select which reference values apply. `iface
+validate adhesion` instead matches each CSV row against the references using
+that row's own columns (add an `orientation` or `termination` column). The
+audit's JSON gets a `literature_comparison` list and its markdown a table with
+the reference value, the computed value, `Δ`, and a within-tolerance flag; the
+CSV path adds `literature_key` / `literature_j_per_m2` /
+`literature_delta_j_per_m2` / `literature_within_tolerance` columns. The
+bundled Sharifi et al. (2026) Si₃N₄/TiN profile is `reference_profiles:
+[sharifi2026]` — see `iface reference show sharifi2026`.
+
 ## Audit
 
 `iface audit` interprets train, refit and run modes differently. It parses

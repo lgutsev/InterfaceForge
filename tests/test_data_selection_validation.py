@@ -23,6 +23,8 @@ from interfaceforge.data import (
 from interfaceforge.selection import select_indices
 from interfaceforge.validation import (
     EV_A2_TO_J_M2,
+    adhesion_from_csv,
+    compare_to_references,
     parity_from_csv,
     stratified_parity_from_csv,
     work_of_adhesion,
@@ -204,6 +206,84 @@ class ValidationTests(unittest.TestCase):
         ev_a2, j_m2 = work_of_adhesion(-12, -5, -5, 2)
         self.assertAlmostEqual(ev_a2, 1.0)
         self.assertAlmostEqual(j_m2, EV_A2_TO_J_M2)
+
+    def test_compare_to_references_matches_on_named_keys_only(self) -> None:
+        references = [
+            {
+                "key": "sharifi2026",
+                "quantity": "work_of_adhesion",
+                "tolerance_j_per_m2": 0.5,
+                "values": [
+                    {"match": {"termination": "N"}, "value_j_per_m2": 1.24},
+                    {"match": {"termination": "Ti"}, "value_j_per_m2": 3.28},
+                ],
+            }
+        ]
+        hits = compare_to_references(
+            1.30, references, {"termination": "n", "family": "Ideal"}, quantity="work_of_adhesion"
+        )
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["reference_j_per_m2"], 1.24)
+        self.assertAlmostEqual(hits[0]["delta_j_per_m2"], 0.06)
+        self.assertTrue(hits[0]["within_tolerance"])
+        # a different quantity never matches
+        self.assertEqual(
+            compare_to_references(1.30, references, {"termination": "N"}, quantity="surface_energy"),
+            [],
+        )
+        # an unmatched attribute yields nothing
+        self.assertEqual(
+            compare_to_references(1.30, references, {"termination": "Si"}, quantity="work_of_adhesion"),
+            [],
+        )
+
+    def test_adhesion_from_csv_attaches_literature_comparison(self) -> None:
+        references = [
+            {
+                "key": "sharifi2026",
+                "quantity": "work_of_adhesion",
+                "tolerance_j_per_m2": 0.5,
+                "values": [{"match": {"termination": "Ti"}, "value_j_per_m2": 3.28}],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "energies.csv"
+            with source.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "termination",
+                        "area_a2",
+                        "interface_energy_ev",
+                        "slab_a_energy_ev",
+                        "slab_b_energy_ev",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "termination": "Ti",
+                        "area_a2": 100.0,
+                        "interface_energy_ev": -220.0,
+                        "slab_a_energy_ev": -100.0,
+                        "slab_b_energy_ev": -100.0,
+                    }
+                )
+            payload = adhesion_from_csv(source, root / "out.csv", references=references)
+            row = payload["rows"][0]
+            # WoA = (-100 + -100 - -220) / 100 = 0.2 eV/A^2 -> 0.2 * conv J/m^2
+            self.assertAlmostEqual(row["work_of_adhesion_j_m2"], 0.2 * EV_A2_TO_J_M2)
+            self.assertEqual(row["literature_key"], "sharifi2026")
+            self.assertEqual(row["literature_j_per_m2"], 3.28)
+            self.assertAlmostEqual(
+                row["literature_delta_j_per_m2"], 0.2 * EV_A2_TO_J_M2 - 3.28
+            )
+            self.assertTrue(row["literature_within_tolerance"])  # |delta| ~ 0.076 < 0.5
+            self.assertEqual(len(payload["literature_comparisons"]), 1)
+
+            out_rows = list(csv.DictReader((root / "out.csv").open(encoding="utf-8")))
+            self.assertEqual(out_rows[0]["literature_key"], "sharifi2026")
 
     def test_constant_parity_writes_strict_json(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

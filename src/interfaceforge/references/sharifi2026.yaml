@@ -1,0 +1,65 @@
+# Literature reference profile: Si3N4 / TiN interfacial adhesion.
+#
+# H. Sharifi, A. Sami, J. Moore, C. D. Wick,
+# "Optimization of Si3N4 interfacial adhesion with nitride and carbide coatings",
+# Materials & Design 266 (2026) 116095.  https://doi.org/10.1016/j.matdes.2026.116095
+#
+# A campaign opts in with:
+#   validation:
+#     reference_profiles: [sharifi2026]
+#
+# `load_campaign` expands this into validation.references entries; a computed
+# work of adhesion is then checked against the matching value(s) whenever the
+# interface metadata carries the same orientation / termination keys.
+schema_version: 1
+key: sharifi2026
+doi: "10.1016/j.matdes.2026.116095"
+citation: >-
+  H. Sharifi, A. Sami, J. Moore, C. D. Wick, Optimization of Si3N4 interfacial
+  adhesion with nitride and carbide coatings, Materials & Design 266 (2026) 116095.
+
+# The paper's DFT protocol. It differs from a finite-temperature MD campaign in
+# ways that matter when comparing absolute J/m^2 values: no dispersion term,
+# a lower plane-wave cutoff, and 0 K minimized geometries.
+method:
+  code: vasp
+  functional: PBE
+  dispersion: none
+  encut_ev: 400
+  temperature_k: 0
+  geometry: vacuum-slab            # one interface per cell, vacuum >= 15 A along z
+  k_mesh_interface: "2x2x1"
+  k_mesh_bulk: "2x2x4"
+  quantity_definition: >-
+    Work of adhesion WoA = (E1 + E2 - E_total) / A, with E1/E2 the relaxed
+    isolated-slab energies and E_total the combined interface energy (vacuum
+    cleave). This is `iface validate adhesion`, not the bulk-referenced
+    gamma_int of `iface validate interface-energy`.
+
+references:
+  - quantity: work_of_adhesion
+    tolerance_j_per_m2: 0.5
+    note: >-
+      Table 1. Elastic strain energy per unit area (J/m^2): (111)/N 0.06,
+      (111)/Ti 0.04, (011) 0.37, (100) 1.17. Table 3 cross-checks the (011)
+      value against Ref. [64] (1.56 J/m^2).
+    values:
+      - match: {orientation: "Si3N4(0001)/TiN(111)", termination: N}
+        value_j_per_m2: 1.24
+      - match: {orientation: "Si3N4(0001)/TiN(111)", termination: Ti}
+        value_j_per_m2: 3.28
+      - match: {orientation: "Si3N4(0001)/TiN(011)"}
+        value_j_per_m2: 1.51
+      - match: {orientation: "Si3N4(0001)/TiN(100)"}
+        value_j_per_m2: 0.43
+
+  - quantity: surface_energy
+    tolerance_j_per_m2: 0.3
+    note: "Table 2. Relaxed surface energies."
+    values:
+      - match: {surface: "Si3N4(0001)"}
+        value_j_per_m2: 2.60
+      - match: {surface: "TiN(100)"}
+        value_j_per_m2: 1.30
+      - match: {surface: "TiN(011)"}
+        value_j_per_m2: 2.51

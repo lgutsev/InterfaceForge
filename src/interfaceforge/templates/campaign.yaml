@@ -151,3 +151,30 @@ validation:
   separation_curve: true
   rdf: true
   coordination: true
+
+  # Per-interface structural facts the property tools cannot infer from the
+  # dataset. `match` is an fnmatch pattern against the interface leaf / system
+  # id; every matching entry is merged (earlier entries win).
+  #
+  # interfaces:
+  #   - match: "interface/*/*/N_Term/*"
+  #     stacking_axis: c            # a|b|c; sets the interface-energy area plane
+  #     n_interfaces: 2             # equivalent interfaces per periodic cell
+  #     orientation: "Si3N4(0001)/TiN(111)"
+  #     termination: N              # selects which reference values apply
+  #     polar_termination: true     # (111)/(0001) alternate pure-element planes;
+  #                                 # `iface validate interface-energy` then skips
+  #                                 # this leaf -- use `iface validate adhesion`
+  #
+  # Literature cross-checks. `reference_profiles` pulls bundled profiles
+  # (`iface reference list`); `references` adds one-off values inline. A
+  # computed work of adhesion / surface energy is compared to every value whose
+  # `match` keys all appear in the interface metadata.
+  #
+  # reference_profiles: [sharifi2026]
+  # references:
+  #   - key: my_dft
+  #     quantity: work_of_adhesion
+  #     tolerance_j_per_m2: 0.4
+  #     values:
+  #       - {match: {termination: Ti}, value_j_per_m2: 3.10}

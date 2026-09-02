@@ -18,7 +18,53 @@ file, which makes a campaign movable between a workstation and a cluster.
 - `models`: MACE and DeePMD generation settings. `models.mace.roi` enables the
   derived-data and loss adapter described in the [MACE-ROI guide](mace-roi.md).
 - `exploration`: temperatures, strains and replicas.
-- `validation`: intended downstream property checks.
+- `validation`: intended downstream property checks, plus the structured
+  `interfaces` / `references` / `reference_profiles` blocks (below).
+
+## `validation` metadata
+
+The property tools (`iface validate interface-energy`, `iface vasp adhesion
+audit`) read three optional keys under `validation`:
+
+```yaml
+validation:
+  interfaces:
+    - match: "interface/*/*/N_Term/*"   # fnmatch against the leaf / system id
+      stacking_axis: c                  # area plane for interface-energy
+      n_interfaces: 2                    # equivalent interfaces per periodic cell
+      orientation: "Si3N4(0001)/TiN(111)"
+      termination: N
+      polar_termination: true            # skip in interface-energy (see below)
+  reference_profiles: [sharifi2026]      # bundled; `iface reference list`
+  references:                            # or one-off values inline
+    - key: in_house
+      quantity: work_of_adhesion
+      tolerance_j_per_m2: 0.4
+      values:
+        - {match: {termination: Ti}, value_j_per_m2: 3.10}
+```
+
+- **`interfaces`** entries are merged for each leaf (earlier entries win on a
+  key). `stacking_axis` and `n_interfaces` become the defaults for
+  `iface validate interface-energy` (an explicit `--stacking-axis` /
+  `--n-interfaces` still wins). `polar_termination: true` makes that command
+  skip the leaf — a (111)/(0001) polar-terminated slab is not an integer count
+  of bulk formula units, so the bulk-referenced excess is undefined; use
+  `iface validate adhesion` instead.
+- **`reference_profiles`** names bundled literature profiles that
+  `load_campaign` expands into `references`. `iface reference list` shows what
+  is available; `iface reference show <name>` prints the expansion; `iface
+  reference activate <name> -c campaign.yaml --write` splices the name into
+  this list in place (comment-preserving, dry-run without `--write`).
+- **`references`** are literature values for `work_of_adhesion`,
+  `interface_energy`, or `surface_energy`. A computed value is compared to
+  every entry whose `match` keys all appear (case-insensitively) in the
+  interface metadata or the audited CSV row, and the delta plus a
+  within-tolerance flag are written into the report. Hand-written entries win
+  over a profile entry with the same `(key, quantity)`.
+
+See [interface-energy.md](interface-energy.md) and the work-of-adhesion section
+of [vasp.md](vasp.md).
 
 The machine-readable contract is
 [`schemas/campaign.schema.json`](../schemas/campaign.schema.json).

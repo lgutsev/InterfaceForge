@@ -323,6 +323,37 @@ class AdhesionAuditTests(unittest.TestCase):
             with self.assertRaises(SafetyError):
                 audit_adhesion(Path(temporary) / "never_prepared")
 
+    def test_audit_compares_work_of_adhesion_to_literature_references(self) -> None:
+        references = [
+            {
+                "key": "sharifi2026",
+                "quantity": "work_of_adhesion",
+                "citation": "Sharifi et al., Mater. Des. 266 (2026) 116095",
+                "tolerance_j_per_m2": 0.5,
+                "values": [{"match": {"termination": "N"}, "value_j_per_m2": 1.24}],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+            (source / "OUTCAR").write_text(_fake_outcar(-200.0), encoding="utf-8")
+            manifest = prepare_adhesion(source, method="dft", distances=[])
+            output = Path(manifest["output_directory"])
+            (output / "slabs" / "lower" / "OUTCAR").write_text(_fake_outcar(-90.0), encoding="utf-8")
+            (output / "slabs" / "upper" / "OUTCAR").write_text(_fake_outcar(-95.0), encoding="utf-8")
+
+            result = audit_adhesion(
+                output, references=references, attrs={"termination": "N"}
+            )
+
+            comparison = result["literature_comparison"]
+            self.assertEqual(len(comparison), 1)
+            self.assertEqual(comparison[0]["key"], "sharifi2026")
+            self.assertEqual(comparison[0]["reference_j_per_m2"], 1.24)
+            computed = result["work_of_adhesion"]["rows"][0]["work_of_adhesion_j_m2"]
+            self.assertAlmostEqual(comparison[0]["computed_j_per_m2"], computed)
+            self.assertIn("Literature comparison", Path(result["audit_markdown"]).read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

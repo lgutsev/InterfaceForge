@@ -5,8 +5,9 @@ from __future__ import annotations
 import copy
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ from .errors import ConfigurationError, SafetyError
 
 SYSTEM_KINDS = {"bulk", "surface", "interface", "molecule", "adsorbate", "defect", "other"}
 SPLITS = ("train", "valid", "test")
+_STACKING_AXES = {"a", "b", "c"}
+_REFERENCE_QUANTITIES = {"work_of_adhesion", "interface_energy", "surface_energy"}
 # A system id may be a single segment or several "/"-separated segments (so
 # generated run directories can mirror a source tree's own nesting, e.g.
 # "Real/N_Term/SiN_TiN_N-term"). Every segment must independently start with
@@ -528,6 +531,198 @@ def _validate_active_learning(active_learning: dict[str, Any], models: dict[str,
         raise ConfigurationError("AI2-kit committee seeds must be unique")
 
 
+def _normalize_interface_metadata(interfaces: Any) -> list[dict[str, Any]]:
+    if not isinstance(interfaces, list):
+        raise ConfigurationError("validation.interfaces must be a list")
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(interfaces):
+        entry = _mapping(item, f"validation.interfaces[{index}]")
+        pattern = str(entry.get("match", "")).strip()
+        if not pattern:
+            raise ConfigurationError(
+                f"validation.interfaces[{index}].match is required "
+                "(an fnmatch pattern against the interface leaf / system id)"
+            )
+        clean: dict[str, Any] = {"match": pattern}
+        axis = entry.get("stacking_axis")
+        if axis is not None:
+            axis = str(axis).strip().lower()
+            if axis not in _STACKING_AXES:
+                raise ConfigurationError(
+                    f"validation.interfaces[{index}].stacking_axis must be a, b, or c"
+                )
+            clean["stacking_axis"] = axis
+        if entry.get("n_interfaces") is not None:
+            try:
+                n_interfaces = int(entry["n_interfaces"])
+            except (TypeError, ValueError) as exc:
+                raise ConfigurationError(
+                    f"validation.interfaces[{index}].n_interfaces must be an integer"
+                ) from exc
+            if n_interfaces < 1:
+                raise ConfigurationError(
+                    f"validation.interfaces[{index}].n_interfaces must be positive"
+                )
+            clean["n_interfaces"] = n_interfaces
+        if "polar_termination" in entry:
+            if not isinstance(entry["polar_termination"], bool):
+                raise ConfigurationError(
+                    f"validation.interfaces[{index}].polar_termination must be a boolean"
+                )
+            clean["polar_termination"] = entry["polar_termination"]
+        for key in ("orientation", "termination", "family", "surface"):
+            if entry.get(key) is not None:
+                clean[key] = str(entry[key]).strip()
+        components = entry.get("components")
+        if components is not None:
+            if not isinstance(components, list):
+                raise ConfigurationError(
+                    f"validation.interfaces[{index}].components must be a list"
+                )
+            clean["components"] = [
+                dict(_mapping(component, f"validation.interfaces[{index}].components[{c}]"))
+                for c, component in enumerate(components)
+            ]
+        normalized.append(clean)
+    return normalized
+
+
+def _normalize_reference_entry(entry: Mapping[str, Any], index: int) -> dict[str, Any]:
+    where = f"validation.references[{index}]"
+    key = str(entry.get("key", "")).strip()
+    if not key:
+        raise ConfigurationError(f"{where}.key is required")
+    quantity = str(entry.get("quantity", "")).strip().lower()
+    if quantity not in _REFERENCE_QUANTITIES:
+        raise ConfigurationError(
+            f"{where}.quantity must be one of {sorted(_REFERENCE_QUANTITIES)}"
+        )
+    values = entry.get("values")
+    if not isinstance(values, list) or not values:
+        raise ConfigurationError(f"{where}.values must be a non-empty list")
+    clean_values: list[dict[str, Any]] = []
+    for v_index, value in enumerate(values):
+        value_entry = _mapping(value, f"{where}.values[{v_index}]")
+        try:
+            magnitude = float(value_entry["value_j_per_m2"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"{where}.values[{v_index}].value_j_per_m2 must be a number"
+            ) from exc
+        if not math.isfinite(magnitude):
+            raise ConfigurationError(
+                f"{where}.values[{v_index}].value_j_per_m2 must be finite"
+            )
+        selector = _mapping(value_entry.get("match"), f"{where}.values[{v_index}].match")
+        clean_value: dict[str, Any] = {
+            "match": {str(k): str(val).strip() for k, val in selector.items()},
+            "value_j_per_m2": magnitude,
+        }
+        if value_entry.get("note") is not None:
+            clean_value["note"] = str(value_entry["note"]).strip()
+        clean_values.append(clean_value)
+    tolerance = entry.get("tolerance_j_per_m2", 0.5)
+    try:
+        tolerance = float(tolerance)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(f"{where}.tolerance_j_per_m2 must be a number") from exc
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ConfigurationError(
+            f"{where}.tolerance_j_per_m2 must be finite and non-negative"
+        )
+    clean: dict[str, Any] = {
+        "key": key,
+        "quantity": quantity,
+        "tolerance_j_per_m2": tolerance,
+        "values": clean_values,
+    }
+    for extra in ("doi", "citation", "note"):
+        if entry.get(extra) is not None:
+            clean[extra] = str(entry[extra]).strip()
+    if entry.get("method") is not None:
+        clean["method"] = dict(_mapping(entry.get("method"), f"{where}.method"))
+    return clean
+
+
+def _validate_validation(validation: dict[str, Any]) -> None:
+    """Validate the structured ``validation.interfaces`` / ``validation.references``
+    blocks and expand ``validation.reference_profiles``.
+
+    Legacy boolean keys (``parity``, ``work_of_adhesion``, ...) are untouched --
+    they predate this and are still only advisory.
+    """
+
+    if validation.get("interfaces") is not None:
+        validation["interfaces"] = _normalize_interface_metadata(validation["interfaces"])
+
+    profile_entries: list[dict[str, Any]] = []
+    profiles = validation.get("reference_profiles")
+    if profiles is not None:
+        if not isinstance(profiles, list) or any(not str(name).strip() for name in profiles):
+            raise ConfigurationError(
+                "validation.reference_profiles must be a list of profile names"
+            )
+        names = [str(name).strip() for name in profiles]
+        from .reference_import import resolve_reference_profiles
+
+        profile_entries = resolve_reference_profiles(names)
+        validation["reference_profiles"] = names
+
+    hand_written = validation.get("references")
+    if hand_written is None:
+        hand_written = []
+    if not isinstance(hand_written, list):
+        raise ConfigurationError("validation.references must be a list")
+
+    if not profile_entries and not hand_written:
+        return
+
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
+    for entry in [*profile_entries, *hand_written]:
+        mapping = _mapping(entry, "validation.references[]")
+        ident = (
+            str(mapping.get("key", "")).strip(),
+            str(mapping.get("quantity", "")).strip().lower(),
+        )
+        if ident not in merged:
+            order.append(ident)
+        merged[ident] = dict(mapping)  # hand-written entries come last and win
+    validation["references"] = [
+        _normalize_reference_entry(merged[ident], index)
+        for index, ident in enumerate(order)
+    ]
+
+
+def merge_interface_metadata(
+    entries: Sequence[Mapping[str, Any]] | None, leaf: str
+) -> dict[str, Any]:
+    """Merge every ``validation.interfaces`` entry whose fnmatch ``match``
+    matches ``leaf``. Earlier entries win on a key conflict; ``{}`` if none match.
+    """
+
+    merged: dict[str, Any] = {}
+    for entry in entries or []:
+        pattern = entry.get("match")
+        if pattern and fnmatch(leaf, str(pattern)):
+            for key, value in entry.items():
+                if key != "match":
+                    merged.setdefault(key, value)
+    return merged
+
+
+def references_for(
+    references: Sequence[Mapping[str, Any]] | None, quantity: str
+) -> list[dict[str, Any]]:
+    """The normalized ``validation.references`` entries for one quantity."""
+
+    return [
+        dict(entry)
+        for entry in references or []
+        if str(entry.get("quantity", "")).strip().lower() == quantity
+    ]
+
+
 def load_campaign(path: str | Path) -> Campaign:
     """Load and validate a campaign YAML file."""
 
@@ -616,6 +811,7 @@ def load_campaign(path: str | Path) -> Campaign:
     _validate_dataset(dataset)
     _validate_models(models)
     _validate_active_learning(active_learning, models)
+    _validate_validation(validation)
 
     return Campaign(
         path=config_path,

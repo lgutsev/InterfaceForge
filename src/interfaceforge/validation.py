@@ -6,7 +6,7 @@ import csv
 import json
 import math
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +78,54 @@ def parity_from_csv(
     return payload
 
 
+def compare_to_references(
+    computed_j_per_m2: float,
+    references: Sequence[dict[str, Any]] | None,
+    attrs: Mapping[str, Any],
+    *,
+    quantity: str,
+) -> list[dict[str, Any]]:
+    """Match ``attrs`` against each normalized ``validation.references`` entry's
+    value selectors and return a per-match comparison against ``computed_j_per_m2``.
+
+    A selector matches when every key it names is present in ``attrs`` with an
+    equal value (string comparison, case-insensitive). An empty selector matches
+    unconditionally.
+    """
+
+    lowered = {str(key).lower(): str(value).strip().lower() for key, value in attrs.items()}
+    out: list[dict[str, Any]] = []
+    for reference in references or []:
+        if str(reference.get("quantity", "")).strip().lower() != quantity:
+            continue
+        tolerance = float(reference.get("tolerance_j_per_m2", 0.5))
+        for value in reference.get("values", []):
+            selector = value.get("match", {}) or {}
+            if any(
+                lowered.get(str(key).lower()) != str(want).strip().lower()
+                for key, want in selector.items()
+            ):
+                continue
+            magnitude = float(value["value_j_per_m2"])
+            delta = computed_j_per_m2 - magnitude
+            out.append(
+                {
+                    "key": reference.get("key"),
+                    "citation": reference.get("citation"),
+                    "doi": reference.get("doi"),
+                    "method": reference.get("method"),
+                    "quantity": quantity,
+                    "match": dict(selector),
+                    "reference_j_per_m2": magnitude,
+                    "computed_j_per_m2": computed_j_per_m2,
+                    "delta_j_per_m2": delta,
+                    "tolerance_j_per_m2": tolerance,
+                    "within_tolerance": abs(delta) <= tolerance,
+                }
+            )
+    return out
+
+
 def work_of_adhesion(
     interface_energy_ev: float,
     slab_a_energy_ev: float,
@@ -90,14 +138,26 @@ def work_of_adhesion(
     return value, value * EV_A2_TO_J_M2
 
 
-def adhesion_from_csv(source: str | Path, output: str | Path) -> dict[str, Any]:
-    """Calculate adhesion and propagate independent energy uncertainties."""
+def adhesion_from_csv(
+    source: str | Path,
+    output: str | Path,
+    *,
+    references: Sequence[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Calculate adhesion and propagate independent energy uncertainties.
+
+    When ``references`` (normalized ``validation.references`` entries for the
+    ``work_of_adhesion`` quantity) is given, every row is also matched against
+    them using its own cells as attributes (e.g. an ``orientation`` or
+    ``termination`` column), and the closest literature value is attached.
+    """
 
     input_path = Path(source).resolve()
     output_path = Path(output).resolve()
     with input_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     results: list[dict[str, Any]] = []
+    comparisons: list[dict[str, Any]] = []
     for row in rows:
         area = float(row["area_a2"])
         ev_a2, j_m2 = work_of_adhesion(
@@ -115,26 +175,38 @@ def adhesion_from_csv(source: str | Path, output: str | Path) -> dict[str, Any]:
             )
         ]
         sigma_ev_a2 = math.sqrt(sum(value**2 for value in sigma_values)) / area
-        results.append(
-            {
-                **row,
-                "work_of_adhesion_ev_a2": ev_a2,
-                "work_of_adhesion_j_m2": j_m2,
-                "work_of_adhesion_sigma_ev_a2": sigma_ev_a2,
-                "work_of_adhesion_sigma_j_m2": sigma_ev_a2 * EV_A2_TO_J_M2,
-            }
+        result = {
+            **row,
+            "work_of_adhesion_ev_a2": ev_a2,
+            "work_of_adhesion_j_m2": j_m2,
+            "work_of_adhesion_sigma_ev_a2": sigma_ev_a2,
+            "work_of_adhesion_sigma_j_m2": sigma_ev_a2 * EV_A2_TO_J_M2,
+        }
+        row_comparisons = compare_to_references(
+            j_m2, references, row, quantity="work_of_adhesion"
         )
+        if row_comparisons:
+            best = min(row_comparisons, key=lambda item: abs(item["delta_j_per_m2"]))
+            result["literature_key"] = best["key"]
+            result["literature_j_per_m2"] = best["reference_j_per_m2"]
+            result["literature_delta_j_per_m2"] = best["delta_j_per_m2"]
+            result["literature_within_tolerance"] = best["within_tolerance"]
+            comparisons.extend(row_comparisons)
+        results.append(result)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    fields = list(dict.fromkeys(key for row in results for key in row))
     with output_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(results[0]))
+        writer = csv.DictWriter(handle, fieldnames=fields, restval="")
         writer.writeheader()
         writer.writerows(results)
-    payload = {
+    payload: dict[str, Any] = {
         "source": str(input_path),
         "output": str(output_path),
         "conversion_ev_a2_to_j_m2": EV_A2_TO_J_M2,
         "rows": results,
     }
+    if references:
+        payload["literature_comparisons"] = comparisons
     output_path.with_suffix(".json").write_text(
         json.dumps(payload, indent=2) + "\n", encoding="utf-8"
     )

@@ -96,3 +96,19 @@ validation:
   separation_curve: true
   rdf: true
   coordination: true
+
+  # Structural facts for the property tools, plus a literature cross-check.
+  interfaces:
+    - match: "*interface_ab*"
+      stacking_axis: c
+      n_interfaces: 2
+      orientation: "phase_a/phase_b(primary)"
+      termination: primary
+
+  reference_profiles: [sharifi2026]
+  references:
+    - key: in_house
+      quantity: work_of_adhesion
+      tolerance_j_per_m2: 0.5
+      values:
+        - {match: {termination: primary}, value_j_per_m2: 1.9}

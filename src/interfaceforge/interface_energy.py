@@ -23,12 +23,14 @@ import csv
 import json
 import math
 import re
+from collections.abc import Mapping, Sequence
 from math import gcd
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from .config import merge_interface_metadata
 from .errors import SafetyError
 
 EV_A2_TO_J_M2 = 16.02176634
@@ -230,17 +232,30 @@ def interface_energy(
     dataset_root: str | Path | None = None,
     predictions_root: str | Path | None = None,
     equilibration_frames: int = 100,
-    n_interfaces: int = 2,
+    n_interfaces: int | None = None,
     blocks: int = 10,
     stacking_axis: str | None = None,
+    interface_metadata: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Bulk-referenced interfacial energy for every unoxidized, non-polar interface leaf.
+
+    ``interface_metadata`` is the campaign's normalized ``validation.interfaces``
+    list. For each leaf its matching entry supplies ``stacking_axis`` and
+    ``n_interfaces`` (an explicit ``stacking_axis``/``n_interfaces`` argument
+    still wins), records ``orientation``/``termination`` on the row, and -- when
+    ``polar_termination: true`` -- skips the leaf entirely: a (111)/(0001)
+    polar-terminated slab is not an integer number of bulk formula units, so the
+    bulk-referenced excess is undefined. Run ``iface validate adhesion`` for
+    those instead.
+    """
+
     campaign = Path(campaign_root).expanduser().resolve()
     deepmd_root = (
         Path(dataset_root).expanduser().resolve()
         if dataset_root
         else campaign / "datasets" / "canonical" / "deepmd"
     )
-    if n_interfaces < 1:
+    if n_interfaces is not None and n_interfaces < 1:
         raise SafetyError("n_interfaces must be a positive integer")
     leaves = _leaf_systems(deepmd_root)
     predictions = Path(predictions_root).expanduser().resolve() if predictions_root else None
@@ -260,25 +275,52 @@ def interface_energy(
         return None
 
     rows: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
     for leaf, systems in sorted(leaves.items()):
         if not leaf.startswith("interface/"):
             continue
         composition = _composition(systems[0])
+        meta = merge_interface_metadata(interface_metadata, leaf)
         if composition.get("O", 0):
-            continue  # v1: bulk-referenced, unoxidized interfaces only
+            skipped.append(
+                {
+                    "leaf": leaf,
+                    "reason": "oxidized interface; excess oxygen has no bulk phase to "
+                    "absorb it -- needs an oxygen chemical-potential treatment (planned)",
+                }
+            )
+            continue
+        if meta.get("polar_termination"):
+            skipped.append(
+                {
+                    "leaf": leaf,
+                    "reason": "polar termination (validation.interfaces); a (111)/(0001) "
+                    "slab is not an integer count of bulk formula units, so the "
+                    "bulk-referenced excess is undefined -- run 'iface validate adhesion'",
+                }
+            )
+            continue
         match = _INTERFACE_T.search(leaf)
         temperature = int(match.group(1)) if match else 0
         n_ti, n_si, n_n = composition.get("Ti", 0), composition.get("Si", 0), composition.get("N", 0)
+        effective_n_interfaces = (
+            n_interfaces if n_interfaces is not None else int(meta.get("n_interfaces", 2))
+        )
+        effective_axis = stacking_axis or meta.get("stacking_axis")
 
         tin_leaf = _match_bulk("Ti", temperature)
         sin_leaf = _match_bulk("Si", temperature)
         row: dict[str, Any] = {
             "leaf": leaf,
             "temperature_K": temperature,
-            "family": "Ideal" if "ideal" in leaf.lower() else ("Real" if "real" in leaf.lower() else "NA"),
-            "termination": "Ti_Term" if "ti_term" in leaf.lower() else ("N_Term" if "n_term" in leaf.lower() else "NA"),
+            "family": meta.get("family")
+            or ("Ideal" if "ideal" in leaf.lower() else ("Real" if "real" in leaf.lower() else "NA")),
+            "termination": meta.get("termination")
+            or ("Ti_Term" if "ti_term" in leaf.lower() else ("N_Term" if "n_term" in leaf.lower() else "NA")),
             "composition": composition,
         }
+        if meta.get("orientation"):
+            row["orientation"] = meta["orientation"]
         if not tin_leaf or not sin_leaf:
             row["status"] = f"missing bulk reference at {temperature} K"
             rows.append(row)
@@ -291,8 +333,8 @@ def interface_energy(
 
         kept = np.asarray([e for frame, e in _energies_by_source_frame(systems) if frame >= equilibration_frames])
         e_int, e_int_sem = _block_stats(kept, blocks)
-        area, stack = _plane_area(systems[0], stacking_axis)
-        denom = n_interfaces * area
+        area, stack = _plane_area(systems[0], effective_axis)
+        denom = effective_n_interfaces * area
 
         excess = e_int - x * tin["energy_per_fu_ev"] - y * sin["energy_per_fu_ev"]
         gamma_ev_a2 = excess / denom
@@ -313,7 +355,7 @@ def interface_energy(
                 "nitrogen_balanced": abs(predicted_n - n_n) < 0.5,
                 "stacking_axis": stack,
                 "interface_area_ang2": area,
-                "n_interfaces": n_interfaces,
+                "n_interfaces": effective_n_interfaces,
                 "frames_used": int(kept.size),
                 "interface_energy_ev": e_int,
                 "gamma_int_ev_per_ang2": gamma_ev_a2,
@@ -335,6 +377,7 @@ def interface_energy(
         "predictions_root": str(predictions) if predictions else None,
         "equilibration_frames": equilibration_frames,
         "n_interfaces": n_interfaces,
+        "n_interfaces_source": "explicit" if n_interfaces is not None else "campaign-metadata",
         "block_count": blocks,
         "conversion_ev_a2_to_j_m2": EV_A2_TO_J_M2,
         "reference_state": "MD-averaged bulk DFT energy per formula unit (potential energy, no vibrational entropy)",
@@ -346,6 +389,7 @@ def interface_energy(
         ),
         "bulk_references": bulk_refs,
         "interfaces": rows,
+        "skipped": skipped,
     }
 
 
@@ -354,6 +398,7 @@ _CSV_FIELDS = (
     "temperature_K",
     "family",
     "termination",
+    "orientation",
     "tin_reference",
     "sin_reference",
     "tin_formula_units",
@@ -391,11 +436,16 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
             writer.writerow(flat)
 
     has_mlip = any((row.get("mlip") or {}).get("status") == "OK" for row in payload["interfaces"])
+    interfaces_per_cell = (
+        payload["n_interfaces"]
+        if payload["n_interfaces"] is not None
+        else "per interface, from validation.interfaces (else 2)"
+    )
     lines = [
         "# Bulk-referenced interfacial energy",
         "",
         f"Reference: {payload['reference_state']}.",
-        f"Equilibration frames dropped: {payload['equilibration_frames']}; interfaces per cell: {payload['n_interfaces']}.",
+        f"Equilibration frames dropped: {payload['equilibration_frames']}; interfaces per cell: {interfaces_per_cell}.",
         "",
     ]
     if has_mlip:
@@ -433,12 +483,18 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
             f"{row['gamma_int_sem_j_per_m2']:.3f} | {'yes' if row['nitrogen_balanced'] else 'NO'} | "
             f"{row['interface_area_ang2']:.1f} |"
         )
+    if payload.get("skipped"):
+        lines += ["", "## Skipped interfaces", ""]
+        for item in payload["skipped"]:
+            lines.append(f"- `{item['leaf']}` — {item['reason']}")
     lines += [
         "",
         "γ_int here is an approximation to the interface free energy: it is the MD-averaged",
         "potential-energy excess over the bulk phases, without the vibrational-entropy term",
-        "(which largely cancels in an excess quantity). Oxidized interfaces are excluded;",
-        "they need an oxygen chemical-potential treatment.",
+        "(which largely cancels in an excess quantity). Oxidized interfaces and interfaces",
+        "flagged `polar_termination` in the campaign are excluded (see Skipped interfaces);",
+        "the polar ones need `iface validate adhesion`, the oxidized ones an oxygen",
+        "chemical-potential treatment.",
     ]
     (out / "interface_energy.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {
@@ -454,11 +510,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("output_dir")
     parser.add_argument("--dataset-root")
     parser.add_argument("--predictions")
+    parser.add_argument(
+        "--campaign",
+        help="campaign.yaml providing validation.interfaces metadata "
+        "(default: <campaign_root>/campaign.yaml if present)",
+    )
     parser.add_argument("--equilibration-frames", type=int, default=100)
-    parser.add_argument("--n-interfaces", type=int, default=2)
+    parser.add_argument(
+        "--n-interfaces",
+        type=int,
+        default=None,
+        help="override; default comes from validation.interfaces (else 2)",
+    )
     parser.add_argument("--blocks", type=int, default=10)
     parser.add_argument("--stacking-axis", choices=("a", "b", "c"))
     args = parser.parse_args(argv)
+    campaign_file = Path(args.campaign) if args.campaign else Path(args.campaign_root) / "campaign.yaml"
+    interface_metadata = None
+    if campaign_file.is_file():
+        from .config import load_campaign
+
+        interface_metadata = load_campaign(campaign_file).validation.get("interfaces")
     payload = interface_energy(
         args.campaign_root,
         dataset_root=args.dataset_root,
@@ -467,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
         n_interfaces=args.n_interfaces,
         blocks=args.blocks,
         stacking_axis=args.stacking_axis,
+        interface_metadata=interface_metadata,
     )
     payload["outputs"] = write_reports(payload, args.output_dir)
     print(json.dumps(payload, indent=2))

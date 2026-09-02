@@ -187,6 +187,65 @@ class TestInterfaceEnergy(unittest.TestCase):
             self.assertAlmostEqual(mlip["delta_mlip_minus_dft_j_per_m2"], 2.0 / 200.0 * 16.02176634, places=4)
             self.assertGreater(mlip["member_spread_j_per_m2"], 0.0)
 
+    def test_polar_termination_metadata_skips_the_leaf_with_a_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _dataset(Path(temporary))
+            metadata = [
+                {
+                    "match": "interface/*/*/N_Term/*",
+                    "polar_termination": True,
+                    "orientation": "Si3N4(0001)/TiN(111)",
+                }
+            ]
+            payload = interface_energy(
+                root, equilibration_frames=2, blocks=4, interface_metadata=metadata
+            )
+            self.assertEqual(payload["interfaces"], [])
+            self.assertEqual(len(payload["skipped"]), 1)
+            skipped = payload["skipped"][0]
+            self.assertEqual(skipped["leaf"], "interface/300K/Ideal/N_Term/SiN_TiN_N-term")
+            self.assertIn("polar", skipped["reason"].lower())
+            self.assertIn("adhesion", skipped["reason"])
+
+    def test_metadata_supplies_stacking_axis_n_interfaces_and_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _dataset(Path(temporary))
+            metadata = [
+                {
+                    "match": "interface/*/*/N_Term/*",
+                    "stacking_axis": "a",  # |b x c| = 10 * 20 = 200 A^2
+                    "n_interfaces": 4,
+                    "orientation": "Si3N4(0001)/TiN(111)",
+                    "termination": "N",
+                }
+            ]
+            payload = interface_energy(
+                root, equilibration_frames=2, blocks=4, interface_metadata=metadata
+            )
+            row = payload["interfaces"][0]
+            self.assertEqual(row["stacking_axis"], "a")
+            self.assertEqual(row["n_interfaces"], 4)
+            self.assertEqual(row["orientation"], "Si3N4(0001)/TiN(111)")
+            self.assertEqual(row["termination"], "N")
+            self.assertAlmostEqual(row["interface_area_ang2"], 200.0)
+            # excess = -100 - 4*(-12) - 4*(-10) = -12 eV ; /(4 * 200) ; *conv
+            self.assertAlmostEqual(row["gamma_int_j_per_m2"], -12.0 / (4 * 200.0) * 16.02176634)
+            self.assertIsNone(payload["n_interfaces"])
+            self.assertEqual(payload["n_interfaces_source"], "campaign-metadata")
+
+    def test_explicit_n_interfaces_argument_still_wins_over_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _dataset(Path(temporary))
+            metadata = [{"match": "interface/*", "n_interfaces": 4}]
+            payload = interface_energy(
+                root,
+                equilibration_frames=2,
+                blocks=4,
+                n_interfaces=2,
+                interface_metadata=metadata,
+            )
+            self.assertEqual(payload["interfaces"][0]["n_interfaces"], 2)
+
     def test_empty_dataset_raises(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaises(SafetyError):

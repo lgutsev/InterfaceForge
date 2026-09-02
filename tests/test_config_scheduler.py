@@ -19,6 +19,7 @@ def write_campaign(
     mace: dict | None = None,
     preserve: bool = True,
     scheduler: str = "slurm",
+    validation: dict | None = None,
 ) -> Path:
     profile = {
         "name": "test",
@@ -74,6 +75,8 @@ def write_campaign(
             "mace": mace or {"enabled": False},
         },
     }
+    if validation is not None:
+        payload["validation"] = validation
     path = root / "campaign.yaml"
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     return path
@@ -214,6 +217,108 @@ class ConfigTests(unittest.TestCase):
         }
         script = render_job(profile, "gpu")
         self.assertIn("dp train input.json", script)
+
+
+class ValidationBlockTests(unittest.TestCase):
+    def _load(self, temporary: str, validation: dict):
+        return load_campaign(write_campaign(Path(temporary), validation=validation))
+
+    def test_interfaces_and_hand_written_references_normalize(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign = self._load(
+                temporary,
+                {
+                    "interfaces": [
+                        {
+                            "match": "interface/*/*/N_Term/*",
+                            "stacking_axis": "C",
+                            "n_interfaces": 2,
+                            "polar_termination": True,
+                            "orientation": "Si3N4(0001)/TiN(111)",
+                            "termination": "N",
+                        }
+                    ],
+                    "references": [
+                        {
+                            "key": "local",
+                            "quantity": "work_of_adhesion",
+                            "values": [
+                                {"match": {"termination": "N"}, "value_j_per_m2": 1.24}
+                            ],
+                        }
+                    ],
+                },
+            )
+            interface = campaign.validation["interfaces"][0]
+            self.assertEqual(interface["stacking_axis"], "c")
+            self.assertIs(interface["polar_termination"], True)
+            reference = campaign.validation["references"][0]
+            self.assertEqual(reference["quantity"], "work_of_adhesion")
+            self.assertEqual(reference["tolerance_j_per_m2"], 0.5)
+            self.assertEqual(reference["values"][0]["value_j_per_m2"], 1.24)
+
+    def test_bad_stacking_axis_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(ConfigurationError):
+                self._load(temporary, {"interfaces": [{"match": "x", "stacking_axis": "z"}]})
+
+    def test_interface_entry_requires_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(ConfigurationError):
+                self._load(temporary, {"interfaces": [{"stacking_axis": "a"}]})
+
+    def test_reference_quantity_must_be_known(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(ConfigurationError):
+                self._load(
+                    temporary,
+                    {
+                        "references": [
+                            {
+                                "key": "k",
+                                "quantity": "band_gap",
+                                "values": [{"match": {}, "value_j_per_m2": 1.0}],
+                            }
+                        ]
+                    },
+                )
+
+    def test_reference_profile_is_expanded_at_load(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign = self._load(temporary, {"reference_profiles": ["sharifi2026"]})
+            references = campaign.validation["references"]
+            quantities = {entry["quantity"] for entry in references}
+            self.assertEqual(quantities, {"work_of_adhesion", "surface_energy"})
+            woa = next(e for e in references if e["quantity"] == "work_of_adhesion")
+            self.assertTrue(any(v["value_j_per_m2"] == 3.28 for v in woa["values"]))
+
+    def test_hand_written_reference_overrides_profile_on_same_key_and_quantity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign = self._load(
+                temporary,
+                {
+                    "reference_profiles": ["sharifi2026"],
+                    "references": [
+                        {
+                            "key": "sharifi2026",
+                            "quantity": "work_of_adhesion",
+                            "values": [{"match": {}, "value_j_per_m2": 9.99}],
+                        }
+                    ],
+                },
+            )
+            woa = [
+                e
+                for e in campaign.validation["references"]
+                if e["quantity"] == "work_of_adhesion"
+            ]
+            self.assertEqual(len(woa), 1)
+            self.assertEqual(woa[0]["values"][0]["value_j_per_m2"], 9.99)
+
+    def test_unknown_reference_profile_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(ConfigurationError):
+                self._load(temporary, {"reference_profiles": ["not-a-profile"]})
 
 
 if __name__ == "__main__":
