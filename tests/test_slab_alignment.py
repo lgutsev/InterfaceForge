@@ -295,6 +295,7 @@ Direct
             root = Path(temporary)
             case = root / "MAPI_MAI_Surf"
             _write_calculation(case, 5.4, -1.0, 1.0)
+            (case / "INCAR.dipole_fix").write_text("obsolete proposal\n", encoding="utf-8")
             (case / "vasprun.xml").unlink()
             config_path = root / "slab_alignment.json"
             config_path.write_text(
@@ -314,6 +315,7 @@ Direct
             self.assertEqual(row["band_edge_status"], "FAILED_BAND_EDGES")
             self.assertFalse(row["relaunch_review_required"])
             self.assertTrue((case / "LOCPOT_FLATNESS_OK").is_file())
+            self.assertFalse((case / "INCAR.dipole_fix").exists())
 
 
 if __name__ == "__main__":

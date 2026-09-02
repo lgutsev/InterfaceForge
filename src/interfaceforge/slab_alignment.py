@@ -715,6 +715,10 @@ def _write_audit_markers(
             _remove_generated_marker(calc_dir, marker)
 
     if flatness == "OK":
+        # A case can move from flagged to accepted after a corrected audit.
+        # Remove the obsolete generated proposal so it cannot be mistaken for
+        # a still-recommended INCAR change.
+        _remove_generated_marker(calc_dir, "INCAR.dipole_fix")
         marker = calc_dir / OK_MARKER
         marker.write_text(
             "LOCPOT selected-side vacuum passed the InterfaceForge flatness audit.\n",
