@@ -58,6 +58,8 @@ from .regfgw import compare_registry_selection, regfgw_status, run_regfgw_optimi
 from .report import build_report
 from .selection import select_from_csv
 from .slab_alignment import analyze_slab_alignment
+from .step1_status import render as render_step1_status
+from .step1_status import step1_status
 from .surface import (
     analyze_surface,
     audit_surface_runs,
@@ -453,6 +455,15 @@ def cmd_vasp_step1_prepare(args: argparse.Namespace) -> int:
             require_wavecar=args.require_wavecar,
         )
     )
+    return 0
+
+
+def cmd_vasp_step1_status(args: argparse.Namespace) -> int:
+    payload = step1_status(args.root, stale_hours=args.stale_hours)
+    if args.json:
+        _json(payload)
+    else:
+        print(render_step1_status(payload))
     return 0
 
 
@@ -1746,6 +1757,24 @@ def build_parser() -> argparse.ArgumentParser:
     step1_prepare.add_argument("--dry-run", action="store_true")
     step1_prepare.add_argument("--audit-only", action="store_true")
     step1_prepare.set_defaults(func=cmd_vasp_step1_prepare)
+
+    step1_status_parser = vasp_commands.add_parser(
+        "step1-status",
+        help="Runtime status of a Step1 preheat tree: frames produced, INCAR quality, which jobs are done",
+    )
+    step1_status_parser.add_argument(
+        "root", nargs="?", default=".", help="Step1 tree root or a single run directory"
+    )
+    step1_status_parser.add_argument(
+        "--stale-hours",
+        type=float,
+        default=6.0,
+        help="Flag a running job as 'stalled?' when its OSZICAR is older than this (default 6)",
+    )
+    step1_status_parser.add_argument(
+        "--json", action="store_true", help="Emit the raw payload instead of a table"
+    )
+    step1_status_parser.set_defaults(func=cmd_vasp_step1_status)
 
     step1_protocol = vasp_commands.add_parser(
         "step1-protocol",

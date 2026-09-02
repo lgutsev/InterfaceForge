@@ -138,6 +138,32 @@ overwritten; re-audit with `--audit-only`.
 
 Then feed `Step1/` to `step2-prepare` as usual.
 
+### Check how the Step1 runs are doing
+
+`iface vasp step1-status <Step1_root>` is a read-only, one-glance report of
+a prepared (and possibly running) Step1 tree — it never touches a live job,
+only reads `OSZICAR` / `OUTCAR` / `XDATCAR` / `INCAR`.
+
+```bash
+iface vasp step1-status Step1
+iface vasp step1-status Step1 --json
+iface vasp step1-status Step1/NiO_m110_Big_U46   # a single run
+```
+
+Per run it shows:
+
+- **frames produced** — MD steps written so far (from `OSZICAR`, cross
+  checked against `XDATCAR`) versus the `NSW` target, as a count, a
+  percentage, and ps of trajectory;
+- **the INCAR** — `ISTART`, `ENCUT` (with `ENCUT/ENMAX` when a `POTCAR` is
+  present), `PREC`, `EDIFF`, `ALGO`, `LREAL`, smearing, and the inherited
+  physics (`ISPIN`, the Hubbard `U` values, `LMAXMIX`, `IBRION`/`NSW`/
+  `POTIM`, `SMASS`, `TEBEG`);
+- **which job is done** — `not-started` / `running` / `stalled?` (an
+  `OSZICAR` older than `--stale-hours`, default 6) / `done` (reached `NSW`)
+  / `done-early` (clean exit, short of `NSW`) / `error` (a fatal VASP marker
+  in `OUTCAR`), plus the mean±std MD temperature so far.
+
 ## Promote Step1 into a Step2 temperature series
 
 `iface vasp step2-prepare` recursively discovers finished Step1 runs (a local
