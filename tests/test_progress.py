@@ -61,10 +61,15 @@ def _build_campaign(root: Path) -> Path:
             (seed_dir / "logs").mkdir(parents=True)
             (seed_dir / "mace_model").mkdir()
             (seed_dir / "logs" / "run.log").write_text(
+                "INFO: Total number of configurations: train=2000, valid=200\n"
+                "INFO: Batch size: 10\n"
+                "INFO: Number of gradient updates: 4000\n"
                 "INFO: Initial: RMSE_F= 283.26 meV / A\n"
                 "INFO: Epoch 5: head: Default, RMSE_E_per_atom= 4.1 meV, RMSE_F= 61.3 meV / A\n",
                 encoding="utf-8",
             )
+            (seed_dir / "checkpoints").mkdir()
+            (seed_dir / "checkpoints" / f"run-{seed}_epoch-5.pt").write_bytes(b"ckpt")
             if finished:
                 (seed_dir / "mace_model" / f"x_seed{seed}_stagetwo.model").write_bytes(b"model")
 
@@ -118,10 +123,12 @@ class TestMlipProgress(unittest.TestCase):
             mace = {row["committee"]: row for row in payload["mace_committees"]}
             self.assertTrue(mace["mace_committee"]["complete"])
             self.assertFalse(mace["mace_finetune_committee"]["complete"])
-            self.assertEqual(mace["mace_committee"]["members"][0]["epoch"], 5)
-            self.assertAlmostEqual(
-                mace["mace_committee"]["members"][0]["rmse_f_mev_ang"], 61.3
-            )
+            member = mace["mace_committee"]["members"][0]
+            self.assertEqual(member["epoch"], 5)
+            self.assertAlmostEqual(member["rmse_f_mev_ang"], 61.3)
+            self.assertTrue(member["checkpoint"])
+            # 4000 updates / (2000 // 10) = 20 planned epochs
+            self.assertEqual(mace["mace_committee"]["target_epochs"], 20)
 
             comparison = payload["comparisons"][0]
             self.assertEqual(comparison["deepmd_architecture"], "dpa2")
@@ -130,9 +137,13 @@ class TestMlipProgress(unittest.TestCase):
 
             text = render(payload)
             self.assertIn("DeePMD training", text)
+            self.assertIn("MACE training", text)
             self.assertIn("[OK] dpa2", text)
             self.assertIn("[..] dpa3", text)
             self.assertIn("mace_finetune_committee", text)
+            # both sections use the same member-row shape
+            self.assertRegex(text, r"model_000 .*#+.* 1000/1000 .*rmse_f")
+            self.assertRegex(text, r"seed_11 .*#+.*/20 .*rmse_f")
 
     def test_lcurve_tail_reads_step_from_column_zero(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

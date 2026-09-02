@@ -18,6 +18,9 @@ from typing import Any
 _FROZEN_NAMES = ("frozen_model.pth", "frozen_model.pt", "frozen_model.pt2", "frozen_model.pb")
 _MACE_EPOCH = re.compile(r"Epoch\s+(\d+):.*?RMSE_F=\s*([0-9.]+)")
 _MACE_INITIAL = re.compile(r"Initial:.*?RMSE_F=\s*([0-9.]+)")
+_MACE_UPDATES = re.compile(r"Number of gradient updates:\s*(\d+)")
+_MACE_BATCH = re.compile(r"Batch size:\s*(\d+)")
+_MACE_TRAIN = re.compile(r"(?:training dataset size|configurations: train)[=:]\s*(\d+)")
 
 
 def _mtime(path: Path) -> str | None:
@@ -189,24 +192,39 @@ def _deepmd_evaluation(deepmd_root: Path, committees: dict[str, int]) -> list[di
     return rows
 
 
-def _mace_log_tail(log: Path | None) -> tuple[int | None, float | None]:
+def _mace_log_tail(log: Path | None) -> dict[str, Any]:
+    """Latest epoch, RMSE_F (meV/A), and the planned epoch budget from a MACE log."""
+
+    result: dict[str, Any] = {"epoch": None, "rmse_f_mev_ang": None, "target_epochs": None}
     if log is None or not log.is_file():
-        return None, None
-    epoch: int | None = None
-    rmse_f: float | None = None
+        return result
+    updates = batch = train = None
     try:
-        with log.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                match = _MACE_EPOCH.search(line)
-                if match:
-                    epoch, rmse_f = int(match.group(1)), float(match.group(2))
-                    continue
-                initial = _MACE_INITIAL.search(line)
-                if initial and rmse_f is None:
-                    rmse_f = float(initial.group(1))
+        content = log.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return None, None
-    return epoch, rmse_f
+        return result
+    for line in content.splitlines():
+        match = _MACE_EPOCH.search(line)
+        if match:
+            result["epoch"], result["rmse_f_mev_ang"] = int(match.group(1)), float(match.group(2))
+            continue
+        initial = _MACE_INITIAL.search(line)
+        if initial and result["rmse_f_mev_ang"] is None:
+            result["rmse_f_mev_ang"] = float(initial.group(1))
+        for pattern, key in ((_MACE_UPDATES, "u"), (_MACE_BATCH, "b"), (_MACE_TRAIN, "t")):
+            hit = pattern.search(line)
+            if hit:
+                value = int(hit.group(1))
+                if key == "u":
+                    updates = value
+                elif key == "b":
+                    batch = value
+                else:
+                    train = value
+    if updates and batch and train:
+        per_epoch = max(train // batch, 1)
+        result["target_epochs"] = max(round(updates / per_epoch), 1)
+    return result
 
 
 def _mace_committees(mace_root: Path) -> list[dict[str, Any]]:
@@ -219,7 +237,7 @@ def _mace_committees(mace_root: Path) -> list[dict[str, Any]]:
         members: list[dict[str, Any]] = []
         for seed_dir in seeds:
             log = _newest(seed_dir / "logs", "*.log")
-            epoch, rmse_f = _mace_log_tail(log)
+            tail = _mace_log_tail(log)
             final = next(
                 iter(sorted((seed_dir / "mace_model").glob("*_stagetwo.model")))
                 or sorted(p for p in (seed_dir / "mace_model").glob("*.model") if "_compiled" not in p.name),
@@ -228,16 +246,20 @@ def _mace_committees(mace_root: Path) -> list[dict[str, Any]]:
             members.append(
                 {
                     "seed": seed_dir.name,
-                    "epoch": epoch,
-                    "rmse_f_mev_ang": rmse_f,
+                    "epoch": tail["epoch"],
+                    "target_epochs": tail["target_epochs"],
+                    "rmse_f_mev_ang": tail["rmse_f_mev_ang"],
+                    "checkpoint": any((seed_dir / "checkpoints").glob("*.pt")),
                     "final_model": final.name if final else None,
                     "updated": _mtime(log) if log else _mtime(seed_dir),
                 }
             )
+        target = next((m["target_epochs"] for m in members if m["target_epochs"]), None)
         rows.append(
             {
                 "committee": base,
-                "complete": all(member["final_model"] for member in members),
+                "target_epochs": target,
+                "complete": bool(members) and all(member["final_model"] for member in members),
                 "members": members,
             }
         )
@@ -305,6 +327,14 @@ def _bar(done: int, total: int | None, width: int = 12) -> str:
     return "#" * filled + "-" * (width - filled)
 
 
+def _member_line(name: str, done: int | None, total: int | None, rmse_f_mev: float | None, flags: str, updated: str | None) -> str:
+    done = done or 0
+    bar = _bar(done, total)
+    count = f"{done:>7}/{total}" if total else f"{done:>7}/?"
+    ftxt = f"{rmse_f_mev:7.1f} meV/A" if rmse_f_mev is not None else f"{'-':>7}      "
+    return f"      {name:<11} {bar} {count:>15}  rmse_f {ftxt}  [{flags}]  {updated or ''}"
+
+
 def render(payload: dict[str, Any]) -> str:
     lines: list[str] = [f"campaign: {payload['campaign_root']}", ""]
 
@@ -313,14 +343,19 @@ def render(payload: dict[str, Any]) -> str:
         lines.append("  (no models/deepmd/<arch>/ trees yet)")
     for arch in payload["deepmd_training"]:
         flag = "OK" if arch["complete"] else ".."
-        lines.append(f"  [{flag}] {arch['architecture']}  target={arch['target_steps'] or '?'} steps")
+        lines.append(f"  [{flag}] {arch['architecture']:<22}  target {arch['target_steps'] or '?'} steps")
         for member in arch["members"]:
-            step = member["step"] or 0
-            frac = _bar(step, arch["target_steps"])
             fval = member["rmse_f_val_ev_ang"]
-            ftxt = f"{fval * 1000:6.1f} meV/A" if fval is not None else f"{'-':>6}      "
-            marks = ("C" if member["checkpoint"] else "-") + ("F" if member["frozen"] else "-")
-            lines.append(f"      {member['model']}  {frac} {step:>7}  rmse_f_val {ftxt}  [{marks}]  {member['updated'] or ''}")
+            lines.append(
+                _member_line(
+                    member["model"],
+                    member["step"],
+                    arch["target_steps"],
+                    fval * 1000 if fval is not None else None,
+                    ("C" if member["checkpoint"] else "-") + ("F" if member["frozen"] else "-"),
+                    member["updated"],
+                )
+            )
 
     lines += ["", "DeePMD evaluation"]
     if not payload["deepmd_evaluation"]:
@@ -331,18 +366,24 @@ def render(payload: dict[str, Any]) -> str:
             f"  [{flag}] {row['architecture']}  {row['job']}  systems {row['systems_complete']}/{row['systems_seen']}  rmse_overall.csv={'yes' if row['rmse_overall'] else 'no'}"
         )
 
-    lines += ["", "MACE committees"]
+    lines += ["", "MACE training"]
     if not payload["mace_committees"]:
         lines.append("  (no mace_committee/ or mace_finetune_committee/ seed dirs)")
     for row in payload["mace_committees"]:
         flag = "OK" if row["complete"] else ".."
-        lines.append(f"  [{flag}] {row['committee']}")
+        target = row["target_epochs"]
+        lines.append(f"  [{flag}] {row['committee']:<22}  target {target or '?'} epochs")
         for member in row["members"]:
-            epoch = f"epoch {member['epoch']}" if member["epoch"] is not None else "epoch  ?"
-            rmse = member["rmse_f_mev_ang"]
-            rtxt = f"{rmse:6.1f} meV/A" if rmse is not None else f"{'-':>6}      "
-            model = member["final_model"] or "-"
-            lines.append(f"      {member['seed']}  {epoch:>9}  rmse_f {rtxt}  model={model}  {member['updated'] or ''}")
+            lines.append(
+                _member_line(
+                    member["seed"],
+                    member["epoch"],
+                    target,
+                    member["rmse_f_mev_ang"],
+                    ("C" if member["checkpoint"] else "-") + ("M" if member["final_model"] else "-"),
+                    member["updated"],
+                )
+            )
 
     lines += ["", "Comparisons"]
     if not payload["comparisons"]:
