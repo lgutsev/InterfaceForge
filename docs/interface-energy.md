@@ -67,8 +67,11 @@ excess *potential* energy over the bulk phases. The vibrational-entropy term
 interface and bulk bonding environments are similar, but the result is not a
 rigorous free energy.
 
-It is also **not** the vacuum work of adhesion — `iface validate adhesion`
-computes that separately by cleaving the interface into two slabs.
+It is also **not** the vacuum work of adhesion. `iface validate adhesion`
+computes that by cleaving the interface into two slabs; `iface validate
+separation-energy` computes it (as γ_sep) for hand-built interface/half-slab
+sets and additionally reports γ_sep^MLIP − γ_sep^DFT on identical geometry —
+see [separation-energy.md](separation-energy.md).
 
 ## MLIP-committee mode
 

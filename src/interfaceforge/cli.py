@@ -65,6 +65,8 @@ from .reference_import import (
 from .regfgw import compare_registry_selection, regfgw_status, run_regfgw_optimize
 from .report import build_report
 from .selection import select_from_csv
+from .separation_energy import separation_energy
+from .separation_energy import write_reports as write_separation_energy_reports
 from .slab_alignment import analyze_slab_alignment
 from .slab_publication import plot_slab_publication
 from .step1_status import render as render_step1_status
@@ -345,6 +347,27 @@ def cmd_validate(args: argparse.Namespace) -> int:
         payload = adhesion_from_csv(args.source, args.output, references=references)
     elif args.validation == "separation":
         payload = separation_curve_from_csv(args.source, args.output)
+    elif args.validation == "separation-energy":
+        entries: list[tuple[str, str]] = []
+        for item in args.entries:
+            spec, sep, directory = item.partition("=")
+            if not sep:
+                spec, directory = Path(item).name, item
+            entries.append((spec, directory))
+        validation = None
+        if args.campaign and Path(args.campaign).is_file():
+            validation = load_campaign(args.campaign).validation
+        payload = separation_energy(
+            entries,
+            mace_models=args.mace_models,
+            deepmd_models=args.deepmd_models,
+            reference=args.reference,
+            n_interfaces=args.n_interfaces,
+            area_axis=args.area_axis,
+            device=args.device,
+            campaign_validation=validation,
+        )
+        payload["outputs"] = write_separation_energy_reports(payload, args.output)
     elif args.validation == "interface-energy":
         campaign = _campaign(args)
         payload = interface_energy(
@@ -1377,6 +1400,40 @@ def build_parser() -> argparse.ArgumentParser:
     separation.add_argument("source")
     separation.add_argument("output")
     separation.set_defaults(func=cmd_validate)
+
+    separation_energy_parser = validation.add_parser(
+        "separation-energy",
+        help="Slab-referenced separation energy (J/m2) of hand-built interfaces, DFT vs MLIP",
+    )
+    separation_energy_parser.add_argument(
+        "output", help="Directory for separation_energy.{json,csv,md,png,svg,pdf}"
+    )
+    separation_energy_parser.add_argument(
+        "entries",
+        nargs="+",
+        metavar="[LABEL=]SET_DIR",
+        help="Each SET_DIR holds interface/ slab_a/ slab_b/ run directories; an "
+        "optional 'LABEL=' prefix is fnmatched against validation.interfaces for "
+        "the literature overlay",
+    )
+    separation_energy_parser.add_argument(
+        "--mace-model", action="append", default=[], dest="mace_models",
+        help="Path to a MACE committee member (repeat for the committee)",
+    )
+    separation_energy_parser.add_argument(
+        "--deepmd-model", action="append", default=[], dest="deepmd_models",
+        help="Path to a DeePMD committee member (repeat for the committee)",
+    )
+    separation_energy_parser.add_argument(
+        "--reference", choices=("free-surface", "bulk"), default="free-surface",
+        help="free-surface (relaxed half-slabs; equals the work of adhesion) or bulk",
+    )
+    separation_energy_parser.add_argument("--n-interfaces", type=int, default=1)
+    separation_energy_parser.add_argument("--area-axis", choices=("a", "b", "c"))
+    separation_energy_parser.add_argument("--device", default="cpu")
+    add_campaign_option(separation_energy_parser)
+    separation_energy_parser.set_defaults(func=cmd_validate)
+
     interface_energy_parser = validation.add_parser(
         "interface-energy",
         help="Bulk-referenced interfacial energy (J/m2) from the canonical dataset",

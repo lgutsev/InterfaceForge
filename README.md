@@ -139,6 +139,7 @@ iface collect
 iface train mace
 iface train deepmd
 iface validate stratified predictions.csv results.csv  # per-class errors, see docs/stratified-validation.md
+iface validate separation-energy audit/sep "LEAF=sharifi_111_Nterm" --mace-model M1 --deepmd-model D1 -c campaign.yaml  # gamma_sep DFT vs MLIP, see docs/separation-energy.md
 ```
 
 ## Task-oriented entry points
