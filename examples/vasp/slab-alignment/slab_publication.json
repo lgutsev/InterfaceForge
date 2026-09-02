@@ -1,0 +1,22 @@
+{
+  "side": "high-z",
+  "pairs": [
+    {
+      "label": "MAI-rich",
+      "reference": "MAPI_MAI_Surf",
+      "passivated": "MAPI_MAI_Surf_BPDCA_D"
+    },
+    {
+      "label": "PbI₂-rich",
+      "reference": "MAPI_PbI2_Surf",
+      "passivated": "MAPI_PbI2_Surf_BPDCA_B"
+    }
+  ],
+  "framework_elements": ["Pb", "I"],
+  "passivant_elements": ["C", "N", "O", "Br", "H"],
+  "passivant_label": "BPDCA",
+  "energy_window_eV": [-7.0, -2.0],
+  "sumo_gaussian_eV": 0.05,
+  "atom_match_tolerance_angstrom": 1.5,
+  "dpi": 600
+}

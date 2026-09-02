@@ -10,6 +10,9 @@ existing runs, and mutating a failed/finished run for recovery.
 For campaign-level vacuum alignment of pristine and passivated slabs, including
 side-specific LOCPOT plateau checks and VBM/CBM reference subtraction, see the
 [slab-alignment example](../examples/vasp/slab-alignment/README.md).
+The same example documents `iface vasp slab-publish`, which turns an explicit
+allowlist of accepted pristine/passivated pairs into vector vacuum-validation,
+PDOS, and vacuum-aligned band-edge figures.
 
 ## Audit and launch a generated OPT batch
 

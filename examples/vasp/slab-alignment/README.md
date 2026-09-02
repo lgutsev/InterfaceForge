@@ -116,3 +116,41 @@ and is a reviewable heuristic, not proof that a misplaced `DIPOL` caused the
 residual field. The proposal preserves existing `DIPOL_x` and `DIPOL_y`, fixes
 `IDIPOL = 3`, and should be accepted only after checking the structure,
 compactness, SCF convergence, and vacuum thickness.
+
+## Publication figures for the selected structures
+
+After the final four calculations pass the flatness audit, copy the dedicated
+manifest to the calculation root and submit the publication post-processing on
+the `single` partition:
+
+```bash
+cp /path/to/InterfaceForge/examples/vasp/slab-alignment/slab_publication.json .
+sbatch /path/to/InterfaceForge/launch_scripts/run_slab_publication_single.sbatch
+```
+
+The default manifest intentionally includes only these comparisons:
+
+- `MAPI_MAI_Surf` versus `MAPI_MAI_Surf_BPDCA_D`;
+- `MAPI_PbI2_Surf` versus `MAPI_PbI2_Surf_BPDCA_B`.
+
+`iface vasp slab-publish` refuses a selected structure whose physical-side
+plateau is not accepted by the flatness thresholds. It runs `sumo-dosplot`
+with its Fermi-level shift disabled and the same configured Gaussian broadening
+for all four cases, then moves each DOS energy axis onto the
+same vacuum reference used for the VBM and CBM. The ligand projection is based
+on atoms present in the passivated structure but absent from its pristine
+reference; this prevents methylammonium C/N/H from being mislabeled as BPDCA.
+
+The command writes `vacuum_validation.{pdf,png,svg}` and
+`electronic_alignment.{pdf,png,svg}` under `publication_figures`. The first is
+a 2x2 selected-plateau validation figure. The second is a 2x3 figure containing
+pristine and passivated Pb/I/BPDCA PDOS plus the vacuum-aligned VBM/CBM diagram
+for each termination. It also writes `publication_band_edges.tsv` and a JSON
+manifest recording the exact folders, atom selections, and interpretation
+guard. Positive band-edge deltas mean movement upward, toward vacuum.
+
+To remake figures from existing `publication_dos_data` without rerunning SUMO:
+
+```bash
+iface vasp slab-publish . --config slab_publication.json
+```

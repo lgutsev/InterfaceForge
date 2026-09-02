@@ -60,6 +60,7 @@ from .regfgw import compare_registry_selection, regfgw_status, run_regfgw_optimi
 from .report import build_report
 from .selection import select_from_csv
 from .slab_alignment import analyze_slab_alignment
+from .slab_publication import plot_slab_publication
 from .step1_status import render as render_step1_status
 from .step1_status import step1_status
 from .surface import (
@@ -926,6 +927,18 @@ def cmd_slab_alignment(args: argparse.Namespace) -> int:
     )
     _json(payload)
     return 1 if payload["failures"] else 0
+
+
+def cmd_slab_publication(args: argparse.Namespace) -> int:
+    _json(
+        plot_slab_publication(
+            args.root,
+            config=args.config,
+            output_dir=args.output_dir,
+            run_sumo=args.run_sumo,
+        )
+    )
+    return 0
 
 
 def cmd_adhesion_prepare(args: argparse.Namespace) -> int:
@@ -2053,6 +2066,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     slab_alignment.set_defaults(write_dipole_fixes=True)
     slab_alignment.set_defaults(func=cmd_slab_alignment)
+
+    slab_publication = vasp_commands.add_parser(
+        "slab-publish",
+        help="Create publication vacuum, PDOS, and band-alignment figures",
+    )
+    slab_publication.add_argument(
+        "root",
+        nargs="?",
+        default=".",
+        help="Root containing the selected VASP calculation directories (default: .)",
+    )
+    slab_publication.add_argument(
+        "--config",
+        default="slab_publication.json",
+        help="Publication JSON configuration path, relative to root by default",
+    )
+    slab_publication.add_argument(
+        "--output-dir",
+        default="publication_figures",
+        help="Output directory, relative to root by default",
+    )
+    slab_publication.add_argument(
+        "--run-sumo",
+        action="store_true",
+        help="Run sumo-dosplot before plotting (recommended through sbatch)",
+    )
+    slab_publication.set_defaults(func=cmd_slab_publication)
 
     adhesion = vasp_commands.add_parser(
         "adhesion", help="Prepare work-of-adhesion calculations (MLFF or DFT)"
