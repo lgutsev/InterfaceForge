@@ -28,13 +28,15 @@ def _poscar(elements: list[str]) -> str:
 
 
 class Step2SeriesTests(unittest.TestCase):
-    def _fixture(self, root: Path) -> Path:
+    def _fixture(
+        self, root: Path, *, potcar: bool = True, launcher_dir: Path | None = None
+    ) -> Path:
         step1 = root / "Step1"
         step1.mkdir()
         (step1 / "KPOINTS").write_text(
             "Gamma\n0\nGamma\n1 1 1\n0 0 0\n", encoding="utf-8"
         )
-        launcher = step1 / "runvasp.sh"
+        launcher = (launcher_dir if launcher_dir is not None else step1) / "runvasp.sh"
         launcher.write_text("#!/usr/bin/env bash\nsbatch payload\n", encoding="utf-8")
         launcher.chmod(0o755)
 
@@ -69,9 +71,10 @@ class Step2SeriesTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (run / "CONTCAR").write_text(_poscar(elements), encoding="utf-8")
-            (run / "POTCAR").write_text(
-                f"licensed fixture for {' '.join(elements)}\n", encoding="utf-8"
-            )
+            if potcar:
+                (run / "POTCAR").write_text(
+                    f"licensed fixture for {' '.join(elements)}\n", encoding="utf-8"
+                )
             (run / "OUTCAR").write_text("must not be inherited\n", encoding="utf-8")
         return step1
 
@@ -88,6 +91,40 @@ class Step2SeriesTests(unittest.TestCase):
             self.assertFalse((root / "Step2_300K").exists())
             self.assertFalse((root / "Step2_450K").exists())
             self.assertFalse((root / "Step2_600K").exists())
+
+    def test_prepares_without_potcar(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            step1 = self._fixture(root, potcar=False)
+
+            result = prepare_step2_series(step1, temperatures=[300])
+
+            self.assertEqual(result["mode"], "prepared-and-audited")
+            self.assertEqual(result["audit"]["status"], "PASS")
+            self.assertTrue(any("POTCAR" in w for w in result["warnings"]))
+            run = root / "Step2_300K" / "Real/N_Term/x0.25"
+            self.assertTrue((run / "INCAR").is_file())
+            self.assertTrue((run / "KPOINTS").is_file())
+            self.assertFalse((run / "POTCAR").exists())
+
+    def test_launcher_is_found_in_the_invocation_directory(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            step1 = self._fixture(root, launcher_dir=root)  # runvasp.sh above Step1/
+
+            cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                result = prepare_step2_series(step1, temperatures=[300])
+            finally:
+                os.chdir(cwd)
+
+            self.assertEqual(result["mode"], "prepared-and-audited")
+            launcher = root / "Step2_300K" / "Real/N_Term/x0.25" / "runvasp.sh"
+            self.assertTrue(launcher.is_file())
+            self.assertTrue(os.access(launcher, os.X_OK))
 
     def test_temperature_series_uses_template_and_preserves_each_hubbard_array(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

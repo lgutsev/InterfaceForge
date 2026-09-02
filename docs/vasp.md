@@ -211,6 +211,12 @@ run-specific or shared ancestor `KPOINTS`, `POTCAR`, `runvasp.sh`, and
 `run.slurm` files are copied. Runtime outputs such as `OUTCAR`, `WAVECAR`, and
 `CHGCAR` are not inherited.
 
+`KPOINTS` and a launcher are required. `POTCAR` is **optional** — if a Step1
+run has none, Step2 is prepared without one (with a warning) for workflows
+that build `POTCAR` at launch time. The launcher (`runvasp.sh` / `run.slurm`)
+is also accepted from the **current working directory**, even when it sits
+above the `Step1` root passed to `step2-prepare`.
+
 Each temperature root receives `step2_manifest.json` plus
 `step2_audit.json`, `step2_audit.tsv`, and `step2_audit.md`. The audit reopens
 every generated file, verifies exact INCAR/structure/input hashes, checks
@@ -256,6 +262,34 @@ root before submitting the first job. It writes `step2_launch.json` and
 submitted jobs are already recorded. The audited `runvasp.sh` is preferred
 over `run.slurm`; use `--launcher NAME` only to select another already-audited
 launcher.
+
+### Check how the Step2 runs are doing
+
+`iface vasp step2-status` is the Step2 counterpart of
+[`step1-status`](#check-how-the-step1-runs-are-doing) — a read-only, one-glance
+report that never touches a live job, only reads `OSZICAR` / `OUTCAR` /
+`XDATCAR` / `INCAR` / `step2_manifest.json`.
+
+```bash
+iface vasp step2-status .                  # every Step2_<T>K tree under here
+iface vasp step2-status Step2_300K         # a single temperature
+iface vasp step2-status Step2_300K/Real/N_Term/x0.25   # a single run
+iface vasp step2-status . --json
+```
+
+Grouped by temperature tree, per run it shows:
+
+- **frames produced** — MD steps written so far (from `OSZICAR`, cross
+  checked against `XDATCAR`) versus the protocol `NSW` target, as a count, a
+  percentage, and ps of trajectory;
+- **the INCAR** — `ENCUT` (with `ENCUT/ENMAX` when a `POTCAR` is present),
+  `PREC`, `EDIFF`, `ALGO`, `LREAL`, smearing, and the inherited physics
+  (`ISPIN`, the Hubbard `U` values, `LMAXMIX`, `IBRION`/`NSW`/`POTIM`, the
+  `MDALGO`/`SMASS` thermostat, `TEBEG`);
+- **which job is done** — `not-started` / `running` / `stalled?` (an
+  `OSZICAR` older than `--stale-hours`, default 6) / `done` (reached `NSW`) /
+  `done-early` (clean exit, short of `NSW`) / `error` (a fatal VASP marker in
+  `OUTCAR`), plus the mean±std MD temperature so far.
 
 ## AIMD protocols: `academic` vs `training`
 

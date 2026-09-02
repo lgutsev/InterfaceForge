@@ -449,11 +449,19 @@ def prepare_step2_series(
     promoted to ``POSCAR`` and run-specific/shared VASP inputs are copied into
     a sibling ``Step2_<temperature>K`` tree. Existing destination roots are
     never overwritten.
+
+    ``KPOINTS`` and a launcher are required; ``POTCAR`` is optional -- when a
+    source run has none, Step2 is prepared without one (with a warning) for
+    workflows that build ``POTCAR`` at launch. The launcher (``runvasp.sh`` /
+    ``run.slurm``) is also accepted from the current working directory, even
+    when it sits above ``source``.
     """
 
     from .aimd import resolve_protocol
 
     resolve_protocol(protocol)
+    invocation_dir = Path.cwd().resolve()
+    warnings: list[str] = []
     source_root = Path(source).expanduser().resolve()
     if not source_root.is_dir():
         raise FileNotFoundError(source_root)
@@ -517,15 +525,19 @@ def prepare_step2_series(
         source_incar = run / "INCAR"
         structure = run / source_structure
         elements = _poscar_elements(structure)
-        resolved_inputs = {
-            name: path
-            for name in STEP2_INHERITED_FILES
-            if (path := _resolve_step2_input(run, source_root, name)) is not None
-        }
+        resolved_inputs: dict[str, Path] = {}
+        for input_name in STEP2_INHERITED_FILES:
+            extra_roots = (invocation_dir,) if input_name in {"runvasp.sh", "run.slurm"} else ()
+            path = _resolve_step2_input(run, source_root, input_name, extra_roots=extra_roots)
+            if path is not None:
+                resolved_inputs[input_name] = path
         if "KPOINTS" not in resolved_inputs:
             raise SafetyError(f"No nonempty KPOINTS found for Step1 run {run}")
         if "POTCAR" not in resolved_inputs:
-            raise SafetyError(f"No nonempty POTCAR found for Step1 run {run}")
+            warnings.append(
+                f"{relative.as_posix() or '.'}: no Step1 POTCAR; Step2 is prepared "
+                "without one (generate it at launch time)"
+            )
         if not ({"runvasp.sh", "run.slurm"} & resolved_inputs.keys()):
             raise SafetyError(f"No runvasp.sh or run.slurm found for Step1 run {run}")
         source_text = source_incar.read_text(encoding="utf-8", errors="ignore")
@@ -674,6 +686,9 @@ def prepare_step2_series(
                 + ", ".join(failed_reports)
             )
 
+    for message in warnings:
+        print(f"WARNING: step2-prepare: {message}", file=sys.stderr)
+
     return {
         "mode": (
             "dry-run"
@@ -690,6 +705,7 @@ def prepare_step2_series(
         "output_roots": [str(path) for path in output_roots],
         "source_runs": len(runs),
         "prepared_runs": len(plans),
+        "warnings": warnings,
         "source_structure": source_structure,
         "hubbard_rule": "preserve exact active LDAU* and LMAXMIX assignments per source run",
         "protocol": protocol,

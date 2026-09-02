@@ -71,6 +71,8 @@ from .slab_alignment import analyze_slab_alignment
 from .slab_publication import plot_slab_publication
 from .step1_status import render as render_step1_status
 from .step1_status import step1_status
+from .step2_status import render as render_step2_status
+from .step2_status import step2_status
 from .surface import (
     analyze_surface,
     audit_surface_runs,
@@ -515,6 +517,15 @@ def cmd_vasp_step1_status(args: argparse.Namespace) -> int:
         _json(payload)
     else:
         print(render_step1_status(payload))
+    return 0
+
+
+def cmd_vasp_step2_status(args: argparse.Namespace) -> int:
+    payload = step2_status(args.root, stale_hours=args.stale_hours)
+    if args.json:
+        _json(payload)
+    else:
+        print(render_step2_status(payload))
     return 0
 
 
@@ -1985,6 +1996,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit the raw payload instead of a table"
     )
     step1_status_parser.set_defaults(func=cmd_vasp_step1_status)
+
+    step2_status_parser = vasp_commands.add_parser(
+        "step2-status",
+        help="Runtime status of a Step2 DFT-MD series: frames produced, INCAR quality, which jobs are done",
+    )
+    step2_status_parser.add_argument(
+        "root",
+        nargs="?",
+        default=".",
+        help="Parent of the Step2_<T>K trees, a single tree, or one run directory",
+    )
+    step2_status_parser.add_argument(
+        "--stale-hours",
+        type=float,
+        default=6.0,
+        help="Flag a running job as 'stalled?' when its OSZICAR is older than this (default 6)",
+    )
+    step2_status_parser.add_argument(
+        "--json", action="store_true", help="Emit the raw payload instead of a table"
+    )
+    step2_status_parser.set_defaults(func=cmd_vasp_step2_status)
 
     step1_protocol = vasp_commands.add_parser(
         "step1-protocol",
