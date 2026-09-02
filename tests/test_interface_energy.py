@@ -61,6 +61,42 @@ def _dataset(root: Path) -> Path:
     return root
 
 
+def _add_test_split_and_predictions(root: Path) -> Path:
+    """A 4-frame test split for the same leaves plus a fake mlip_compare tree."""
+    deepmd = root / "datasets" / "canonical" / "deepmd"
+    cell10 = np.diag([10.0, 10.0, 20.0])
+    frames = [10, 11, 12, 13]
+    specs = {
+        "bulk/SiN-Bulk_300K": (["Si", "N", "Si", "N"], -20.0),
+        "bulk/TiN-Bulk_300K": (["Ti", "N", "Ti", "N"], -24.0),
+        "interface/300K/Ideal/N_Term/SiN_TiN_N-term": (["Si"] * 4 + ["Ti"] * 4 + ["N"] * 8, -100.0),
+    }
+    for leaf, (symbols, energy) in specs.items():
+        _system(deepmd, "test", leaf, symbols, cell10, [energy] * 4, frames)
+
+    out = root / "audit" / "mlip_compare"
+    out.mkdir(parents=True)
+    systems = [
+        {"system_id": f"system_{i:03d}", "relative_leaf": leaf, "natoms": len(specs[leaf][0])}
+        for i, leaf in enumerate(specs)
+    ]
+    models = [{"model": f"model_{i:03d}", "seed": s} for i, s in enumerate((11, 23))]
+    (out / "comparison_manifest.json").write_text(
+        json.dumps({"deepmd_architecture": "dpa2", "systems": systems, "models": models}),
+        encoding="utf-8",
+    )
+    # model_000 predicts DFT exactly; model_001 shifts the interface by +4 eV
+    for system in systems:
+        for model in models:
+            base = np.full(4, specs[system["relative_leaf"]][1], dtype=float)
+            if model["model"] == "model_001" and system["relative_leaf"].startswith("interface/"):
+                base = base + 4.0
+            directory = out / "predictions" / "mace" / model["model"]
+            directory.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(directory / f"{system['system_id']}.npz", energy=base, forces=np.zeros((4, 1, 3)))
+    return out
+
+
 class TestInterfaceEnergy(unittest.TestCase):
     def test_bulk_referenced_gamma_and_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -127,6 +163,29 @@ class TestInterfaceEnergy(unittest.TestCase):
             csv_rows = list(csv.DictReader((out / "interface_energy.csv").open()))
             self.assertAlmostEqual(float(csv_rows[0]["gamma_int_j_per_m2"]), -0.06 * 16.02176634)
             self.assertIn("-0.961", (out / "interface_energy.md").read_text())
+
+    def test_mlip_mode_reports_committee_gamma_against_dft(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _dataset(Path(temporary))
+            predictions = _add_test_split_and_predictions(root)
+            payload = interface_energy(
+                root, predictions_root=predictions, equilibration_frames=2, blocks=4
+            )
+            row = payload["interfaces"][0]
+            mlip = row["mlip"]
+            self.assertEqual(mlip["status"], "OK")
+            self.assertEqual(mlip["frames"], 4)
+            # DFT on the test frames == the canonical DFT value here (flat energies)
+            self.assertAlmostEqual(mlip["gamma_dft_same_frames_j_per_m2"], row["gamma_int_j_per_m2"], places=6)
+            # model_000 reproduces DFT exactly; model_001 adds +4 eV to E_int
+            members = mlip["gamma_members_j_per_m2"]
+            self.assertAlmostEqual(members["model_000"], row["gamma_int_j_per_m2"], places=4)
+            self.assertAlmostEqual(
+                members["model_001"] - members["model_000"], 4.0 / (2 * 100.0) * 16.02176634, places=4
+            )
+            # ensemble = +2 eV on E_int -> delta = 2/(200) * conv
+            self.assertAlmostEqual(mlip["delta_mlip_minus_dft_j_per_m2"], 2.0 / 200.0 * 16.02176634, places=4)
+            self.assertGreater(mlip["member_spread_j_per_m2"], 0.0)
 
     def test_empty_dataset_raises(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

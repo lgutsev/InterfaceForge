@@ -336,6 +336,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         payload = interface_energy(
             _campaign(args).root,
             dataset_root=args.dataset_root,
+            predictions_root=args.predictions,
             equilibration_frames=args.equilibration_frames,
             n_interfaces=args.n_interfaces,
             blocks=args.blocks,
@@ -1299,6 +1300,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_campaign_option(interface_energy_parser)
     interface_energy_parser.add_argument("output", help="Directory for interface_energy.{json,csv,md}")
     interface_energy_parser.add_argument("--dataset-root")
+    interface_energy_parser.add_argument(
+        "--predictions",
+        help="An audit/mlip_compare* directory; adds MACE-committee gamma_int on the "
+        "test-split frames alongside the DFT value",
+    )
     interface_energy_parser.add_argument("--equilibration-frames", type=int, default=100)
     interface_energy_parser.add_argument("--n-interfaces", type=int, default=2)
     interface_energy_parser.add_argument("--blocks", type=int, default=10)

@@ -47,6 +47,23 @@ rigorous free energy.
 It is also **not** the vacuum work of adhesion — `iface validate adhesion`
 computes that separately by cleaving the interface into two slabs.
 
+## MLIP-committee mode
+
+```bash
+iface validate interface-energy audit/interface_energy --predictions audit/mlip_compare
+```
+
+`--predictions` points at an `audit/mlip_compare*` directory. For each interface
+the report then also carries an `mlip` block: the MACE committee's `gamma_int`
+per member and for the ensemble mean, the DFT `gamma_int` recomputed on the
+**exact same frames**, and `Δ = γ_MLIP − γ_DFT`. This is a much stronger check
+than absolute-energy RMSE — the model has to get the interface-minus-bulk
+*excess* right.
+
+Because it reuses the `mlip-compare` prediction files, it is limited to the
+test-split frames (60/leaf), so its error bars are wider than the default
+DFT-on-all-600 value; `gamma_dft_same_frames` is the fair comparison target.
+
 Oxidized interfaces (`O_x*`) are excluded: their excess oxygen has no bulk phase
 to absorb it, so `gamma_int` becomes a function of the oxygen chemical potential
 (a band between the TiO-referenced and O₂-referenced limits) rather than a

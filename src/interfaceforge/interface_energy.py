@@ -116,6 +116,97 @@ def _plane_area(system: Path, stacking_axis: str | None) -> tuple[float, str]:
     return area, axes[stack]
 
 
+def _test_systems_by_leaf(deepmd_root: Path) -> dict[str, Path]:
+    mapping: dict[str, Path] = {}
+    test_dir = deepmd_root / "test"
+    if not test_dir.is_dir():
+        return mapping
+    for frame_map in test_dir.rglob("frame_map.csv"):
+        mapping[_read_leaf(frame_map)] = frame_map.parent
+    return mapping
+
+
+def _npz_energy(path: Path) -> np.ndarray:
+    with np.load(path) as data:
+        return np.asarray(data["energy"], dtype=float).reshape(-1)
+
+
+def _mlip_gamma(
+    predictions_root: Path,
+    test_systems: dict[str, Path],
+    interface_leaf: str,
+    tin_leaf: str,
+    sin_leaf: str,
+    x: float,
+    y: float,
+    denom: float,
+    blocks: int,
+) -> dict[str, Any]:
+    manifest_path = predictions_root / "comparison_manifest.json"
+    if not manifest_path.is_file():
+        return {"status": f"no comparison_manifest.json in {predictions_root}"}
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    system_id = {s["relative_leaf"]: s["system_id"] for s in manifest["systems"]}
+    models = [m["model"] for m in manifest["models"]]
+    for leaf in (interface_leaf, tin_leaf, sin_leaf):
+        if leaf not in system_id or leaf not in test_systems:
+            return {"status": f"{leaf} absent from predictions or test split"}
+
+    def series(leaf: str) -> dict[str, np.ndarray]:
+        sid = system_id[leaf]
+        out: dict[str, np.ndarray] = {}
+        for model in models:
+            npz = predictions_root / "predictions" / "mace" / model / f"{sid}.npz"
+            if not npz.is_file():
+                return {}
+            out[model] = _npz_energy(npz)
+        return out
+
+    e_int, e_tin, e_sin = series(interface_leaf), series(tin_leaf), series(sin_leaf)
+    if not (e_int and e_tin and e_sin):
+        return {"status": "MACE prediction files incomplete"}
+
+    tin_units = _formula_units(_composition(test_systems[tin_leaf]))
+    sin_units = _formula_units(_composition(test_systems[sin_leaf]))
+
+    def gamma(e_i: np.ndarray, e_t: np.ndarray, e_s: np.ndarray) -> tuple[float, float]:
+        mi, si = _block_stats(e_i, blocks)
+        mt, st = _block_stats(e_t, blocks)
+        ms, ss = _block_stats(e_s, blocks)
+        excess = mi - x * mt / tin_units - y * ms / sin_units
+        sem = math.sqrt(
+            (si / denom) ** 2
+            + (x * st / tin_units / denom) ** 2
+            + (y * ss / sin_units / denom) ** 2
+        )
+        return excess / denom * EV_A2_TO_J_M2, sem * EV_A2_TO_J_M2
+
+    members = {
+        model: round(gamma(e_int[model], e_tin[model], e_sin[model])[0], 4) for model in models
+    }
+    ensemble, ensemble_sem = gamma(
+        np.mean([e_int[m] for m in models], axis=0),
+        np.mean([e_tin[m] for m in models], axis=0),
+        np.mean([e_sin[m] for m in models], axis=0),
+    )
+    dft, _ = gamma(
+        np.load(test_systems[interface_leaf] / "set.000" / "energy.npy").reshape(-1),
+        np.load(test_systems[tin_leaf] / "set.000" / "energy.npy").reshape(-1),
+        np.load(test_systems[sin_leaf] / "set.000" / "energy.npy").reshape(-1),
+    )
+    spread = list(members.values())
+    return {
+        "status": "OK",
+        "frames": int(next(iter(e_int.values())).size),
+        "gamma_dft_same_frames_j_per_m2": dft,
+        "gamma_ensemble_j_per_m2": ensemble,
+        "gamma_ensemble_sem_j_per_m2": ensemble_sem,
+        "gamma_members_j_per_m2": members,
+        "member_spread_j_per_m2": float(np.std(spread, ddof=1)) if len(spread) > 1 else 0.0,
+        "delta_mlip_minus_dft_j_per_m2": ensemble - dft,
+    }
+
+
 def _bulk_reference(systems: list[Path], equilibration: int, blocks: int) -> dict[str, Any]:
     composition = _composition(systems[0])
     units = _formula_units(composition)
@@ -137,6 +228,7 @@ def interface_energy(
     campaign_root: str | Path,
     *,
     dataset_root: str | Path | None = None,
+    predictions_root: str | Path | None = None,
     equilibration_frames: int = 100,
     n_interfaces: int = 2,
     blocks: int = 10,
@@ -151,6 +243,8 @@ def interface_energy(
     if n_interfaces < 1:
         raise SafetyError("n_interfaces must be a positive integer")
     leaves = _leaf_systems(deepmd_root)
+    predictions = Path(predictions_root).expanduser().resolve() if predictions_root else None
+    test_systems = _test_systems_by_leaf(deepmd_root) if predictions else {}
 
     bulk_refs: dict[str, dict[str, Any]] = {}
     for leaf, systems in sorted(leaves.items()):
@@ -228,17 +322,28 @@ def interface_energy(
                 "status": "OK" if abs(predicted_n - n_n) < 0.5 else "nitrogen imbalance; check the clean split",
             }
         )
+        if predictions is not None:
+            row["mlip"] = _mlip_gamma(
+                predictions, test_systems, leaf, tin_leaf, sin_leaf, x, y, denom, blocks
+            )
         rows.append(row)
 
     return {
         "schema_version": 1,
         "campaign_root": str(campaign),
         "dataset_root": str(deepmd_root),
+        "predictions_root": str(predictions) if predictions else None,
         "equilibration_frames": equilibration_frames,
         "n_interfaces": n_interfaces,
         "block_count": blocks,
         "conversion_ev_a2_to_j_m2": EV_A2_TO_J_M2,
         "reference_state": "MD-averaged bulk DFT energy per formula unit (potential energy, no vibrational entropy)",
+        "mlip_note": (
+            "MLIP columns use the MACE committee's predicted energies on the test-split "
+            "frames only; gamma_dft_same_frames is the DFT value on those same frames."
+            if predictions
+            else None
+        ),
         "bulk_references": bulk_refs,
         "interfaces": rows,
     }
@@ -260,6 +365,10 @@ _CSV_FIELDS = (
     "gamma_int_j_per_m2",
     "gamma_int_sem_j_per_m2",
     "status",
+    "mlip_gamma_ensemble_j_per_m2",
+    "mlip_gamma_dft_same_frames_j_per_m2",
+    "mlip_delta_j_per_m2",
+    "mlip_member_spread_j_per_m2",
 )
 
 
@@ -272,20 +381,52 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
         writer = csv.DictWriter(handle, fieldnames=_CSV_FIELDS, extrasaction="ignore")
         writer.writeheader()
         for row in payload["interfaces"]:
-            writer.writerow(row)
+            flat = dict(row)
+            mlip = row.get("mlip") or {}
+            if mlip.get("status") == "OK":
+                flat["mlip_gamma_ensemble_j_per_m2"] = mlip["gamma_ensemble_j_per_m2"]
+                flat["mlip_gamma_dft_same_frames_j_per_m2"] = mlip["gamma_dft_same_frames_j_per_m2"]
+                flat["mlip_delta_j_per_m2"] = mlip["delta_mlip_minus_dft_j_per_m2"]
+                flat["mlip_member_spread_j_per_m2"] = mlip["member_spread_j_per_m2"]
+            writer.writerow(flat)
 
+    has_mlip = any((row.get("mlip") or {}).get("status") == "OK" for row in payload["interfaces"])
     lines = [
         "# Bulk-referenced interfacial energy",
         "",
         f"Reference: {payload['reference_state']}.",
         f"Equilibration frames dropped: {payload['equilibration_frames']}; interfaces per cell: {payload['n_interfaces']}.",
         "",
-        "| Interface | T (K) | γ_int (J/m²) | ± | N-balanced | area (Å²) |",
-        "|---|---:|---:|---:|:--:|---:|",
     ]
+    if has_mlip:
+        lines += [
+            f"MLIP columns: {payload['mlip_note']}",
+            "",
+            "| Interface | T (K) | γ_DFT (J/m²) | γ_MLIP (J/m²) | Δ | member σ | γ_DFT same frames |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    else:
+        lines += [
+            "| Interface | T (K) | γ_int (J/m²) | ± | N-balanced | area (Å²) |",
+            "|---|---:|---:|---:|:--:|---:|",
+        ]
     for row in payload["interfaces"]:
         if "gamma_int_j_per_m2" not in row:
-            lines.append(f"| {row['leaf']} | {row['temperature_K']} | — | — | — | — | ({row['status']}) |")
+            lines.append(f"| {row['leaf']} | {row['temperature_K']} | — | — | — | — | — ({row['status']}) |")
+            continue
+        if has_mlip:
+            mlip = row.get("mlip") or {}
+            if mlip.get("status") == "OK":
+                lines.append(
+                    f"| {row['leaf']} | {row['temperature_K']} | {row['gamma_int_j_per_m2']:.3f} | "
+                    f"{mlip['gamma_ensemble_j_per_m2']:.3f} | {mlip['delta_mlip_minus_dft_j_per_m2']:+.3f} | "
+                    f"{mlip['member_spread_j_per_m2']:.3f} | {mlip['gamma_dft_same_frames_j_per_m2']:.3f} |"
+                )
+            else:
+                lines.append(
+                    f"| {row['leaf']} | {row['temperature_K']} | {row['gamma_int_j_per_m2']:.3f} | "
+                    f"— | — | — | — ({mlip.get('status', 'no predictions')}) |"
+                )
             continue
         lines.append(
             f"| {row['leaf']} | {row['temperature_K']} | {row['gamma_int_j_per_m2']:.3f} | "
@@ -312,6 +453,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("campaign_root", nargs="?", default=".")
     parser.add_argument("output_dir")
     parser.add_argument("--dataset-root")
+    parser.add_argument("--predictions")
     parser.add_argument("--equilibration-frames", type=int, default=100)
     parser.add_argument("--n-interfaces", type=int, default=2)
     parser.add_argument("--blocks", type=int, default=10)
@@ -320,6 +462,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = interface_energy(
         args.campaign_root,
         dataset_root=args.dataset_root,
+        predictions_root=args.predictions,
         equilibration_frames=args.equilibration_frames,
         n_interfaces=args.n_interfaces,
         blocks=args.blocks,
