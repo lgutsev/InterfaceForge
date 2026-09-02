@@ -87,6 +87,7 @@ OUTPUT_FIELDS = [
     "selected_correction_step_detected",
     "selected_correction_step_A",
     "selected_correction_step_eV",
+    "selected_correction_step_width_A",
     "low_vacuum_eV",
     "high_vacuum_eV",
     "high_minus_low_vacuum_eV",
@@ -111,6 +112,7 @@ AUDIT_FIELDS = [
     "selected_correction_step_detected",
     "selected_correction_step_A",
     "selected_correction_step_eV",
+    "selected_correction_step_width_A",
     "suggested_DIPOL_z",
     "compactness_R",
     "current_LDIPOL",
@@ -166,6 +168,7 @@ class Plateau:
     correction_step_detected: bool = False
     correction_step_A: float | None = None
     correction_step_eV: float | None = None
+    correction_step_width_A: float | None = None
 
 
 @dataclass
@@ -323,6 +326,68 @@ def largest_periodic_gap(z_values: np.ndarray, length: float) -> tuple[float, fl
     return float(values[index]), float(next_values[index]), float(gaps[index])
 
 
+def _localized_steps(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    *,
+    minimum_delta_eV: float,
+    outlier_factor: float,
+    maximum_width_A: float,
+) -> list[tuple[float, float, float, float]]:
+    """Return short potential resets while ignoring a distributed field.
+
+    A dipole-correction reset has a large derivative only over a compact
+    interval, whereas a residual electric field has a similar derivative
+    throughout the vacuum.  Each result is ``(start, end, center, delta)``.
+    """
+
+    edge_widths = np.diff(x_values)
+    if edge_widths.size < 3 or np.any(edge_widths <= 0):
+        return []
+    edge_slopes = np.diff(y_values) / edge_widths
+    baseline_slope = float(np.median(edge_slopes))
+    slope_deviation = np.abs(edge_slopes - baseline_slope)
+    slope_mad = float(np.median(slope_deviation))
+    gradient_floor = minimum_delta_eV / maximum_width_A
+    threshold = max(gradient_floor, outlier_factor * slope_mad)
+    active = slope_deviation >= threshold
+
+    runs: list[tuple[int, int]] = []
+    start_index: int | None = None
+    for index, is_active in enumerate(active):
+        if is_active and start_index is None:
+            start_index = index
+        elif not is_active and start_index is not None:
+            runs.append((start_index, index - 1))
+            start_index = None
+    if start_index is not None:
+        runs.append((start_index, len(active) - 1))
+
+    steps: list[tuple[float, float, float, float]] = []
+    context_A = min(1.0, maximum_width_A)
+    for first_edge, last_edge in runs:
+        transition_start = float(x_values[first_edge])
+        transition_end = float(x_values[last_edge + 1])
+        if transition_end - transition_start > maximum_width_A:
+            continue
+        left = (x_values < transition_start) & (x_values >= transition_start - context_A)
+        right = (x_values > transition_end) & (x_values <= transition_end + context_A)
+        if np.count_nonzero(left) < 3 or np.count_nonzero(right) < 3:
+            continue
+        delta = float(np.median(y_values[right]) - np.median(y_values[left]))
+        if abs(delta) < minimum_delta_eV:
+            continue
+        steps.append(
+            (
+                transition_start,
+                transition_end,
+                0.5 * (transition_start + transition_end),
+                delta,
+            )
+        )
+    return steps
+
+
 def _fit_plateau(
     side: str,
     shifted_z: np.ndarray,
@@ -332,6 +397,7 @@ def _fit_plateau(
     minimum_window_angstrom: float,
     discontinuity_min_eV: float,
     discontinuity_factor: float,
+    discontinuity_max_width_angstrom: float,
     discontinuity_margin_angstrom: float,
 ) -> Plateau:
     mask = (shifted_z >= start) & (shifted_z <= end)
@@ -342,47 +408,42 @@ def _fit_plateau(
     order = np.argsort(x_values)
     x_values, y_values = x_values[order], y_values[order]
 
-    # LDIPOL adds a sawtooth-like correction whose reset is a real feature of
-    # the corrected periodic potential.  It must not be interpreted as a
-    # residual electric field.  Find abrupt point-to-point changes and retain
-    # only the contiguous plateau connected to the physical surface: the
-    # right edge for low-z and the left edge for high-z.
-    differences = np.diff(y_values)
-    absolute_differences = np.abs(differences)
-    typical_difference = float(np.median(absolute_differences))
-    jump_threshold = max(discontinuity_min_eV, discontinuity_factor * typical_difference)
-    jump_indices = np.flatnonzero(absolute_differences >= jump_threshold)
+    # LDIPOL adds a sawtooth-like reset that can span several grid points. It
+    # is a feature of the corrected periodic potential, not a residual field.
+    # Detect compact derivative excursions rather than requiring one large
+    # point-to-point jump. A gradual slope is retained and fails normally.
+    steps = _localized_steps(
+        x_values,
+        y_values,
+        minimum_delta_eV=discontinuity_min_eV,
+        outlier_factor=discontinuity_factor,
+        maximum_width_A=discontinuity_max_width_angstrom,
+    )
     if side == "low-z":
-        jump_indices = np.array(
-            [
-                index
-                for index in jump_indices
-                if end - 0.5 * (x_values[index] + x_values[index + 1])
-                >= minimum_window_angstrom + discontinuity_margin_angstrom
-            ],
-            dtype=int,
-        )
+        steps = [
+            step
+            for step in steps
+            if end - step[1] >= minimum_window_angstrom + discontinuity_margin_angstrom
+        ]
     else:
-        jump_indices = np.array(
-            [
-                index
-                for index in jump_indices
-                if 0.5 * (x_values[index] + x_values[index + 1]) - start
-                >= minimum_window_angstrom + discontinuity_margin_angstrom
-            ],
-            dtype=int,
-        )
-    correction_step_detected = bool(jump_indices.size)
+        steps = [
+            step
+            for step in steps
+            if step[0] - start >= minimum_window_angstrom + discontinuity_margin_angstrom
+        ]
+    correction_step_detected = bool(steps)
     correction_step_A: float | None = None
     correction_step_eV: float | None = None
+    correction_step_width_A: float | None = None
     if correction_step_detected:
-        jump_index = int(jump_indices[-1] if side == "low-z" else jump_indices[0])
-        correction_step_A = float(0.5 * (x_values[jump_index] + x_values[jump_index + 1]))
-        correction_step_eV = float(differences[jump_index])
+        transition_start, transition_end, correction_step_A, correction_step_eV = (
+            steps[-1] if side == "low-z" else steps[0]
+        )
+        correction_step_width_A = transition_end - transition_start
         if side == "low-z":
-            keep = x_values >= correction_step_A + discontinuity_margin_angstrom
+            keep = x_values >= transition_end + discontinuity_margin_angstrom
         else:
-            keep = x_values <= correction_step_A - discontinuity_margin_angstrom
+            keep = x_values <= transition_start - discontinuity_margin_angstrom
         if np.count_nonzero(keep) < 5:
             raise SafetyError(
                 f"{side} surface-adjacent plateau has fewer than five points after excluding the dipole step"
@@ -409,6 +470,7 @@ def _fit_plateau(
         correction_step_detected=correction_step_detected,
         correction_step_A=correction_step_A,
         correction_step_eV=correction_step_eV,
+        correction_step_width_A=correction_step_width_A,
     )
 
 
@@ -420,6 +482,7 @@ def analyze_profile(
     minimum_window_angstrom: float = 2.0,
     discontinuity_min_eV: float = 0.05,
     discontinuity_factor: float = 10.0,
+    discontinuity_max_width_angstrom: float = 1.5,
     discontinuity_margin_angstrom: float = 0.5,
 ) -> tuple[ProfileAnalysis, np.ndarray, np.ndarray]:
     """Fit the two physical vacuum sides independently across a periodic cell."""
@@ -445,6 +508,7 @@ def analyze_profile(
         "minimum_window_angstrom": minimum_window_angstrom,
         "discontinuity_min_eV": discontinuity_min_eV,
         "discontinuity_factor": discontinuity_factor,
+        "discontinuity_max_width_angstrom": discontinuity_max_width_angstrom,
         "discontinuity_margin_angstrom": discontinuity_margin_angstrom,
     }
     low = _fit_plateau("low-z", grid_shifted, potential_shifted, low_start, low_end, **fit_options)
@@ -538,6 +602,7 @@ def load_alignment_config(path: str | Path) -> dict[str, Any]:
         "minimum_window_angstrom": 2.0,
         "discontinuity_min_eV": 0.05,
         "discontinuity_factor": 10.0,
+        "discontinuity_max_width_angstrom": 1.5,
         "discontinuity_margin_angstrom": 0.5,
         "swing_warn_eV": 0.03,
         "swing_fail_eV": 0.10,
@@ -810,6 +875,7 @@ def _analyze_folder(
             minimum_window_angstrom=config["minimum_window_angstrom"],
             discontinuity_min_eV=config["discontinuity_min_eV"],
             discontinuity_factor=config["discontinuity_factor"],
+            discontinuity_max_width_angstrom=config["discontinuity_max_width_angstrom"],
             discontinuity_margin_angstrom=config["discontinuity_margin_angstrom"],
         )
         selected = profile.high if config["side"] == "high-z" else profile.low
@@ -828,6 +894,7 @@ def _analyze_folder(
                 "selected_correction_step_detected": selected.correction_step_detected,
                 "selected_correction_step_A": selected.correction_step_A,
                 "selected_correction_step_eV": selected.correction_step_eV,
+                "selected_correction_step_width_A": selected.correction_step_width_A,
                 "low_vacuum_eV": profile.low.plateau_eV,
                 "high_vacuum_eV": profile.high.plateau_eV,
                 "high_minus_low_vacuum_eV": profile.high.plateau_eV - profile.low.plateau_eV,

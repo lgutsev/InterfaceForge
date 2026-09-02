@@ -114,16 +114,18 @@ class SlabAlignmentTests(unittest.TestCase):
             buffer_angstrom=1.0,
             minimum_window_angstrom=1.0,
         )
+        self.assertFalse(profile.high.correction_step_detected)
         self.assertAlmostEqual(abs(profile.high.slope_eV_per_A), 0.02, places=4)
 
     def test_high_side_dipole_step_is_excluded_from_flatness_fit(self) -> None:
         structure = parse_poscar_lines(POSCAR.splitlines())
         z_grid = np.linspace(0, 40, 800, endpoint=False)
         shifted = np.mod(z_grid - 39.0, 40.0)
+        high_vacuum = 5.2 - 0.2 * np.clip((shifted - 34.6) / 0.8, 0.0, 1.0)
         potential = np.where(
             shifted < 13.0,
             4.8,
-            np.where(shifted < 27.0, 2.0, np.where(shifted < 35.0, 5.2, 5.0)),
+            np.where(shifted < 27.0, 2.0, high_vacuum),
         )
         profile, _shifted_z, _shifted_potential = analyze_profile(
             structure,
@@ -134,6 +136,7 @@ class SlabAlignmentTests(unittest.TestCase):
         )
         self.assertTrue(profile.high.correction_step_detected)
         self.assertAlmostEqual(profile.high.correction_step_A, 35.0, delta=0.1)
+        self.assertAlmostEqual(profile.high.correction_step_width_A, 0.8, delta=0.15)
         self.assertLess(profile.high.window_end_A, profile.high.correction_step_A)
         self.assertAlmostEqual(profile.high.plateau_eV, 5.2, places=6)
         self.assertAlmostEqual(profile.high.swing_eV, 0.0, places=6)
