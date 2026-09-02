@@ -42,6 +42,9 @@ not used as package-generated templates.
   chemistry-, temperature- and oxidation-resolved errors, uncertainty
   calibration, publication figures, and per-system committee heatmaps. DPA-2,
   DPA-2 fine-tune, DPA-3 and DPA-4 comparison trees are supported.
+- **Live MLIP progress:** `iface mlip-progress` gives one read-only status table
+  for running MACE and DeePMD committees, completed/frozen models, per-system
+  evaluations and comparison jobs by parsing the files they produce in place.
 - **Reactive NiO surface campaigns:** `iface surface` now handles exposed-site
   analysis, AFM-compatible cell selection, water-balanced hydroxylation and
   proton-transfer states, direct/H-bond phosphonate docking, VASP export, and
@@ -59,14 +62,19 @@ As of September 2026, the parts recorded as exercised by a human on real
 scientific data are:
 
 - the VASP-MLFF preparation, audit, restart/recovery, and related plotting path;
-- the VASP trajectory data generators for MACE extxyz and DeePMD NPY datasets.
+- the VASP trajectory data generators for MACE extxyz and DeePMD NPY datasets;
+- standard four-member MACE committee training and held-out evaluation on the
+  periodic SiN/TiN/TiO interface campaign;
+- DeePMD DPA-2 committee training, checkpoint continuation, freezing and
+  `dp test` evaluation on the same real campaign;
+- live MACE/DeePMD monitoring with `iface mlip-progress` while those committee
+  jobs were running.
 
-Everything else is currently code-only: it may have unit tests, mocked command
-tests, schema checks, or shell-generation checks, but it has not been verified
-by a human in an end-to-end run with the named external engines. In particular,
-the repository does **not** yet establish that generated MACE, DeePMD, Allegro,
-LAMMPS, AI2-Kit, InterMat, or MACE-ROI workflows train, deploy, restart, or
-produce scientifically valid results.
+Those successful runs establish practical usability for the tested chemistry,
+architecture, software version and LONI environment; they are not universal
+scientific validation. DPA-3, DPA-4, DPA-2 fine-tuning, foundation-model MACE
+fine-tuning, MACE-ROI, Allegro, MLIP deployment through LAMMPS, AI2-Kit and
+InterMat retain their narrower automated-test-only or code-only status.
 
 See [Verification and maturity](docs/verification.md) for the evidence standard,
 known gaps, and the minimum checks needed to promote a feature's status.
@@ -79,13 +87,14 @@ known gaps, and the minimum checks needed to promote a feature's status.
 | Slab electrostatics | per-face vacuum-gap audits and guarded cell extension; side-specific LOCPOT plateau fitting; vacuum-aligned VBM/CBM shifts; automatic flatness triage and proposed dipole-correction INCARs | **Automated-test verified.** The analyzer never overwrites INCAR or relaunches VASP. Scientific interpretation still requires visual inspection of the vacuum profile, electronic convergence and projected states. |
 | VASP-MLFF | train → refit → stability scaffolding, continuation/capacity recovery, mode-aware audits | **Human-tested on real campaigns.** This is the most mature part of the repository, but each new VASP version, cluster profile, and recovery condition still requires inspection. |
 | Dataset | streaming OUTCAR collection, leakage-resistant splits, synchronized extxyz and DeePMD NPY layouts | **Human-tested for data generation.** Real VASP data have been exported for MACE and DeePMD. This does not validate downstream training or model quality. |
-| MACE | two-stage energy/force job generation; optional interface-local force weighting and thermodynamic-cycle loss | **Code-only beyond dataset generation.** Generated training, restart, committee, evaluation, and MACE-ROI paths have not been verified end to end. |
+| MACE | two-stage energy/force job generation; committee training/evaluation; optional interface-local force weighting and thermodynamic-cycle loss | **Human-tested for standard committee training and evaluation.** A real four-seed committee completed on the periodic SiN/TiN/TiO campaign and produced held-out energy/force metrics. Foundation-model fine-tuning, MACE-ROI, deployment and transferability remain unverified separately. |
 | MLIP archiving | immutable collection of completed MACE committees into a checksummed directory and ZIP; final models only by default, with optional training data written to a separate ZIP | **Automated-test verified.** Collection, duplicate/missing-member rejection, archive safety, checksums, and verification are tested; long-term storage and restore have not yet been human-tested on a real committee archive. |
-| DeePMD | DPA-1, DPA-2, DPA-3, experimental DPA-4 and DPA-2 foundation-checkpoint fine-tuning; TensorFlow/PyTorch backends; preflight → smoke → full → evaluation | **Code-only beyond dataset generation.** No generated training/deployment chain is currently claimed as human-tested. |
+| DeePMD | DPA-1, DPA-2, DPA-3, experimental DPA-4 and DPA-2 foundation-checkpoint fine-tuning; TensorFlow/PyTorch backends; preflight → smoke → full → evaluation | **Human-tested for PyTorch DPA-2 committee training and evaluation.** Real LONI runs exercised checkpoint continuation, model freezing and per-system `dp test` reporting. Other architectures, fine-tuning and LAMMPS deployment remain separate unverified gates. |
 | Allegro | training/job-generation and LAMMPS-oriented adapter code | **Code-only.** No human-tested training or LAMMPS deployment. |
 | Active learning | thermodynamic exploration matrix and uncertainty-plus-diversity labeling queue; AI2-Kit TESLA MACE/OpenMM/VASP with oh-my-batch; legacy config-driven DeepMD/LAMMPS/VASP | **Code-only.** No completed external-engine loop. |
 | Validation | parity metrics, work of adhesion with uncertainty propagation, rigid-separation curves | **Code-only.** Numerical routines may be unit-tested, but no scientific validation campaign has established model accuracy. |
 | MLIP comparison | matched-frame MACE vs DPA-2/DPA-2-FT/DPA-3/DPA-4 audits on identical canonical test configurations; committee micro/macro/grouped metrics, spread calibration, publication summaries and heatmaps | **Automated-test verified.** A repository-owned synthetic `prepare → status → finalize` workflow and failure guards run in CI; no real cross-backend committee has yet completed the full audit. The present legacy MACE launcher and comparison evaluator both use float32. |
+| MLIP progress | read-only rollup of live MACE epochs/RMSE, DeePMD steps/RMSE/checkpoint/freeze state, per-system evaluation completion and comparison status | **Human-tested on running committees.** It reads generated filesystem artifacts safely while jobs run; it does not query or replace Slurm accounting. |
 | Crystalline interface generation | optional InterMat surface matching, separation/registry scans, deduplicated POSCAR export | **Code-only.** Generated structures have not been human-reviewed in a real InterMat campaign. |
 | Reactive magnetic surfaces | exposed-site analysis, AFM-compatible cell optimization, stoichiometric hydroxylation/proton-transfer states, direct/H-bond phosphonate docking, runnable VASP export, and post-relaxation chemistry/spin audits | **Automated-test verified on the bundled 200-atom NiO(110) system.** The generator recovers the `[[4,0],[0,5]]` compromise cell and builds the full reference campaign; no generated VASP relaxation has yet been scientifically validated. |
 | Provenance | manifests, hashes, append-only events, JSON/CSV/Markdown audits and a self-contained HTML report | **Mostly code-only.** VASP-MLFF audit outputs are the exception; the broader campaign provenance chain has not been exercised end to end. |
@@ -181,6 +190,9 @@ the [slab-alignment example](examples/vasp/slab-alignment/README.md).
 ### Compare trained MACE and DeePMD committees
 
 ```bash
+# Safe to repeat while the training/evaluation jobs are running.
+iface mlip-progress .
+
 iface mlip-compare prepare --deepmd-arch dpa2 --force
 sbatch audit/mlip_compare/run_mace_evaluate.slurm
 iface mlip-compare status --deepmd-eval-root models/deepmd/evaluation/dpa2/job_<jobid>

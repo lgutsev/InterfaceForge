@@ -16,7 +16,7 @@ tests, and scientific validation are not conflated.
 ## Current assessment
 
 This assessment is based on the maintainer's actual use of the repository as of
-August 2026.
+September 2026.
 
 | Area | Current status | Evidence and limits |
 |---|---|---|
@@ -25,9 +25,9 @@ August 2026.
 | VASP OUTCAR → MACE extxyz generation | Human-tested | Real trajectory data have been converted and inspected. This does not verify MACE training. |
 | VASP OUTCAR → DeePMD NPY generation | Human-tested | Real trajectory data have been converted and inspected. This does not verify DeePMD training or type-map correctness for every chemistry. |
 | Generic static/relaxation/MD/DOS/band helpers and geometry utilities | Automated-test only or unverified | These are outside the specifically human-tested VASP-MLFF path unless a command is separately recorded as exercised. |
-| MACE standard training, committee, restart, and evaluation | Unverified/code-only | Scripts and CLI generation exist, but a successful generated end-to-end training workflow is not yet claimed. Hand-written launcher backups do not verify package-generated jobs. |
+| MACE standard training, committee, and evaluation | Human-tested | A four-seed MACE committee was trained and evaluated on the real periodic SiN/TiN/TiO campaign using the synchronized extxyz dataset. This verifies the exercised launcher/runtime path and held-out metric generation for that campaign, not foundation-model fine-tuning, universal restart behavior, deployment, transferability, or scientific validity for other chemistries. |
 | MACE-ROI | Unverified/code-only | The loss, sampler, derived-data, and evaluation code require real training, ablation, and scientific validation. |
-| DeePMD training, smoke/full/evaluation, freeze/export, and LAMMPS use | Unverified/code-only | Dataset generation is the only human-tested DeePMD-related part. DPA/backend/version combinations must be tested separately. |
+| DeePMD DPA-2 training, checkpoint continuation, freezing, and evaluation | Human-tested | A real PyTorch DPA-2 committee was trained on LONI from the synchronized NPY dataset, continued from checkpoints, frozen, and evaluated across the canonical test systems with `dp test`. This status is specific to the exercised DPA-2/runtime path; DPA-1/3/4, DPA-2 fine-tuning, cross-version model loading and LAMMPS deployment remain separate gates. |
 | Allegro training and LAMMPS integration | Unverified/code-only | No real training or LAMMPS run has established compatibility. |
 | AI2-Kit active-learning adapters | Unverified/code-only | Generated TESLA MACE → OpenMM → VASP/oh-my-batch and legacy DeepMD → LAMMPS → VASP paths have automated coverage, but neither has completed a real external-engine loop. |
 | InterMat adapter | Unverified/code-only | Generated interfaces still require a real dependency-version test and human review of termination, strain, registry, and atom overlap. |
@@ -38,7 +38,7 @@ August 2026.
 | Active-learning selection and exploration orchestration | Unverified/code-only | Mathematical and file-level behavior may be tested, but no complete label/train/explore/relabel cycle has been run. |
 | Interface-property validation and HTML reporting | Unverified/code-only | Reporting calculations are not evidence that a trained model reproduces DFT or experiment. |
 | Geometry-stratified validation (kind/temperature/coordination classification and per-class error reporting) | Unverified/code-only | Classification (`iface collect`) and stratified reporting (`iface validate stratified`) have automated coverage but have not been run against a real trained committee's predictions. Per-class physical tests are not yet built. |
-| MLIP progress rollup (`iface mlip-progress`) | Automated-test only | Read-only summary of DeePMD/MACE training, DeePMD evaluation, and `mlip_compare` state from generated files. A synthetic-campaign test checks step/epoch parsing, completion flags, and the rendered table. It never inspects a real running job's live state. |
+| MLIP progress rollup (`iface mlip-progress`) | Human-tested | Used while real MACE and DeePMD committee jobs were running. It correctly rolled up MACE epochs/RMSE, DeePMD steps/RMSE/checkpoint/freeze state, per-system evaluation completion and `mlip_compare` artifacts from live filesystem outputs. It is deliberately read-only and does not query or replace Slurm accounting. Synthetic tests additionally cover parsing and completion flags. |
 | Matched MACE vs DPA-2 comparison audit (`iface mlip-compare`) | Automated-test only | A repository-owned synthetic `prepare -> status -> finalize` test runs under CI together with metric-definition and evaluator-syntax tests plus `SafetyError` guards for frame-identity drift, model arity, overwrite protection, incomplete finalization, and corrupted `dp test` reference columns. No real MACE/DPA-2 committee has yet completed the workflow, and the cross-backend numbers have not been checked against the standalone MACE test table or DeePMD `rmse_overall.csv`. The present legacy committee launcher and comparison evaluator both use float32. See `docs/mlip-comparison.md`. |
 | Campaign-wide provenance, restartability, and portability | Unverified as a complete system | Individual mechanisms exist, but the full lifecycle has not been demonstrated across interruption, relocation, and restart. |
 

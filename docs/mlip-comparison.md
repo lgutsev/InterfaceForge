@@ -30,6 +30,10 @@ only generated files, so it is safe to run against live jobs. Add `--json` for
 the machine-readable payload, or `--mace-committee-root` if the MACE committees
 are not under `models/mace_committee_520eV/`.
 
+This rollup has been used against the real running SiN/TiN/TiO MACE and DeePMD
+committees. It reports progress inferred from artifacts on disk; use `squeue`
+or `sacct` separately for scheduler state, allocation and failure reasons.
+
 ## Workflow
 
 From the campaign root:

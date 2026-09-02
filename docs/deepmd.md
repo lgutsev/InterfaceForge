@@ -1,8 +1,10 @@
 # DeePMD campaigns
 
-> **Verification note:** only generation of DeePMD NPY data from real VASP
-> trajectories has been human-tested. The generated training, evaluation,
-> freeze/export, and LAMMPS paths are code-only and remain unverified.
+> **Verification note:** generation of DeePMD NPY data and the PyTorch DPA-2
+> committee training/checkpoint/freeze/`dp test` evaluation path have been run
+> on the real periodic SiN/TiN/TiO campaign on LONI. This evidence is specific
+> to that architecture and runtime. DPA-1/3/4, DPA-2 fine-tuning, cross-version
+> export compatibility and LAMMPS deployment remain unverified separately.
 
 InterfaceForge validates the canonical `train`, `valid` and `test` NPY systems
 before generating any model directory. Every split must be non-empty and every
