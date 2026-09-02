@@ -52,6 +52,8 @@ from .mlff_interfaces import (
     write_throttled_array_launcher,
 )
 from .mlip_compare import comparison_status, finalize_comparison, prepare_comparison
+from .progress import mlip_progress
+from .progress import render as render_progress
 from .regfgw import compare_registry_selection, regfgw_status, run_regfgw_optimize
 from .report import build_report
 from .selection import select_from_csv
@@ -252,6 +254,17 @@ def cmd_mlip_compare(args: argparse.Namespace) -> int:
         )
     _json(payload)
     return 0 if payload.get("status") != "INCOMPLETE" else 1
+
+
+def cmd_mlip_progress(args: argparse.Namespace) -> int:
+    payload = mlip_progress(
+        _campaign(args).root, mace_committee_root=args.mace_committee_root
+    )
+    if args.json:
+        _json(payload)
+    else:
+        print(render_progress(payload))
+    return 0
 
 
 def cmd_mace_roi_prepare(args: argparse.Namespace) -> int:
@@ -1207,6 +1220,21 @@ def build_parser() -> argparse.ArgumentParser:
     compare_finalize.add_argument("--output-root")
     compare_finalize.add_argument("--deepmd-eval-root")
     compare_finalize.set_defaults(func=cmd_mlip_compare)
+
+    mlip_progress_parser = commands.add_parser(
+        "mlip-progress",
+        help="One-glance training/evaluation/comparison progress for every committee",
+    )
+    add_campaign_option(mlip_progress_parser)
+    mlip_progress_parser.add_argument(
+        "--mace-committee-root",
+        help="Directory holding mace_committee/ and mace_finetune_committee/ "
+        "(default <campaign>/models/mace_committee_520eV)",
+    )
+    mlip_progress_parser.add_argument(
+        "--json", action="store_true", help="Emit the raw payload instead of a table"
+    )
+    mlip_progress_parser.set_defaults(func=cmd_mlip_progress)
 
     explore = commands.add_parser("explore", help="Expand active-learning conditions")
     add_campaign_option(explore)

@@ -19,6 +19,17 @@ every source trajectory contributed frames to training, validation, and test.
 Use an independent trajectory or physical-regime challenge set before making
 transferability claims.
 
+## Checking progress
+
+`iface mlip-progress` prints one table covering every committee at once —
+DeePMD training (step vs `numb_steps`, `rmse_f_val`, checkpoint/frozen flags),
+DeePMD evaluation (`by_system` completion, `rmse_overall.csv`), the from-scratch
+and fine-tuned MACE committees (last epoch, `RMSE_F`, final model), and each
+`audit/mlip_compare*` run (MACE prediction count, finalized or not). It reads
+only generated files, so it is safe to run against live jobs. Add `--json` for
+the machine-readable payload, or `--mace-committee-root` if the MACE committees
+are not under `models/mace_committee_520eV/`.
+
 ## Workflow
 
 From the campaign root:
