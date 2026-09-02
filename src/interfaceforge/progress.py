@@ -80,31 +80,43 @@ def _lcurve_tail(path: Path) -> dict[str, Any] | None:
     if not last:
         return None
 
+    # DeePMD names the per-atom energy / force error columns rmse_f_val,
+    # rmse_f_trn, rmse_f, rmse_force, l2_f_val, ... across backends and versions.
+    error = re.compile(r"rmse|l2|mae|loss")
+    words = {
+        "f": re.compile(r"(?:^|_)f(?:$|_)|force"),
+        "e": re.compile(r"(?:^|_)e(?:$|_)|energy|ener"),
+    }
+    # Fallback column index by data-row width when the header is missing or its
+    # names do not match; keyed on the common DeePMD lcurve layouts.
+    positional = {
+        "f": {8: 5, 6: 3, 4: 2, 5: 3, 7: 4},
+        "e": {8: 3, 6: 1, 4: 1, 5: 2, 7: 2},
+    }
+
     def quantity(letter: str) -> float | None:
-        """Column for the per-atom energy (``e``) or force (``f``) error.
-
-        DeePMD names these ``rmse_f_val`` / ``rmse_f_trn`` / ``rmse_f`` across
-        backends and versions; match any header token that carries an error
-        prefix and a lone ``f``/``e`` token, preferring the validation column.
-        """
-
-        error = re.compile(r"rmse|l2|mae")
-        token_letter = re.compile(rf"(?:^|_){letter}(?:$|_)")
         best: tuple[int, int] | None = None
         for index, name in enumerate(header):
             low = name.lower()
             if index >= len(last) or not _is_number(last[index]):
                 continue
-            if error.search(low) and token_letter.search(low):
+            if error.search(low) and words[letter].search(low):
                 rank = 0 if "val" in low else 1
                 if best is None or rank < best[0]:
                     best = (rank, index)
-        return float(last[best[1]]) if best else None
+        if best is not None:
+            return float(last[best[1]])
+        index = positional[letter].get(len(last))
+        if index is not None and index < len(last) and _is_number(last[index]):
+            return float(last[index])
+        return None
 
     return {
         "step": int(float(last[0])),
         "rmse_f_val_ev_ang": quantity("f"),
         "rmse_e_val_ev_atom": quantity("e"),
+        "columns": len(last),
+        "header": header or None,
     }
 
 
@@ -137,6 +149,7 @@ def _deepmd_training(deepmd_root: Path) -> list[dict[str, Any]]:
                     "checkpoint": checkpoint.is_file() and checkpoint.stat().st_size > 0,
                     "frozen": any((model_dir / name).is_file() for name in _FROZEN_NAMES),
                     "updated": _mtime(model_dir / "lcurve.out"),
+                    "lcurve_header": tail.get("header"),
                 }
             )
         # A member is finished once it has a checkpoint and either a frozen model
