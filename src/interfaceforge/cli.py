@@ -13,7 +13,7 @@ from typing import Any
 from . import __version__
 from .adhesion import METHODS as ADHESION_METHODS
 from .adhesion import SLAB_MODES as ADHESION_SLAB_MODES
-from .adhesion import audit_adhesion, prepare_adhesion
+from .adhesion import audit_adhesion, prepare_adhesion, summarize_adhesion
 from .ai2kit import (
     adapter_status,
     approve_round,
@@ -989,6 +989,24 @@ def cmd_adhesion_audit(args: argparse.Namespace) -> int:
         if args.interface:
             attrs = merge_interface_metadata(validation.get("interfaces"), args.interface)
     _json(audit_adhesion(args.output_dir, references=references, attrs=attrs))
+    return 0
+
+
+def cmd_adhesion_summary(args: argparse.Namespace) -> int:
+    entries: list[tuple[str, str]] = []
+    for item in args.entries:
+        spec, sep, directory = item.partition("=")
+        if not sep:
+            spec, directory = Path(item).name, item
+        entries.append((spec, directory))
+    validation = None
+    if args.campaign and Path(args.campaign).is_file():
+        validation = load_campaign(args.campaign).validation
+    _json(
+        summarize_adhesion(
+            entries, args.output, campaign_validation=validation, title=args.title
+        )
+    )
     return 0
 
 
@@ -2267,6 +2285,30 @@ def build_parser() -> argparse.ArgumentParser:
         "orientation/termination select which reference values apply",
     )
     adhesion_audit.set_defaults(func=cmd_adhesion_audit)
+
+    adhesion_summary = adhesion_commands.add_parser(
+        "summary",
+        help="Roll several audited adhesion trees into one W_ad table + publication figure",
+    )
+    adhesion_summary.add_argument(
+        "entries",
+        nargs="+",
+        metavar="[LEAF=]AUDIT_DIR",
+        help="Each is an 'adhesion prepare' output directory, optionally prefixed "
+        "'<interface leaf>=' so its validation.interfaces metadata selects which "
+        "literature values to overlay",
+    )
+    adhesion_summary.add_argument(
+        "-o", "--output", required=True, help="Directory for adhesion_summary.{json,csv,md,png,svg,pdf}"
+    )
+    adhesion_summary.add_argument(
+        "-c",
+        "--campaign",
+        default=None,
+        help="campaign.yaml providing validation.references / validation.interfaces",
+    )
+    adhesion_summary.add_argument("--title", help="Optional figure title")
+    adhesion_summary.set_defaults(func=cmd_adhesion_summary)
 
     geom = vasp_commands.add_parser("geom", help="ASE-backed geometry preparation")
     geom_commands = geom.add_subparsers(dest="geometry", required=True)

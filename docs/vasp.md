@@ -717,6 +717,35 @@ CSV path adds `literature_key` / `literature_j_per_m2` /
 bundled Sharifi et al. (2026) Si₃N₄/TiN profile is `reference_profiles:
 [sharifi2026]` — see `iface reference show sharifi2026`.
 
+### Summary across interfaces
+
+`iface vasp adhesion summary` rolls several prepared adhesion trees into one
+W_ad table and a publication figure:
+
+```bash
+iface vasp adhesion summary \
+  "interface/450K/Real/N_Term/SiN_TiN_N-term=runs/N_term_adhesion_mlff" \
+  "interface/450K/Real/Ti_Term/SiN-TiN-Ti-term=runs/Ti_term_adhesion_mlff" \
+  -c campaign.yaml -o audit/adhesion_summary --title "Si3N4/TiN work of adhesion"
+```
+
+Each positional is an `adhesion prepare` output directory, optionally prefixed
+`<interface leaf>=` so its `validation.interfaces` metadata picks the literature
+overlay. Every tree is re-audited (so the table reflects current run state and
+marks unfinished interfaces `pending`). Outputs in `-o`:
+
+```text
+adhesion_summary.json         # per-interface W_ad, sigma, and literature matches
+adhesion_summary.csv          # one row per (interface, matched reference)
+adhesion_summary.md           # the same as a table
+adhesion_summary.{png,svg,pdf}  # (a) W_ad vs literature, (b) deviation vs tolerance band
+```
+
+The figure uses the same style as `iface mlip-compare`'s
+`publication_rmse_summary`: computed W_ad with its σ error bar per interface,
+the literature value as an open diamond with a ±tolerance whisker, and a second
+panel of `W_ad − W_ad^lit` against the shaded tolerance band.
+
 ## Audit
 
 `iface audit` interprets train, refit and run modes differently. It parses

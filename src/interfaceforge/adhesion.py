@@ -24,13 +24,16 @@ import json
 import math
 import os
 import shutil
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from .audit import audit_run
-from .errors import SafetyError
+from .config import merge_interface_metadata, references_for
+from .errors import DependencyError, SafetyError
 from .validation import adhesion_from_csv, compare_to_references, separation_curve_from_csv
 
 EV_A2_TO_J_M2 = 16.02176634
@@ -833,4 +836,319 @@ def audit_adhesion(
 
     payload["audit_json"] = str(audit_json)
     payload["audit_markdown"] = str(audit_markdown)
+    return payload
+
+
+# --- work-of-adhesion summary across several audited interfaces ----------------
+
+_METHOD_COLORS = {"mlff": "#0072B2", "dft": "#D55E00"}
+_WITHIN_COLOR = "#009E73"
+_OUTSIDE_COLOR = "#CC3311"
+_LIT_COLOR = "#4B5563"
+
+_SUMMARY_CSV_FIELDS = (
+    "interface",
+    "method",
+    "ready",
+    "work_of_adhesion_j_per_m2",
+    "sigma_j_per_m2",
+    "reference_key",
+    "reference_j_per_m2",
+    "delta_j_per_m2",
+    "tolerance_j_per_m2",
+    "within_tolerance",
+)
+
+
+def _short_labels(specs: Sequence[str]) -> list[str]:
+    """The fewest trailing '/'-segments of each spec that keep them all distinct."""
+
+    parts = [spec.strip("/").split("/") for spec in specs]
+    for depth in range(1, max((len(p) for p in parts), default=1) + 1):
+        labels = ["/".join(p[-depth:]) for p in parts]
+        if len(set(labels)) == len(labels):
+            return labels
+    return list(specs)
+
+
+def _summary_rows(
+    entries: Sequence[tuple[str, str | Path]],
+    *,
+    validation: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    references = (
+        references_for(validation.get("references"), "work_of_adhesion") if validation else None
+    )
+    interfaces = validation.get("interfaces") if validation else None
+    labels = _short_labels([spec for spec, _ in entries])
+    rows: list[dict[str, Any]] = []
+    for (spec, directory), label in zip(entries, labels, strict=True):
+        attrs = merge_interface_metadata(interfaces, spec) if interfaces else {}
+        payload = audit_adhesion(directory, references=references, attrs=attrs or None)
+        adhesion_result = payload.get("work_of_adhesion")
+        row: dict[str, Any] = {
+            "interface": label,
+            "spec": spec,
+            "audit_dir": str(Path(directory).resolve()),
+            "method": str(payload.get("method") or ""),
+            "ready": adhesion_result is not None,
+            "work_of_adhesion_j_per_m2": None,
+            "sigma_j_per_m2": None,
+            "literature": payload.get("literature_comparison") or [],
+        }
+        if adhesion_result is not None:
+            computed = adhesion_result["rows"][0]
+            row["work_of_adhesion_j_per_m2"] = float(computed["work_of_adhesion_j_m2"])
+            row["sigma_j_per_m2"] = float(computed.get("work_of_adhesion_sigma_j_m2") or 0.0)
+        rows.append(row)
+    return rows
+
+
+def _write_summary_tables(rows: list[dict[str, Any]], output: Path) -> dict[str, str]:
+    csv_path = output / "adhesion_summary.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_SUMMARY_CSV_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            base = {
+                "interface": row["interface"],
+                "method": row["method"],
+                "ready": row["ready"],
+                "work_of_adhesion_j_per_m2": row["work_of_adhesion_j_per_m2"],
+                "sigma_j_per_m2": row["sigma_j_per_m2"],
+            }
+            if row["literature"]:
+                for item in row["literature"]:
+                    writer.writerow(
+                        {
+                            **base,
+                            "reference_key": item.get("key"),
+                            "reference_j_per_m2": item["reference_j_per_m2"],
+                            "delta_j_per_m2": item["delta_j_per_m2"],
+                            "tolerance_j_per_m2": item["tolerance_j_per_m2"],
+                            "within_tolerance": item["within_tolerance"],
+                        }
+                    )
+            else:
+                writer.writerow(base)
+
+    lines = [
+        "# Work-of-adhesion summary",
+        "",
+        "| Interface | Method | W_ad (J/m²) | Literature | Δ | Within tol. |",
+        "|---|---|---:|---:|---:|:--:|",
+    ]
+    for row in rows:
+        value = (
+            f"{row['work_of_adhesion_j_per_m2']:.3f} ± {row['sigma_j_per_m2']:.3f}"
+            if row["ready"]
+            else "pending"
+        )
+        if row["literature"]:
+            for item in row["literature"]:
+                lines.append(
+                    f"| {row['interface']} | {row['method']} | {value} | "
+                    f"{item['reference_j_per_m2']:.2f} ({item.get('key', '')}) | "
+                    f"{item['delta_j_per_m2']:+.3f} | "
+                    f"{'yes' if item['within_tolerance'] else 'NO'} |"
+                )
+        else:
+            lines.append(f"| {row['interface']} | {row['method']} | {value} | — | — | — |")
+    md_path = output / "adhesion_summary.md"
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"csv": str(csv_path), "markdown": str(md_path)}
+
+
+def _write_summary_figure(
+    rows: list[dict[str, Any]], output: Path, *, title: str | None
+) -> dict[str, str]:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
+    except ModuleNotFoundError as exc:
+        raise DependencyError(
+            "The adhesion summary figure requires matplotlib; "
+            "install InterfaceForge with interfaceforge[report]"
+        ) from exc
+
+    ready = [row for row in rows if row["ready"]]
+    if not ready:
+        raise SafetyError("No audited interface has a finished work of adhesion to plot")
+    has_literature = any(row["literature"] for row in ready)
+
+    order = list(reversed(ready))  # first entry at the top
+    y = np.arange(len(order), dtype=float)
+    panels = 2 if has_literature else 1
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.size": 8.0,
+            "axes.titlesize": 9.0,
+            "axes.labelsize": 8.5,
+            "xtick.labelsize": 7.5,
+            "ytick.labelsize": 7.5,
+            "legend.fontsize": 7.5,
+            "axes.linewidth": 0.7,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    ):
+        fig, axes = plt.subplots(
+            1,
+            panels,
+            figsize=(7.2 if panels == 2 else 4.4, 0.55 * len(order) + 1.5),
+            squeeze=False,
+            layout="constrained",
+        )
+        ax = axes[0][0]
+        seen_methods: set[str] = set()
+        for index, row in enumerate(order):
+            method = row["method"] or "mlff"
+            color = _METHOD_COLORS.get(method, "#4B5563")
+            seen_methods.add(method)
+            ax.errorbar(
+                row["work_of_adhesion_j_per_m2"],
+                y[index],
+                xerr=row["sigma_j_per_m2"] or None,
+                fmt="o",
+                ms=5.5,
+                color=color,
+                ecolor=color,
+                elinewidth=1.0,
+                capsize=2.5,
+                zorder=3,
+            )
+            for item in row["literature"]:
+                lo = item["reference_j_per_m2"] - item["tolerance_j_per_m2"]
+                hi = item["reference_j_per_m2"] + item["tolerance_j_per_m2"]
+                ax.plot([lo, hi], [y[index]] * 2, color=_LIT_COLOR, lw=1.0, alpha=0.55, zorder=2)
+                ax.scatter(
+                    [item["reference_j_per_m2"]],
+                    [y[index]],
+                    marker="D",
+                    s=26,
+                    facecolors="white",
+                    edgecolors=_LIT_COLOR,
+                    linewidths=0.9,
+                    zorder=4,
+                )
+        ax.set_yticks(y, labels=[row["interface"] for row in order])
+        ax.set_ylim(len(order) - 0.5, -0.5)
+        ax.set_xlim(left=0.0)
+        ax.set_xlabel(r"$W_{\mathrm{ad}}$ (J m$^{-2}$)")
+        ax.set_title("(a) Work of adhesion" if has_literature else "Work of adhesion", loc="left", fontweight="bold")
+        ax.grid(axis="x", color="#D1D5DB", linewidth=0.45, alpha=0.75)
+        ax.set_axisbelow(True)
+        for spine in ("top", "right", "left"):
+            ax.spines[spine].set_visible(False)
+        ax.tick_params(axis="y", length=0)
+
+        if has_literature:
+            ax2 = axes[0][1]
+            tolerances = [
+                item["tolerance_j_per_m2"] for row in order for item in row["literature"]
+            ]
+            band = float(np.median(tolerances)) if tolerances else 0.0
+            ax2.axvspan(-band, band, color=_WITHIN_COLOR, alpha=0.12, zorder=1)
+            ax2.axvline(0.0, color="#6B7280", lw=0.8, zorder=2)
+            for index, row in enumerate(order):
+                for item in row["literature"]:
+                    ax2.scatter(
+                        [item["delta_j_per_m2"]],
+                        [y[index]],
+                        marker="o",
+                        s=30,
+                        color=_WITHIN_COLOR if item["within_tolerance"] else _OUTSIDE_COLOR,
+                        edgecolors="white",
+                        linewidths=0.5,
+                        zorder=3,
+                    )
+            ax2.set_yticks(y, labels=["" for _ in order])
+            ax2.set_ylim(len(order) - 0.5, -0.5)
+            ax2.set_xlabel(r"$W_{\mathrm{ad}} - W_{\mathrm{ad}}^{\mathrm{lit}}$ (J m$^{-2}$)")
+            ax2.set_title("(b) Deviation from literature", loc="left", fontweight="bold")
+            ax2.grid(axis="x", color="#D1D5DB", linewidth=0.45, alpha=0.75)
+            ax2.set_axisbelow(True)
+            for spine in ("top", "right", "left"):
+                ax2.spines[spine].set_visible(False)
+            ax2.tick_params(axis="y", length=0)
+
+        handles = [
+            Line2D([0], [0], marker="o", color=_METHOD_COLORS.get(m, "#4B5563"), lw=0,
+                   markersize=5, label=f"computed ({m.upper()})")
+            for m in sorted(seen_methods)
+        ]
+        if has_literature:
+            handles += [
+                Line2D([0], [0], marker="D", color=_LIT_COLOR, markerfacecolor="white",
+                       lw=0, markersize=5, label="literature value"),
+                Patch(facecolor=_WITHIN_COLOR, alpha=0.2, label="within tolerance"),
+                Line2D([0], [0], marker="o", color=_OUTSIDE_COLOR, lw=0, markersize=5,
+                       label="outside tolerance"),
+            ]
+        fig.legend(handles=handles, loc="outside lower center", ncols=min(len(handles), 4),
+                   frameon=False, handlelength=1.4, columnspacing=1.1)
+        if title:
+            fig.suptitle(title, fontsize=10, fontweight="bold")
+
+        stem = "adhesion_summary"
+        paths = {
+            "figure_png": output / f"{stem}.png",
+            "figure_svg": output / f"{stem}.svg",
+            "figure_pdf": output / f"{stem}.pdf",
+        }
+        fig.savefig(paths["figure_png"], dpi=300, bbox_inches="tight")
+        fig.savefig(paths["figure_svg"], bbox_inches="tight")
+        fig.savefig(paths["figure_pdf"], bbox_inches="tight")
+        plt.close(fig)
+    return {key: str(value) for key, value in paths.items()}
+
+
+def summarize_adhesion(
+    entries: Sequence[tuple[str, str | Path]],
+    output_dir: str | Path,
+    *,
+    campaign_validation: Mapping[str, Any] | None = None,
+    title: str | None = None,
+) -> dict[str, Any]:
+    """Roll several audited work-of-adhesion trees into one table and figure.
+
+    ``entries`` is a list of ``(spec, audit_dir)`` pairs, where ``audit_dir`` was
+    created by :func:`prepare_adhesion` and ``spec`` is a label -- an interface
+    leaf / id if ``campaign_validation`` is given, so its ``validation.interfaces``
+    metadata (orientation, termination) selects which ``validation.references``
+    work-of-adhesion values to overlay. Each tree is (re-)audited, so this
+    reflects current run state and reports interfaces whose slabs have not
+    finished as ``pending``.
+    """
+
+    if not entries:
+        raise SafetyError("summarize_adhesion needs at least one (spec, directory) entry")
+    output = Path(output_dir).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    rows = _summary_rows(entries, validation=campaign_validation)
+    outputs = _write_summary_tables(rows, output)
+    if any(row["ready"] for row in rows):
+        outputs.update(_write_summary_figure(rows, output, title=title))
+    else:
+        outputs["figure"] = "skipped: no interface has a finished work of adhesion yet"
+
+    payload = {
+        "schema_version": 1,
+        "output_directory": str(output),
+        "interfaces": [
+            {key: value for key, value in row.items() if key != "literature"}
+            | {"literature": row["literature"]}
+            for row in rows
+        ],
+        "outputs": outputs,
+    }
+    (output / "adhesion_summary.json").write_text(
+        json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8"
+    )
+    payload["outputs"]["json"] = str(output / "adhesion_summary.json")
     return payload

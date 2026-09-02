@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from interfaceforge.adhesion import audit_adhesion, prepare_adhesion
+from interfaceforge.adhesion import audit_adhesion, prepare_adhesion, summarize_adhesion
 from interfaceforge.errors import SafetyError
 
 _POSCAR = """test interface
@@ -353,6 +354,112 @@ class AdhesionAuditTests(unittest.TestCase):
             computed = result["work_of_adhesion"]["rows"][0]["work_of_adhesion_j_m2"]
             self.assertAlmostEqual(comparison[0]["computed_j_per_m2"], computed)
             self.assertIn("Literature comparison", Path(result["audit_markdown"]).read_text(encoding="utf-8"))
+
+
+def _fake_adhesion_tree(
+    root: Path, name: str, *, method: str, e_interface: float, e_lower: float, e_upper: float,
+    area: float = 100.0, ready: bool = True,
+) -> Path:
+    """An 'adhesion prepare' output tree without the symlink prepare_adhesion makes."""
+    tree = root / name
+    reference = root / f"{name}_reference"
+    reference.mkdir(parents=True)
+    (reference / "OUTCAR").write_text(_fake_outcar(e_interface), encoding="utf-8")
+    for slab, energy in (("lower", e_lower), ("upper", e_upper)):
+        directory = tree / "slabs" / slab
+        directory.mkdir(parents=True)
+        if ready:
+            (directory / "OUTCAR").write_text(_fake_outcar(energy), encoding="utf-8")
+    (tree / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "method": method,
+                "reference_directory": str(reference),
+                "interface_area_A2": area,
+                "slabs": [
+                    {"name": "lower", "directory": "slabs/lower", "formula": "Si4N4"},
+                    {"name": "upper", "directory": "slabs/upper", "formula": "Ti4N4"},
+                ],
+                "rigid_curve": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return tree
+
+
+_VALIDATION = {
+    "interfaces": [
+        {"match": "*N_Term*", "termination": "N"},
+        {"match": "*Ti_Term*", "termination": "Ti"},
+    ],
+    "references": [
+        {
+            "key": "sharifi2026",
+            "quantity": "work_of_adhesion",
+            "tolerance_j_per_m2": 0.5,
+            "citation": "Sharifi et al. 2026",
+            "values": [
+                {"match": {"termination": "N"}, "value_j_per_m2": 1.24},
+                {"match": {"termination": "Ti"}, "value_j_per_m2": 3.28},
+            ],
+        }
+    ],
+}
+
+
+class AdhesionSummaryTests(unittest.TestCase):
+    def test_summary_table_and_figure_with_literature_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            n_tree = _fake_adhesion_tree(
+                root, "nterm", method="mlff", e_interface=-200.0, e_lower=-90.0, e_upper=-95.0
+            )
+            ti_tree = _fake_adhesion_tree(
+                root, "titerm", method="mlff", e_interface=-210.0, e_lower=-90.0, e_upper=-95.0
+            )
+            payload = summarize_adhesion(
+                [
+                    ("interface/450K/Real/N_Term/SiN_TiN_N-term", n_tree),
+                    ("interface/450K/Real/Ti_Term/SiN-TiN-Ti-term", ti_tree),
+                ],
+                root / "summary",
+                campaign_validation=_VALIDATION,
+                title="test",
+            )
+            rows = payload["interfaces"]
+            self.assertEqual([r["interface"] for r in rows], ["SiN_TiN_N-term", "SiN-TiN-Ti-term"])
+            # WoA(N) = (-90 + -95 - -200)/100 = 0.15 eV/A^2 -> 0.15 * 16.02176634
+            self.assertAlmostEqual(rows[0]["work_of_adhesion_j_per_m2"], 0.15 * 16.02176634)
+            self.assertEqual(rows[0]["literature"][0]["reference_j_per_m2"], 1.24)
+            self.assertEqual(rows[1]["literature"][0]["reference_j_per_m2"], 3.28)
+            for key in ("csv", "markdown", "figure_png", "figure_svg", "figure_pdf", "json"):
+                self.assertTrue(Path(payload["outputs"][key]).is_file())
+            csv_text = Path(payload["outputs"]["csv"]).read_text(encoding="utf-8")
+            self.assertIn("sharifi2026", csv_text)
+
+    def test_pending_interface_is_reported_without_a_figure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pending = _fake_adhesion_tree(
+                root, "p", method="dft", e_interface=-200.0, e_lower=-90.0, e_upper=-95.0, ready=False
+            )
+            payload = summarize_adhesion(
+                [("interface/450K/Real/N_Term/x", pending)], root / "s"
+            )
+            self.assertFalse(payload["interfaces"][0]["ready"])
+            self.assertIn("skipped", payload["outputs"]["figure"])
+            self.assertTrue(Path(payload["outputs"]["csv"]).is_file())
+
+    def test_short_labels_disambiguate_only_as_needed(self) -> None:
+        from interfaceforge.adhesion import _short_labels
+
+        self.assertEqual(
+            _short_labels(["a/b/N_Term/leaf", "a/c/Ti_Term/leaf"]),
+            ["N_Term/leaf", "Ti_Term/leaf"],
+        )
+        self.assertEqual(_short_labels(["x/one", "y/two"]), ["one", "two"])
 
 
 if __name__ == "__main__":

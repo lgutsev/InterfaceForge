@@ -329,6 +329,7 @@ iface vasp workfunction LOCPOT OUTCAR --plot-output workfunction.png
 iface vasp adhesion prepare interface_run --method mlff --distances 0.5 1 2 3 4 6 8
 iface vasp adhesion audit interface_run_adhesion_mlff  # after VASP finishes
 iface vasp adhesion audit interface_run_adhesion_mlff -c campaign.yaml --interface "interface/450K/Real/Ti_Term/*"  # + literature comparison
+iface vasp adhesion summary "LEAF=run1_adhesion_mlff" "LEAF=run2_adhesion_mlff" -c campaign.yaml -o audit/adhesion_summary  # W_ad table + publication figure
 iface reference show sharifi2026  # bundled Si3N4/TiN work-of-adhesion reference profile
 iface reference activate sharifi2026 -c campaign.yaml --write  # splice it into validation.reference_profiles
 iface vasp pack campaign_outputs.zip --root runs/vasp
