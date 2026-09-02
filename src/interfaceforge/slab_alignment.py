@@ -84,6 +84,9 @@ OUTPUT_FIELDS = [
     "selected_slope_eV_per_A",
     "selected_swing_eV",
     "selected_std_eV",
+    "selected_correction_step_detected",
+    "selected_correction_step_A",
+    "selected_correction_step_eV",
     "low_vacuum_eV",
     "high_vacuum_eV",
     "high_minus_low_vacuum_eV",
@@ -105,6 +108,9 @@ AUDIT_FIELDS = [
     "selected_slope_eV_per_A",
     "selected_swing_eV",
     "selected_std_eV",
+    "selected_correction_step_detected",
+    "selected_correction_step_A",
+    "selected_correction_step_eV",
     "suggested_DIPOL_z",
     "compactness_R",
     "current_LDIPOL",
@@ -157,6 +163,9 @@ class Plateau:
     window_end_A: float
     window_width_A: float
     npoints: int
+    correction_step_detected: bool = False
+    correction_step_A: float | None = None
+    correction_step_eV: float | None = None
 
 
 @dataclass
@@ -320,6 +329,10 @@ def _fit_plateau(
     potential: np.ndarray,
     start: float,
     end: float,
+    minimum_window_angstrom: float,
+    discontinuity_min_eV: float,
+    discontinuity_factor: float,
+    discontinuity_margin_angstrom: float,
 ) -> Plateau:
     mask = (shifted_z >= start) & (shifted_z <= end)
     if np.count_nonzero(mask) < 5:
@@ -328,19 +341,74 @@ def _fit_plateau(
     y_values = potential[mask]
     order = np.argsort(x_values)
     x_values, y_values = x_values[order], y_values[order]
+
+    # LDIPOL adds a sawtooth-like correction whose reset is a real feature of
+    # the corrected periodic potential.  It must not be interpreted as a
+    # residual electric field.  Find abrupt point-to-point changes and retain
+    # only the contiguous plateau connected to the physical surface: the
+    # right edge for low-z and the left edge for high-z.
+    differences = np.diff(y_values)
+    absolute_differences = np.abs(differences)
+    typical_difference = float(np.median(absolute_differences))
+    jump_threshold = max(discontinuity_min_eV, discontinuity_factor * typical_difference)
+    jump_indices = np.flatnonzero(absolute_differences >= jump_threshold)
+    if side == "low-z":
+        jump_indices = np.array(
+            [
+                index
+                for index in jump_indices
+                if end - 0.5 * (x_values[index] + x_values[index + 1])
+                >= minimum_window_angstrom + discontinuity_margin_angstrom
+            ],
+            dtype=int,
+        )
+    else:
+        jump_indices = np.array(
+            [
+                index
+                for index in jump_indices
+                if 0.5 * (x_values[index] + x_values[index + 1]) - start
+                >= minimum_window_angstrom + discontinuity_margin_angstrom
+            ],
+            dtype=int,
+        )
+    correction_step_detected = bool(jump_indices.size)
+    correction_step_A: float | None = None
+    correction_step_eV: float | None = None
+    if correction_step_detected:
+        jump_index = int(jump_indices[-1] if side == "low-z" else jump_indices[0])
+        correction_step_A = float(0.5 * (x_values[jump_index] + x_values[jump_index + 1]))
+        correction_step_eV = float(differences[jump_index])
+        if side == "low-z":
+            keep = x_values >= correction_step_A + discontinuity_margin_angstrom
+        else:
+            keep = x_values <= correction_step_A - discontinuity_margin_angstrom
+        if np.count_nonzero(keep) < 5:
+            raise SafetyError(
+                f"{side} surface-adjacent plateau has fewer than five points after excluding the dipole step"
+            )
+        x_values, y_values = x_values[keep], y_values[keep]
+
+    width = float(x_values[-1] - x_values[0])
+    if width < minimum_window_angstrom:
+        raise SafetyError(
+            f"{side} surface-adjacent plateau is only {width:.3f} A after excluding the dipole step"
+        )
     slope, intercept = np.polyfit(x_values, y_values, 1)
     residual = y_values - (slope * x_values + intercept)
-    width = float(x_values[-1] - x_values[0])
     return Plateau(
         side=side,
         plateau_eV=float(np.median(y_values)),
         slope_eV_per_A=float(slope),
         swing_eV=float(abs(slope) * width),
         residual_std_eV=float(np.std(residual)),
-        window_start_A=float(start),
-        window_end_A=float(end),
+        window_start_A=float(x_values[0]),
+        window_end_A=float(x_values[-1]),
         window_width_A=width,
         npoints=int(x_values.size),
+        correction_step_detected=correction_step_detected,
+        correction_step_A=correction_step_A,
+        correction_step_eV=correction_step_eV,
     )
 
 
@@ -350,6 +418,9 @@ def analyze_profile(
     potential: np.ndarray,
     buffer_angstrom: float = 2.0,
     minimum_window_angstrom: float = 2.0,
+    discontinuity_min_eV: float = 0.05,
+    discontinuity_factor: float = 10.0,
+    discontinuity_margin_angstrom: float = 0.5,
 ) -> tuple[ProfileAnalysis, np.ndarray, np.ndarray]:
     """Fit the two physical vacuum sides independently across a periodic cell."""
 
@@ -370,8 +441,14 @@ def analyze_profile(
         raise SafetyError(f"Low-z vacuum window is only {low_end - low_start:.3f} A")
     if high_end - high_start < minimum_window_angstrom:
         raise SafetyError(f"High-z vacuum window is only {high_end - high_start:.3f} A")
-    low = _fit_plateau("low-z", grid_shifted, potential_shifted, low_start, low_end)
-    high = _fit_plateau("high-z", grid_shifted, potential_shifted, high_start, high_end)
+    fit_options = {
+        "minimum_window_angstrom": minimum_window_angstrom,
+        "discontinuity_min_eV": discontinuity_min_eV,
+        "discontinuity_factor": discontinuity_factor,
+        "discontinuity_margin_angstrom": discontinuity_margin_angstrom,
+    }
+    low = _fit_plateau("low-z", grid_shifted, potential_shifted, low_start, low_end, **fit_options)
+    high = _fit_plateau("high-z", grid_shifted, potential_shifted, high_start, high_end, **fit_options)
     return (
         ProfileAnalysis(cut, length, atom_low, atom_high, low, high),
         grid_shifted,
@@ -459,6 +536,9 @@ def load_alignment_config(path: str | Path) -> dict[str, Any]:
         "side": "high-z",
         "buffer_angstrom": 2.0,
         "minimum_window_angstrom": 2.0,
+        "discontinuity_min_eV": 0.05,
+        "discontinuity_factor": 10.0,
+        "discontinuity_margin_angstrom": 0.5,
         "swing_warn_eV": 0.03,
         "swing_fail_eV": 0.10,
         "std_warn_eV": 0.02,
@@ -502,6 +582,7 @@ def _plot_profile(
     shifted_z: np.ndarray,
     potential: np.ndarray,
     profile: ProfileAnalysis,
+    selected: Plateau,
     efermi: float | None,
 ) -> None:
     try:
@@ -515,18 +596,11 @@ def _plot_profile(
     offset = efermi if efermi is not None else 0.0
     axes.plot(shifted_z, potential - offset, color="black", linewidth=1.4)
     axes.axvspan(
-        profile.low.window_start_A,
-        profile.low.window_end_A,
-        color="#3B82F6",
+        selected.window_start_A,
+        selected.window_end_A,
+        color="#F59E0B",
         alpha=0.18,
-        label="low-z vacuum",
-    )
-    axes.axvspan(
-        profile.high.window_start_A,
-        profile.high.window_end_A,
-        color="#EF4444",
-        alpha=0.18,
-        label="high-z vacuum",
+        label=f"selected {selected.side} fit window",
     )
     axes.axvspan(
         profile.atom_low_A,
@@ -535,9 +609,21 @@ def _plot_profile(
         alpha=0.18,
         label="atomic region",
     )
+    if selected.correction_step_detected and selected.correction_step_A is not None:
+        axes.axvline(
+            selected.correction_step_A,
+            color="#7C3AED",
+            linestyle=":",
+            linewidth=1.2,
+            label="dipole-correction step (excluded)",
+        )
     axes.set(
         xlabel="Shifted distance along c (Å)",
-        ylabel=r"Planar potential $-E_F$ (eV)" if efermi is not None else "Planar potential (eV)",
+        ylabel=(
+            r"Planar-averaged local potential, $\overline{V}_{\rm loc}(z)-E_F$ (eV)"
+            if efermi is not None
+            else r"Planar-averaged local potential, $\overline{V}_{\rm loc}(z)$ (eV)"
+        ),
         xlim=(0, profile.c_length_A),
         title=calc_dir.name,
     )
@@ -577,13 +663,25 @@ def _plot_workfunction_profile(
         alpha=0.18,
         label=f"{selected.side} fit window",
     )
+    if selected.correction_step_detected and selected.correction_step_A is not None:
+        axes.axvline(
+            selected.correction_step_A,
+            color="#7C3AED",
+            linestyle=":",
+            linewidth=1.2,
+            label="dipole-correction step (excluded)",
+        )
     axes.grid(color="gray", linestyle="-.", alpha=0.45)
     axes.minorticks_on()
     axes.set_xlim(0, profile.c_length_A)
     upper = float(np.max(values)) + 0.5
     axes.set_ylim(upper - 2.5, upper)
     axes.set_xlabel("Shifted distance along c (Å)")
-    axes.set_ylabel("Potential - $E_F$ (eV)" if efermi is not None else "Potential (eV)")
+    axes.set_ylabel(
+        r"$\overline{V}_{\rm loc}(z)-E_F$ (eV)"
+        if efermi is not None
+        else r"$\overline{V}_{\rm loc}(z)$ (eV)"
+    )
     axes.set_title(calc_dir.name)
     axes.legend(frameon=False, fontsize=8)
     figure.tight_layout()
@@ -706,6 +804,9 @@ def _analyze_folder(
             potential,
             buffer_angstrom=config["buffer_angstrom"],
             minimum_window_angstrom=config["minimum_window_angstrom"],
+            discontinuity_min_eV=config["discontinuity_min_eV"],
+            discontinuity_factor=config["discontinuity_factor"],
+            discontinuity_margin_angstrom=config["discontinuity_margin_angstrom"],
         )
         selected = profile.high if config["side"] == "high-z" else profile.low
         selected_status = plateau_status(selected, config)
@@ -720,6 +821,9 @@ def _analyze_folder(
                 "selected_slope_eV_per_A": selected.slope_eV_per_A,
                 "selected_swing_eV": selected.swing_eV,
                 "selected_std_eV": selected.residual_std_eV,
+                "selected_correction_step_detected": selected.correction_step_detected,
+                "selected_correction_step_A": selected.correction_step_A,
+                "selected_correction_step_eV": selected.correction_step_eV,
                 "low_vacuum_eV": profile.low.plateau_eV,
                 "high_vacuum_eV": profile.high.plateau_eV,
                 "high_minus_low_vacuum_eV": profile.high.plateau_eV - profile.low.plateau_eV,
@@ -738,7 +842,7 @@ def _analyze_folder(
             efermi_outcar = efermi_from_outcar(calc_dir / "OUTCAR")
         except (OSError, SafetyError):
             efermi_outcar = None
-        _plot_profile(calc_dir, shifted_z, shifted_potential, profile, efermi_outcar)
+        _plot_profile(calc_dir, shifted_z, shifted_potential, profile, selected, efermi_outcar)
         _plot_workfunction_profile(
             calc_dir,
             shifted_z,

@@ -33,6 +33,12 @@ electronic-structure file no longer prevents the LOCPOT flatness decision.
   work-function-style `Workfunction.png` in every analyzed child;
 - `sumo_dosplot.log` when `--run-sumo` is requested.
 
+The audit recognizes the expected sawtooth discontinuity introduced by
+VASP's dipole correction. Each plot highlights only the configured physical
+surface's selected plateau, marks that side's correction-plane step when
+present, and excludes the step from the fit. A sharp correction step is
+therefore not itself a reason to relaunch a calculation.
+
 Flatness triage is automatic. No calculation is submitted and no `INCAR` is
 ever overwritten:
 
