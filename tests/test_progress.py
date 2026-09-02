@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from interfaceforge.progress import mlip_progress, render
+from interfaceforge.progress import _lcurve_tail, mlip_progress, render
 
 
 def _build_campaign(root: Path) -> Path:
@@ -133,6 +133,27 @@ class TestMlipProgress(unittest.TestCase):
             self.assertIn("[OK] dpa2", text)
             self.assertIn("[..] dpa3", text)
             self.assertIn("mace_finetune_committee", text)
+
+    def test_lcurve_tail_reads_step_from_column_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "lcurve.out"
+            for text in (
+                # PyTorch 8-column
+                "#  step  rmse_val  rmse_trn  rmse_e_val  rmse_e_trn  rmse_f_val  rmse_f_trn  lr\n"
+                "0  15  16  0.5  0.5  0.48  0.5  1e-3\n"
+                "500000  0.28  0.10  1e-3  1e-3  0.11  0.04  1e-6\n",
+                # TensorFlow-style training-only columns
+                "#  step  rmse_trn  rmse_e_trn  rmse_f_trn  lr\n"
+                "500000  0.12  8e-4  0.045  1e-6\n",
+                # a restart appends a second header block, and a non-numeric
+                # trailing line must not be taken as the last data row
+                "# step rmse_f_val lr\n0 0.5 1e-3\n"
+                "# step rmse_f_val lr\n500000 0.11 1e-6\ndone\n",
+            ):
+                path.write_text(text, encoding="utf-8")
+                tail = _lcurve_tail(path)
+                self.assertIsNotNone(tail)
+                self.assertEqual(tail["step"], 500000)
 
     def test_empty_campaign_renders_without_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

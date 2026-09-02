@@ -40,43 +40,55 @@ def _job_sort_key(path: Path) -> tuple[int, float]:
     return (int(suffix) if suffix.isdigit() else -1, path.stat().st_mtime)
 
 
+def _is_number(token: str) -> bool:
+    try:
+        float(token)
+    except ValueError:
+        return False
+    return True
+
+
 def _lcurve_tail(path: Path) -> dict[str, Any] | None:
-    """Return the last row of a DeePMD ``lcurve.out`` keyed by its header names."""
+    """Parse the last data row of a DeePMD ``lcurve.out``.
+
+    Column 0 is the step in every DeePMD backend and version; the force and
+    energy columns are located by name from the ``#`` header when present and
+    left ``None`` otherwise.
+    """
 
     if not path.is_file():
         return None
     header: list[str] = []
     last: list[str] = []
     try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                if stripped.startswith("#"):
-                    header = stripped.lstrip("#").split()
-                elif not stripped.startswith("//"):
-                    last = stripped.split()
+        content = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            header = line.lstrip("# ").split()
+            continue
+        fields = line.split()
+        if fields and _is_number(fields[0]):
+            last = fields
     if not last:
         return None
-    row = dict(zip(header or ["step"], last, strict=False))
+    position = {name: index for index, name in enumerate(header)}
 
-    def _num(*names: str) -> float | None:
+    def column(*names: str) -> float | None:
         for name in names:
-            if name in row:
-                try:
-                    return float(row[name])
-                except ValueError:
-                    return None
+            index = position.get(name)
+            if index is not None and index < len(last) and _is_number(last[index]):
+                return float(last[index])
         return None
 
-    step = _num("step")
     return {
-        "step": int(step) if step is not None else None,
-        "rmse_f_val_ev_ang": _num("rmse_f_val", "rmse_f_trn", "rmse_f"),
-        "rmse_e_val_ev_atom": _num("rmse_e_val", "rmse_e_trn", "rmse_e"),
+        "step": int(float(last[0])),
+        "rmse_f_val_ev_ang": column("rmse_f_val", "rmse_f_trn", "rmse_f"),
+        "rmse_e_val_ev_atom": column("rmse_e_val", "rmse_e_trn", "rmse_e"),
     }
 
 
@@ -111,8 +123,14 @@ def _deepmd_training(deepmd_root: Path) -> list[dict[str, Any]]:
                     "updated": _mtime(model_dir / "lcurve.out"),
                 }
             )
-        complete = target is not None and all(
-            member["checkpoint"] and (member["step"] or 0) >= target for member in members
+        # A member is finished once it has a checkpoint and either a frozen model
+        # (the ensemble script freezes only after training completes) or a step
+        # count that reached the target. DPA-4 often has no frozen model because
+        # its freeze is a separate, sometimes-failing gate.
+        complete = all(
+            member["checkpoint"]
+            and (member["frozen"] or (target is not None and (member["step"] or 0) >= target))
+            for member in members
         )
         rows.append(
             {
