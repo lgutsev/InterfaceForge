@@ -107,7 +107,7 @@ class TrainingTests(unittest.TestCase):
                 "seeds": [11],
             }
             campaign_path = write_campaign(root, deepmd=deepmd)
-            with self.assertRaisesRegex(ConfigurationError, "finetune.pretrained"):
+            with self.assertRaisesRegex(ConfigurationError, "pretrained is required"):
                 load_campaign(campaign_path)
 
     def test_dpa2_finetune_emits_gated_finetune_flags(self) -> None:
@@ -137,17 +137,13 @@ class TrainingTests(unittest.TestCase):
             manifest = generate_deepmd_training(campaign)
             self.assertEqual(
                 manifest["finetune"],
-                {
-                    "architecture": "dpa2_ft",
-                    "pretrained": str(pretrained),
-                    "model_branch": "Domains_Anode",
-                },
+                {"dpa2_ft": {"pretrained": str(pretrained), "model_branch": "Domains_Anode"}},
             )
             ensemble = (root / "models/deepmd/run_ensemble.slurm").read_text(
                 encoding="utf-8"
             )
             smoke = (root / "models/deepmd/run_smoke.slurm").read_text(encoding="utf-8")
-            self.assertIn('elif [[ "$ARCH" == "dpa2_ft" ]]', ensemble)
+            self.assertIn('case "$ARCH" in dpa2_ft)', ensemble)
             self.assertIn("--finetune", ensemble)
             self.assertIn("--model-branch Domains_Anode --use-pretrain-script", ensemble)
             self.assertIn("--model-branch Domains_Anode --use-pretrain-script", smoke)
@@ -166,6 +162,72 @@ class TrainingTests(unittest.TestCase):
                     text=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_dpa3_finetune_uses_its_own_checkpoint_and_dpa3_shapes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for split in ("train", "valid", "test"):
+                make_deepmd_system(root, split)
+            dpa2_ckpt = root / "ckpts" / "dpa2_openlam.pt"
+            dpa3_ckpt = root / "ckpts" / "dpa3_openlam.pt"
+            dpa2_ckpt.parent.mkdir(parents=True)
+            dpa2_ckpt.write_bytes(b"dpa2")
+            dpa3_ckpt.write_bytes(b"dpa3")
+            deepmd = {
+                "enabled": True,
+                "profile": "deepmd_gpu",
+                "backend": "pt_expt",
+                "architectures": ["dpa2_ft", "dpa3_ft"],
+                "committee": 1,
+                "seeds": [11],
+                "numb_steps": 100,
+                "batch_atoms": 64,
+                "max_concurrent": 1,
+                "finetune": {
+                    "dpa2_ft": {"pretrained": str(dpa2_ckpt), "model_branch": "RANDOM"},
+                    "dpa3_ft": {"pretrained": str(dpa3_ckpt), "model_branch": "Omat24"},
+                },
+            }
+            campaign = load_campaign(write_campaign(root, deepmd=deepmd))
+            manifest = generate_deepmd_training(campaign)
+            self.assertEqual(
+                manifest["finetune"]["dpa3_ft"],
+                {"pretrained": str(dpa3_ckpt), "model_branch": "Omat24"},
+            )
+            ensemble = (root / "models/deepmd/run_ensemble.slurm").read_text(encoding="utf-8")
+            self.assertIn("dpa3_ft) TRAIN_ARGS+=(--finetune", ensemble)
+            self.assertIn("--model-branch Omat24 --use-pretrain-script", ensemble)
+            self.assertIn("--model-branch RANDOM --use-pretrain-script", ensemble)
+            dpa3_input = json.loads(
+                (root / "models/deepmd/dpa3_ft/model_000/input.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(dpa3_input["model"]["descriptor"]["type"], "dpa3")
+            for name in manifest["execution_order"]:
+                result = subprocess.run(
+                    ["bash", "-n", root / "models/deepmd" / name],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_flat_finetune_block_is_rejected_for_multiple_ft_architectures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for split in ("train", "valid", "test"):
+                make_deepmd_system(root, split)
+            ckpt = root / "c.pt"
+            ckpt.write_bytes(b"x")
+            deepmd = {
+                "enabled": True,
+                "profile": "deepmd_gpu",
+                "backend": "pt_expt",
+                "architectures": ["dpa2_ft", "dpa3_ft"],
+                "committee": 1,
+                "seeds": [11],
+                "finetune": {"pretrained": str(ckpt)},
+            }
+            with self.assertRaisesRegex(ConfigurationError, "keyed by architecture"):
+                load_campaign(write_campaign(root, deepmd=deepmd))
 
     def test_pytorch_audit_uses_checkpoint_and_records_export_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

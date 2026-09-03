@@ -70,26 +70,26 @@ iface mlip-compare finalize \
   --deepmd-eval-root models/deepmd/evaluation/dpa2/job_<jobid>
 ```
 
-### Comparing against DPA-3, DPA-4, or a fine-tuned DPA-2
+### Comparing against DPA-3, DPA-4, or a fine-tuned DPA-2 / DPA-3
 
-`prepare` takes `--deepmd-arch {dpa2,dpa2_ft,dpa3,dpa4}` (default `dpa2`). It
-selects the `models/deepmd/evaluation/<arch>` tree and records the choice in the
-manifest; `status` and `finalize` read it back, and every rendered label
-(`comparison.md`, `comparison.svg`, the three summary figures, the heatmaps)
-shows the real architecture. The metrics schema is unchanged — the internal
-engine key stays `DPA2`.
+`prepare` takes `--deepmd-arch {dpa2,dpa2_ft,dpa3,dpa3_ft,dpa4}` (default
+`dpa2`). It selects the `models/deepmd/evaluation/<arch>` tree and records the
+choice in the manifest; `status` and `finalize` read it back, and every rendered
+label (`comparison.md`, `comparison.svg`, the three summary figures, the
+heatmaps) shows the real architecture. The metrics schema is unchanged — the
+internal engine key stays `DPA2`.
 
 Run once per architecture into its own output directory, against the same MACE
 committee:
 
 ```bash
-for arch in dpa2 dpa3 dpa2_ft; do
+for arch in dpa2 dpa3 dpa3_ft; do
   iface mlip-compare prepare --deepmd-arch "$arch" \
     --output-root "audit/mlip_compare_$arch" --force
   sbatch "audit/mlip_compare_$arch/run_mace_evaluate.slurm"
 done
 # after every MACE array and every DeePMD evaluation finishes:
-for arch in dpa2 dpa3 dpa2_ft; do
+for arch in dpa2 dpa3 dpa3_ft; do
   iface mlip-compare finalize --output-root "audit/mlip_compare_$arch" \
     --deepmd-eval-root "models/deepmd/evaluation/$arch/job_<jobid>"
 done

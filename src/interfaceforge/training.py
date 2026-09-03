@@ -353,10 +353,9 @@ def validate_deepmd_dataset(root: Path) -> tuple[list[str], dict[str, list[str]]
 
 
 def _deepmd_descriptor(name: str, backend: str, seed: int) -> dict[str, Any]:
-    # dpa2_ft is a fine-tuning run of the dpa2 architecture: identical model
-    # structure, only the training command differs.
-    if name == "dpa2_ft":
-        name = "dpa2"
+    # dpa2_ft / dpa3_ft are fine-tuning runs of the dpa2 / dpa3 architecture:
+    # identical generated model structure, only the training command differs.
+    name = {"dpa2_ft": "dpa2", "dpa3_ft": "dpa3"}.get(name, name)
     if name == "dpa1":
         descriptor_type = "dpa1" if backend == "pt_expt" else "se_atten"
         return {
@@ -490,7 +489,7 @@ def deepmd_input(
         }
         if not model["type_embedding"]:
             model.pop("type_embedding")
-    modern = architecture in {"dpa2", "dpa2_ft", "dpa3", "dpa4"}
+    modern = architecture in {"dpa2", "dpa2_ft", "dpa3", "dpa3_ft", "dpa4"}
     return {
         "_comment": "InterfaceForge energy/force model; raw DFT force labels.",
         "model": model,
@@ -654,22 +653,29 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
             'but deployment is not approved."; fi'
         )
     finetune = dict(settings.get("finetune", {}))
-    if "dpa2_ft" in architectures:
-        ft_pretrained = shlex.quote(str(finetune["pretrained"]))
-        ft_branch = shlex.quote(str(finetune.get("model_branch", "RANDOM")))
+    ft_archs = [arch for arch in architectures if arch in {"dpa2_ft", "dpa3_ft"}]
+    if ft_archs:
         # --use-pretrain-script: take the descriptor and fitting-net architecture
         # from the pretrained checkpoint instead of the generated input.json,
-        # which only carries InterfaceForge's small default dpa2 shapes.
-        ft_flags = f"--finetune {ft_pretrained} --model-branch {ft_branch} --use-pretrain-script"
+        # which only carries InterfaceForge's small default dpa2/dpa3 shapes.
+        def _ft_flags(arch: str) -> str:
+            entry = finetune[arch]
+            pretrained = shlex.quote(str(entry["pretrained"]))
+            branch = shlex.quote(str(entry.get("model_branch", "RANDOM")))
+            return f"--finetune {pretrained} --model-branch {branch} --use-pretrain-script"
+
+        train_cases = " ".join(f"{arch}) TRAIN_ARGS+=({_ft_flags(arch)}) ;;" for arch in ft_archs)
         train_dispatch = (
             f'if [[ -s {restart_marker} ]]; then TRAIN_ARGS+=(--restart {checkpoint}); '
-            f'elif [[ "$ARCH" == "dpa2_ft" ]]; then '
-            f"TRAIN_ARGS+=({ft_flags}); fi"
+            f'else case "$ARCH" in {train_cases} esac; fi'
+        )
+        smoke_cases = " ".join(
+            f"{arch}) dp_exec {backend_flag} train input.json {_ft_flags(arch)} ;;"
+            for arch in ft_archs
         )
         smoke_train_line = (
-            f'if [[ "$ARCH" == "dpa2_ft" ]]; then '
-            f"dp_exec {backend_flag} train input.json {ft_flags}; "
-            f"else dp_exec {backend_flag} train input.json; fi"
+            f'case "$ARCH" in {smoke_cases} '
+            f"*) dp_exec {backend_flag} train input.json ;; esac"
         )
     else:
         train_dispatch = (
@@ -865,11 +871,13 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
         "architectures": architectures,
         "finetune": (
             {
-                "architecture": "dpa2_ft",
-                "pretrained": str(finetune["pretrained"]),
-                "model_branch": str(finetune.get("model_branch", "RANDOM")),
+                arch: {
+                    "pretrained": str(finetune[arch]["pretrained"]),
+                    "model_branch": str(finetune[arch].get("model_branch", "RANDOM")),
+                }
+                for arch in ft_archs
             }
-            if "dpa2_ft" in architectures
+            if ft_archs
             else None
         ),
         "dataset_root": str(dataset_root),

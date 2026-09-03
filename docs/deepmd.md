@@ -18,33 +18,46 @@ system must use the same `type_map.raw`.
 | DPA-2 | `dpa2` | PyTorch or `pt_expt` |
 | DPA-2 fine-tune | `dpa2_ft` (dpa2 structure, fine-tuned) | PyTorch or `pt_expt` |
 | DPA-3 | `dpa3` | PyTorch or `pt_expt` |
+| DPA-3 fine-tune | `dpa3_ft` (dpa3 structure, fine-tuned) | PyTorch or `pt_expt` |
 | DPA-4 | `dpa4` + `dpa4_ener` | PyTorch or `pt_expt`; experimental deployment |
 | classic | `se_e2_a` | TensorFlow, PyTorch |
 
 The input shapes mirror the supplied modern campaign primer and remain fully
 editable after generation.
 
-### Fine-tuning DPA-2 from a foundation checkpoint
+### Fine-tuning DPA-2 or DPA-3 from a foundation checkpoint
 
-`dpa2_ft` is a fine-tuning run of the `dpa2` architecture. It coexists with a
-from-scratch `dpa2` entry in the same committee (own `models/deepmd/dpa2_ft/`
-tree and evaluation), so the two can be compared directly. It requires a
-`finetune` block:
+`dpa2_ft` / `dpa3_ft` are fine-tuning runs of the `dpa2` / `dpa3` architecture.
+Each coexists with its from-scratch counterpart in the same committee (own
+`models/deepmd/dpa<N>_ft/` tree and evaluation), so the two can be compared
+directly. They require a `finetune` block.
+
+**One `*_ft` architecture** — the flat form:
 
 ```yaml
 models:
   deepmd:
     backend: pt_expt
-    architectures: [dpa2, dpa2_ft, dpa3]
+    architectures: [dpa3, dpa3_ft]
     committee: 4
     seeds: [11, 23, 37, 53]
     finetune:
-      pretrained: /project/lgutsev/models/dpa2_openlam.pt   # a DPA-2 checkpoint
+      pretrained: /project/lgutsev/models/dpa3_openlam.pt   # a DPA-3 checkpoint
       model_branch: RANDOM     # a named multi-task head, or RANDOM to reinit fitting
 ```
 
-The generated `run_ensemble.slurm` runs, only for `$ARCH == dpa2_ft` and only on
-the first pass (no local checkpoint yet):
+**Several `*_ft` architectures** (different foundation models) — key `finetune`
+by architecture:
+
+```yaml
+    architectures: [dpa2_ft, dpa3_ft]
+    finetune:
+      dpa2_ft: {pretrained: /.../dpa2_openlam.pt, model_branch: RANDOM}
+      dpa3_ft: {pretrained: /.../dpa3_openlam.pt, model_branch: Omat24}
+```
+
+The generated `run_ensemble.slurm` runs, per matching `$ARCH` and only on the
+first pass (no local checkpoint yet):
 
 ```
 dp --pt train input.json --finetune <pretrained> --model-branch <model_branch> --use-pretrain-script
@@ -52,7 +65,7 @@ dp --pt train input.json --finetune <pretrained> --model-branch <model_branch> -
 
 `--use-pretrain-script` makes the trainer take the descriptor and fitting-net
 architecture from the checkpoint and ignore the generated `input.json` model
-shapes (which carry only InterfaceForge's small default dpa2 sizes) — without it,
+shapes (which carry only InterfaceForge's small default sizes) — without it,
 fine-tuning a large OpenLAM checkpoint fails with a `KeyError` on a missing
 descriptor parameter. `--restart` takes precedence once a `model.ckpt.pt`
 exists, so continuation runs behave like any other architecture. `RANDOM`

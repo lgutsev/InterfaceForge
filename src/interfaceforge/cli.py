@@ -1377,7 +1377,7 @@ def build_parser() -> argparse.ArgumentParser:
     compare_prepare.add_argument(
         "--deepmd-arch",
         default="dpa2",
-        choices=("dpa2", "dpa2_ft", "dpa3", "dpa4"),
+        choices=("dpa2", "dpa2_ft", "dpa3", "dpa3_ft", "dpa4"),
         help="Which trained DeePMD committee to compare against (default dpa2)",
     )
     compare_prepare.add_argument("--force", action="store_true")

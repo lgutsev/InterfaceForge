@@ -132,6 +132,49 @@ def _validate_dataset(dataset: dict[str, Any]) -> None:
     dataset["type_map"] = [str(item) for item in type_map]
 
 
+_FINETUNE_ARCHS = {"dpa2_ft": "dpa2", "dpa3_ft": "dpa3"}
+
+
+def _normalize_finetune(raw: Any, architectures: list[str]) -> dict[str, dict[str, str]]:
+    """Return ``{ft_arch: {pretrained, model_branch}}`` for every ``*_ft``
+    architecture present.
+
+    ``models.deepmd.finetune`` accepts a flat form
+    ``{pretrained: ..., model_branch: ...}`` (applied to whichever single
+    ``*_ft`` architecture is present) or a per-architecture form
+    ``{dpa3_ft: {pretrained: ..., model_branch: ...}, ...}`` when a committee
+    fine-tunes more than one foundation model.
+    """
+
+    ft_archs = [arch for arch in architectures if arch in _FINETUNE_ARCHS]
+    if not ft_archs:
+        return {}
+    mapping = _mapping(raw, "models.deepmd.finetune")
+
+    def _entry(value: Any, where: str) -> dict[str, str]:
+        entry = _mapping(value, where)
+        pretrained = str(entry.get("pretrained", "")).strip()
+        if not pretrained:
+            raise ConfigurationError(f"{where}.pretrained is required")
+        return {
+            "pretrained": pretrained,
+            "model_branch": str(entry.get("model_branch", "RANDOM")).strip() or "RANDOM",
+        }
+
+    if "pretrained" in mapping:
+        if len(ft_archs) != 1:
+            raise ConfigurationError(
+                "models.deepmd.finetune must be keyed by architecture "
+                f"({', '.join(ft_archs)}) when more than one *_ft architecture is trained"
+            )
+        return {ft_archs[0]: _entry(mapping, "models.deepmd.finetune")}
+
+    finetune: dict[str, dict[str, str]] = {}
+    for arch in ft_archs:
+        finetune[arch] = _entry(mapping.get(arch, {}), f"models.deepmd.finetune.{arch}")
+    return finetune
+
+
 def _validate_models(models: dict[str, Any]) -> None:
     deepmd = _mapping(models.get("deepmd"), "models.deepmd")
     if deepmd:
@@ -153,33 +196,20 @@ def _validate_models(models: dict[str, Any]) -> None:
             str(item).lower()
             for item in deepmd.get("architectures", [descriptor])
         ]
-        supported = {"dpa1", "dpa2", "dpa2_ft", "dpa3", "dpa4", "se_e2_a"}
+        supported = {"dpa1", "dpa2", "dpa2_ft", "dpa3", "dpa3_ft", "dpa4", "se_e2_a"}
         if not architectures or any(item not in supported for item in architectures):
             raise ConfigurationError(
                 "models.deepmd.architectures supports dpa1, dpa2, dpa2_ft, dpa3, "
-                "dpa4, or se_e2_a"
+                "dpa3_ft, dpa4, or se_e2_a"
             )
         if len(set(architectures)) != len(architectures):
             raise ConfigurationError("models.deepmd.architectures contains duplicates")
         if (
-            any(item in {"dpa2", "dpa2_ft", "dpa3", "dpa4"} for item in architectures)
+            any(item in {"dpa2", "dpa2_ft", "dpa3", "dpa3_ft", "dpa4"} for item in architectures)
             and backend == "tensorflow"
         ):
             raise ConfigurationError("DPA-2/3/4 campaigns require a PyTorch backend")
-        finetune: dict[str, Any] = {}
-        if "dpa2_ft" in architectures:
-            finetune = _mapping(deepmd.get("finetune"), "models.deepmd.finetune")
-            pretrained = str(finetune.get("pretrained", "")).strip()
-            if not pretrained:
-                raise ConfigurationError(
-                    "models.deepmd.finetune.pretrained is required when "
-                    "models.deepmd.architectures includes dpa2_ft"
-                )
-            finetune = {
-                "pretrained": pretrained,
-                "model_branch": str(finetune.get("model_branch", "RANDOM")).strip()
-                or "RANDOM",
-            }
+        finetune = _normalize_finetune(deepmd.get("finetune"), architectures)
         deepmd.update(
             {
                 "committee": committee,

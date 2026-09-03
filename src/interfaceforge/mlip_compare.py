@@ -27,6 +27,7 @@ DEEPMD_DISPLAY = {
     "dpa2": "DPA-2",
     "dpa2_ft": "DPA-2 (fine-tuned)",
     "dpa3": "DPA-3",
+    "dpa3_ft": "DPA-3 (fine-tuned)",
     "dpa4": "DPA-4",
 }
 
