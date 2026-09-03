@@ -60,16 +60,49 @@ def _read_atoms(path: Path) -> Any:
     return read(path)
 
 
-def _resolve_set(directory: Path) -> dict[str, Path]:
-    """Locate the ``interface`` / ``slab_a`` / ``slab_b`` run directories."""
+def _resolve_set(directory: Path) -> tuple[dict[str, Path], str | None]:
+    """Locate the ``interface`` / ``slab_a`` / ``slab_b`` run directories.
+
+    Two layouts are accepted: a plain directory with ``interface/``, ``slab_a/``
+    and ``slab_b/`` sub-directories, or an ``iface vasp adhesion prepare`` output
+    tree -- ``interface_static/`` (or the reference directory) plus the two
+    ``slabs/*`` fragments, read from its ``manifest.json``. Returns the mapping
+    and the tree's ``slab_mode`` (``None`` for the plain layout).
+    """
+
+    manifest_path = directory / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SafetyError(f"Could not parse {manifest_path}: {exc}") from exc
+        slabs = manifest.get("slabs")
+        if isinstance(slabs, list) and len(slabs) == 2:
+            static = manifest.get("interface_static")
+            interface_dir = (
+                directory / static["directory"]
+                if static
+                else Path(manifest["reference_directory"])
+            )
+            return (
+                {
+                    "interface": interface_dir,
+                    "slab_a": directory / slabs[0]["directory"],
+                    "slab_b": directory / slabs[1]["directory"],
+                },
+                manifest.get("slab_mode"),
+            )
 
     out: dict[str, Path] = {}
     for part in _PARTS:
         candidate = directory / part
         if not candidate.is_dir():
-            raise SafetyError(f"{directory} is missing the '{part}/' sub-directory")
+            raise SafetyError(
+                f"{directory} is neither an 'adhesion prepare' tree nor has a "
+                f"'{part}/' sub-directory"
+            )
         out[part] = candidate
-    return out
+    return out, None
 
 
 def _plane_area(cell: np.ndarray, axis: str | None) -> tuple[float, str]:
@@ -188,10 +221,13 @@ def separation_energy(
     )
     interfaces_meta = campaign_validation.get("interfaces") if campaign_validation else None
 
+    slab_modes: set[str] = set()
     rows: list[dict[str, Any]] = []
     for spec, directory in entries:
         directory = Path(directory).expanduser().resolve()
-        runs = _resolve_set(directory)
+        runs, slab_mode = _resolve_set(directory)
+        if slab_mode:
+            slab_modes.add(slab_mode)
         atoms = {part: _read_atoms(_structure_file(runs[part])) for part in _PARTS}
         cell = np.array(atoms["interface"].cell.array, dtype=float)
         area, axis = _plane_area(cell, area_axis)
@@ -205,6 +241,7 @@ def separation_energy(
             "label": spec.strip("/").rsplit("/", 1)[-1] or spec,
             "spec": spec,
             "directory": str(directory),
+            "slab_mode": slab_mode,
             "interface_area_ang2": area,
             "area_axis": axis,
             "n_interfaces": n_interfaces,
@@ -241,12 +278,22 @@ def separation_energy(
 
         rows.append(row)
 
+    if slab_modes == {"static"}:
+        interpretation = "ideal work of separation (slabs frozen at the interface geometry)"
+    elif slab_modes == {"relax"}:
+        interpretation = "Dupre work of adhesion (relaxed slab geometries from DFT)"
+    else:
+        interpretation = (
+            "Dupre work of adhesion for relaxed free-surface half-slabs with n_interfaces=1"
+        )
+
     return {
         "schema_version": 1,
         "quantity": "separation_energy",
         "definition": "gamma_sep = (E(slab_a) + E(slab_b) - E(interface)) / (n_interfaces * A); "
-        "equals the Dupre work of adhesion for relaxed free-surface half-slabs with n_interfaces=1",
+        + interpretation,
         "reference": reference,
+        "slab_modes": sorted(slab_modes),
         "n_interfaces": n_interfaces,
         "conversion_ev_a2_to_j_m2": EV_A2_TO_J_M2,
         "mace_models": [str(p) for p in mace_models],
@@ -327,6 +374,8 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
         "",
         f"γ_sep = (E(slab_a) + E(slab_b) − E(interface)) / ({payload['n_interfaces']} · A), "
         f"reference: {payload['reference']}.",
+        "",
+        f"Interpretation: {payload['definition'].split('; ', 1)[-1]}.",
         "",
         "| Interface | Source | γ_sep (J/m²) | committee σ | Δ vs DFT | vs literature |",
         "|---|---|---:|---:|---:|---:|",
@@ -520,8 +569,9 @@ def main(argv: list[str] | None = None) -> int:
         "entries",
         nargs="+",
         metavar="[LABEL=]SET_DIR",
-        help="Each SET_DIR holds interface/ slab_a/ slab_b/ run directories; the "
-        "optional LABEL= prefix is fnmatched against validation.interfaces",
+        help="Each SET_DIR holds interface/ slab_a/ slab_b/ sub-directories, or is "
+        "an 'iface vasp adhesion prepare' output tree; the optional LABEL= prefix "
+        "is fnmatched against validation.interfaces",
     )
     parser.add_argument("--mace-model", action="append", default=[], dest="mace_models")
     parser.add_argument("--deepmd-model", action="append", default=[], dest="deepmd_models")

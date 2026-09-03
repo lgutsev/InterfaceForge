@@ -186,6 +186,39 @@ class SeparationEnergyTests(unittest.TestCase):
             with self.assertRaises(SafetyError):
                 separation_energy([("x", root)])
 
+    def test_reads_an_adhesion_prepare_tree_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tree = root / "N_term_adhesion_dft"
+            _part(tree / "interface_static", "Si Ti N", 12, -200.0)
+            _part(tree / "slabs" / "lower", "Si N", 6, -95.0)
+            _part(tree / "slabs" / "upper", "Ti N", 6, -97.0)
+            (tree / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "method": "dft",
+                        "slab_mode": "static",
+                        "reference_directory": str(tree / "interface_static"),
+                        "interface_static": {"directory": "interface_static"},
+                        "slabs": [
+                            {"name": "lower", "directory": "slabs/lower"},
+                            {"name": "upper", "directory": "slabs/upper"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = separation_energy(
+                [("interface/450K/Real/N_Term/SiN_TiN_N-term", tree)],
+                campaign_validation=_VALIDATION,
+            )
+            self.assertEqual(payload["slab_modes"], ["static"])
+            self.assertIn("work of separation", payload["definition"])
+            row = payload["interfaces"][0]
+            self.assertEqual(row["slab_mode"], "static")
+            self.assertAlmostEqual(row["dft"]["gamma_sep_j_per_m2"], 8.0 / 132.0 * 16.02176634)
+
 
 if __name__ == "__main__":
     unittest.main()

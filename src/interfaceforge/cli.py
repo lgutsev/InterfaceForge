@@ -1424,9 +1424,11 @@ def build_parser() -> argparse.ArgumentParser:
         "entries",
         nargs="+",
         metavar="[LABEL=]SET_DIR",
-        help="Each SET_DIR holds interface/ slab_a/ slab_b/ run directories; an "
-        "optional 'LABEL=' prefix is fnmatched against validation.interfaces for "
-        "the literature overlay",
+        help="Each SET_DIR is either a directory with interface/ slab_a/ slab_b/ "
+        "sub-directories, or an 'iface vasp adhesion prepare' output tree "
+        "(interface_static/ + slabs/*, read from manifest.json). The optional "
+        "'LABEL=' prefix is fnmatched against validation.interfaces for the "
+        "literature overlay",
     )
     separation_energy_parser.add_argument(
         "--mace-model", action="append", default=[], dest="mace_models",
