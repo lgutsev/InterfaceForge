@@ -161,9 +161,9 @@ iface vasp step1-prepare OPT --protocol training --dry-run
 iface vasp step1-prepare OPT --protocol training
 iface vasp step1-launch Step1 --execute            # submit the prepared runs
 # Proton-rich surfaces (OH50): same 400-step budget, 0.5 fs, tighter SCF,
-# Langevin friction, and a gentle warm-up ramp.
+# Langevin friction, a gentle warm-up ramp, and a static WAVECAR preconditioner.
 iface vasp step1-prepare OPT_OH50 --protocol training --fresh-start --conservative \
-    --langevin --ramp-from 200
+    --langevin --ramp-from 200 --precondition
 iface vasp step1-status Step1
 # Dry-run first: identify numerical runaways and the clean rewind frame.
 iface vasp step1-repair Step1
@@ -194,8 +194,16 @@ surfaces — forces read off a sloshing SCF, not just an over-large timestep:
   (`MDALGO=3`, `LANGEVIN_GAMMA` per species, default 10 ps⁻¹) whose friction
   also damps an incipient runaway;
 - `--ramp-from T0` starts `TEBEG` at `T0` and ramps to the target, softening
-  the cold start.
+  the cold start;
+- `--precondition` writes an `INCAR.precondition` (NSW=0 static, `EDIFF=1E-6`,
+  `ALGO=Normal`, `LWAVE=.TRUE.`) per run, sets the MD `ISTART=1`, and rewraps
+  the launcher so it runs that one SCF in a `precondition/` subdirectory
+  first — the MD then restarts from a converged `WAVECAR` instead of an
+  atomic-density guess sloshing between DFT+U occupation branches. One job;
+  the `[ -s WAVECAR ]` guard makes a requeue skip straight to the MD. Needs a
+  launcher with exactly one line that runs `vasp`.
 
+`--langevin`, `--ramp-from`, `--precondition` also work on `step1-repair`.
 The sampled physical duration is half that of a 1 fs run with the same `NSW`.
 The promoted `POSCAR` has its trailing MD velocity block stripped (pass
 `--keep-velocities` to keep it) so VASP draws fresh Maxwell-Boltzmann

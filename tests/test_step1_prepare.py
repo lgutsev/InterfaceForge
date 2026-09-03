@@ -203,6 +203,44 @@ class Step1PrepareTests(unittest.TestCase):
             opt = _opt_tree(Path(tmp))
             with self.assertRaises(SafetyError):
                 prepare_step1_series(opt, protocol="training", langevin_gamma=10.0)
+            with self.assertRaises(SafetyError):
+                prepare_step1_series(opt, protocol="training", precondition=True)
+
+    def test_precondition_writes_static_incar_and_wraps_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            opt = _opt_tree(root, wavecar=False)
+            (opt / "runvasp.sh").write_text(
+                "#!/bin/bash\n#SBATCH -N 2\nmodule load vasp\nsrun -n8 vasp_std\necho done\n",
+                encoding="utf-8",
+            )
+            result = prepare_step1_series(
+                opt, protocol="training", fresh_start=True, conservative=True, precondition=True
+            )
+            self.assertTrue(result["precondition"])
+            run = root / "Step1" / "NiO_m110_Big_U46"
+            md = parse_incar(run / "INCAR")
+            self.assertEqual(md["ISTART"], "1")  # restarts from the preconditioner WAVECAR
+            pre = parse_incar(run / "INCAR.precondition")
+            self.assertEqual(pre["NSW"], "0")
+            self.assertEqual(pre["ISTART"], "0")
+            self.assertEqual(pre["EDIFF"], "1E-6")
+            self.assertEqual(pre["ENCUT"], md["ENCUT"])  # same electronics as the MD
+            self.assertEqual(pre["MAGMOM"], md["MAGMOM"])
+            self.assertNotIn("POTIM", pre)
+            launcher = (run / "runvasp.sh").read_text(encoding="utf-8")
+            self.assertIn("InterfaceForge --precondition", launcher)
+            self.assertEqual(launcher.count("srun -n8 vasp_std"), 2)  # precondition + MD
+            self.assertIn("cd precondition", launcher)
+
+    def test_precondition_rejects_launcher_without_a_vasp_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            opt = _opt_tree(Path(tmp), wavecar=False)  # fixture launcher: "sbatch payload"
+            with self.assertRaisesRegex(SafetyError, "exactly one line that runs vasp"):
+                prepare_step1_series(
+                    opt, protocol="training", fresh_start=True,
+                    conservative=True, precondition=True,
+                )
 
     def test_promoted_poscar_drops_velocity_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

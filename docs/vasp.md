@@ -139,6 +139,27 @@ inherited tags survived, confirms `IBRION=0`/`SMASS=-1` and the expected
 notes a thin [slab vacuum](#slab-vacuum-check). Existing `Step1/` is never
 overwritten; re-audit with `--audit-only`.
 
+### Stabilize the first SCF (`--precondition`)
+
+On magnetic + DFT+U surfaces the first ionic step starts from an
+atomic-density guess and can spend ~60 SCF iterations sloshing between
+occupation branches — sometimes converging to the wrong one and kicking the
+geometry. `iface vasp step1-prepare --conservative --precondition` (also on
+`step1-repair`) fixes the guess:
+
+- writes `INCAR.precondition` per run — the rendered preheat INCAR with the
+  ionic/thermostat block removed and `NSW=0`, `IBRION=-1`, `ISTART=0`,
+  `ALGO=Normal`, `EDIFF=1E-6`, `NELM=200`, `LWAVE=.TRUE.` (all electronics —
+  ENCUT, PREC, LREAL, spin, the `LDAU*` block — kept identical to the MD);
+- sets the MD `INCAR` to `ISTART=1`;
+- rewraps the launcher: it runs that one static SCF inside a `precondition/`
+  subdirectory, copies the converged `WAVECAR` up, then runs the MD. The
+  `[ -s WAVECAR ]` guard makes a requeued job skip straight to the MD.
+
+It stays a single scheduler job. The launcher must have exactly one line that
+invokes `vasp` (optionally via `srun`/`mpirun`/`ibrun`/…); otherwise
+preparation fails with a clear message.
+
 ### Submit the Step1 runs
 
 `iface vasp step1-launch <Step1_root>` is the submit step — dry-run by

@@ -514,6 +514,7 @@ def cmd_vasp_step1_prepare(args: argparse.Namespace) -> int:
             langevin_gamma=args.langevin_gamma if args.langevin else None,
             ramp_from=args.ramp_from,
             keep_velocities=args.keep_velocities,
+            precondition=args.precondition,
         )
     )
     return 0
@@ -541,6 +542,7 @@ def cmd_vasp_step1_repair(args: argparse.Namespace) -> int:
             max_temperature_k=args.max_temperature,
             langevin_gamma=args.langevin_gamma if args.langevin else None,
             ramp_from=args.ramp_from,
+            precondition=args.precondition,
         )
     )
     return 0
@@ -2076,6 +2078,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Boltzmann velocities at TEBEG)"
         ),
     )
+    step1_prepare.add_argument(
+        "--precondition",
+        action="store_true",
+        help=(
+            "With --conservative: write an INCAR.precondition (NSW=0 static, "
+            "EDIFF=1E-6) per run, set the MD ISTART=1, and rewrap the launcher "
+            "to run that static SCF first so the MD restarts from a converged "
+            "WAVECAR instead of the atomic-density guess (one job)"
+        ),
+    )
     step1_prepare.add_argument("--dry-run", action="store_true")
     step1_prepare.add_argument("--audit-only", action="store_true")
     step1_prepare.set_defaults(func=cmd_vasp_step1_prepare)
@@ -2131,6 +2143,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--ramp-from",
         type=float,
         help="Start the recovery segment's TEBEG at this temperature (K) and ramp to the original target",
+    )
+    step1_repair.add_argument(
+        "--precondition",
+        action="store_true",
+        help=(
+            "Write an INCAR.precondition (NSW=0 static) and rewrap the launcher "
+            "so the recovery MD restarts from a converged WAVECAR"
+        ),
     )
     step1_repair.add_argument(
         "--safety-steps",

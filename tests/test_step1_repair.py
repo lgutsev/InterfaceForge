@@ -66,6 +66,9 @@ def _run(root: Path, *, scf_ceiling: bool = False) -> Path:
     (run / "POTCAR").write_text("fixture\n", encoding="utf-8")
     (run / "OSZICAR").write_text(_oszicar(scf_ceiling=scf_ceiling), encoding="utf-8")
     (run / "XDATCAR").write_text(_xdatcar(), encoding="utf-8")
+    (run / "runvasp.sh").write_text(
+        "#!/bin/bash\n#SBATCH -N 1\nmodule load vasp\nsrun -n4 vasp_std\n", encoding="utf-8"
+    )
     old = time.time() - 10 * 3600
     os.utime(run / "OSZICAR", (old, old))
     return run
@@ -138,6 +141,20 @@ class Step1RepairTests(unittest.TestCase):
             self.assertEqual(incar["LANGEVIN_GAMMA"], "15 15")  # H O -> 2 species
             self.assertNotIn("SMASS", incar)
             self.assertEqual(incar["TEBEG"], "120")
+
+    def test_execute_precondition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _run(Path(tmp))
+            prepare_step1_repair(run, execute=True, precondition=True)
+            incar = parse_incar(run / "INCAR")
+            self.assertEqual(incar["ISTART"], "1")
+            pre = parse_incar(run / "INCAR.precondition")
+            self.assertEqual(pre["NSW"], "0")
+            self.assertEqual(pre["ISTART"], "0")
+            launcher = (run / "runvasp.sh").read_text(encoding="utf-8")
+            self.assertIn("InterfaceForge --precondition", launcher)
+            self.assertEqual(launcher.count("srun -n4 vasp_std"), 2)
+            self.assertFalse((run / "WAVECAR").exists())
 
     def test_cli_is_dry_run_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

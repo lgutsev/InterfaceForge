@@ -31,7 +31,7 @@ from .audit import parse_oszicar, read_tail
 from .step1_repair import diagnose_step1_run
 from .vasp import parse_incar
 
-_EXCLUDED = ("archive", "backup", ".interfaceforge")
+_EXCLUDED = ("archive", "backup", ".interfaceforge", "precondition")
 _TIMING_MARKER = "General timing and accounting informations"
 _XDATCAR_FRAME = re.compile(r"^\s*Direct configuration=", re.MULTILINE)
 _ENMAX = re.compile(r"ENMAX\s*=\s*([0-9.]+)")

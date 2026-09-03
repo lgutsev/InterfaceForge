@@ -25,16 +25,18 @@ from .vasp import (
     CONSERVATIVE_ELECTRONIC_OVERRIDES,
     _poscar_elements,
     archive_run,
+    build_precondition_incar,
     parse_incar,
     require_files,
     update_incar,
+    wrap_launcher_with_precondition,
 )
 
 _MD_STEP = re.compile(r"^\s*(\d+)\s+.*?\bT=\s*([^\s]+)")
 _FREE_ENERGY = re.compile(r"\bF=\s*([-+0-9.Ee]+)")
 _ELECTRONIC_STEP = re.compile(r"^\s*(?:DAV|RMM|CGA|SDA|DMP):\s*(\d+)")
 _XDATCAR_FRAME = re.compile(r"^\s*(?:Direct|Cartesian)\s+configuration\s*=", re.I)
-_EXCLUDED = {"archive", "backup", ".interfaceforge"}
+_EXCLUDED = {"archive", "backup", ".interfaceforge", "precondition"}
 
 
 def _float_or_none(value: str) -> float | None:
@@ -244,6 +246,7 @@ def prepare_step1_repair(
     max_temperature_k: float | None = None,
     langevin_gamma: float | None = None,
     ramp_from: float | None = None,
+    precondition: bool = False,
 ) -> dict[str, Any]:
     """Plan or prepare bounded recovery segments for unstable, inactive runs.
 
@@ -253,6 +256,9 @@ def prepare_step1_repair(
     sloshing SCF, not the timestep alone. ``langevin_gamma`` swaps
     ``SMASS=-1`` for a Langevin thermostat (``MDALGO=3``); ``ramp_from`` sets
     a lower initial ``TEBEG`` so the rewound geometry re-thermalises gently.
+    ``precondition`` writes an ``INCAR.precondition`` (NSW=0 static) and
+    rewraps the launcher so the recovery MD restarts from a converged
+    ``WAVECAR`` instead of the atomic-density guess.
     """
 
     root_path = Path(root).expanduser().resolve()
@@ -317,6 +323,7 @@ def prepare_step1_repair(
             "repair_electronic": dict(CONSERVATIVE_ELECTRONIC_OVERRIDES),
             "repair_langevin_gamma": langevin_gamma,
             "repair_ramp_from_k": ramp_from,
+            "repair_precondition": bool(precondition),
             "archive": None,
         }
         plans.append(plan)
@@ -361,7 +368,7 @@ def prepare_step1_repair(
         ):
             (run / name).unlink(missing_ok=True)
         incar_changes: dict[str, Any] = {
-            "ISTART": 0,
+            "ISTART": 1 if precondition else 0,
             "ALGO": algo,
             "POTIM": f"{potim_fs:g}",
             "NSW": plan["repair_nsw"],
@@ -378,6 +385,28 @@ def prepare_step1_repair(
             )
             incar_delete.add("SMASS")
         update_incar(run / "INCAR", incar_changes, delete=incar_delete)
+        if precondition:
+            launcher_name = next(
+                (n for n in ("runvasp.sh", "run.slurm") if (run / n).is_file()), None
+            )
+            if launcher_name is None:
+                raise SafetyError(f"{run}: --precondition needs runvasp.sh or run.slurm")
+            system = f"{parse_incar(run / 'INCAR').get('SYSTEM', 'Step1')}_precondition"
+            (run / "INCAR.precondition").write_text(
+                build_precondition_incar((run / "INCAR").read_text(encoding="utf-8"), system=system),
+                encoding="utf-8",
+            )
+            launcher = run / launcher_name
+            launcher.write_text(
+                wrap_launcher_with_precondition(
+                    launcher.read_text(encoding="utf-8", errors="ignore"),
+                    launcher_name=launcher_name,
+                ),
+                encoding="utf-8",
+            )
+            launcher.chmod(launcher.stat().st_mode | 0o111)
+            (run / "WAVECAR").unlink(missing_ok=True)
+        plan["repair_precondition"] = bool(precondition)
         repair_record = {
             "format": "interfaceforge-step1-repair",
             "schema_version": 1,
@@ -404,6 +433,7 @@ def prepare_step1_repair(
             "electronic_overrides": dict(CONSERVATIVE_ELECTRONIC_OVERRIDES),
             "langevin_gamma": langevin_gamma,
             "ramp_from_k": ramp_from,
+            "precondition": bool(precondition),
             "safety_steps": safety_steps,
             "energy_jump_ev": energy_jump_ev,
             "max_temperature_k": max_temperature_k,

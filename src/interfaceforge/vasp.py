@@ -2013,6 +2013,101 @@ def _write_poscar_without_velocities(source: str | Path, destination: str | Path
 
 CONSERVATIVE_ELECTRONIC_OVERRIDES = {"EDIFF": "1E-5", "NELM": "120", "NELMIN": "6"}
 
+# The static electronic preconditioner: one NSW=0 SCF on the exact preheat
+# geometry, converged tight with the robust solver, writing a WAVECAR the MD
+# then restarts from -- so the first ionic step is not read off an
+# atomic-density guess sloshing between DFT+U occupation branches.
+PRECONDITION_INCAR_OVERRIDES = {
+    "NSW": "0",
+    "IBRION": "-1",
+    "ISTART": "0",
+    "ALGO": "Normal",
+    "EDIFF": "1E-6",
+    "NELM": "200",
+    "LWAVE": ".TRUE.",
+    "LCHARG": ".TRUE.",
+}
+_PRECONDITION_DROP_TAGS = ("POTIM", "SMASS", "NBLOCK", "MDALGO", "LANGEVIN_GAMMA")
+_PRECONDITION_MARKER = "InterfaceForge --precondition"
+_VASP_INVOCATION = re.compile(
+    r"^\s*(?:(?:srun|mpirun|mpiexec|ibrun|jsrun|aprun|time)\b[^\n]*?\s)?"
+    r"\bvasp(?:_std|_gam|_ncl|_gpu)?\b[^\n]*$"
+)
+
+
+def build_precondition_incar(md_incar_text: str, *, system: str) -> str:
+    """Derive the NSW=0 preconditioner INCAR from a rendered preheat INCAR.
+
+    Everything electronic (ENCUT, PREC, LREAL, ISMEAR/SIGMA, spin, the whole
+    ``LDAU*`` block) is kept identical so the WAVECAR lands in exactly the
+    basin the MD will use; only the ionic/thermostat block is removed and the
+    convergence is tightened.
+    """
+
+    changes = {**PRECONDITION_INCAR_OVERRIDES, "SYSTEM": system}
+    lines: list[str] = []
+    seen: set[str] = set()
+    for line in md_incar_text.splitlines():
+        assignment = _incar_assignment(line)
+        if assignment is None:
+            lines.append(line)
+            continue
+        tag = assignment[0]
+        if tag in _PRECONDITION_DROP_TAGS or tag == "TEBEG" or tag == "TEEND":
+            continue
+        seen.add(tag)
+        if tag in changes:
+            prefix = line[: len(line) - len(line.lstrip())]
+            lines.append(f"{prefix}{tag} = {changes[tag]}")
+        else:
+            lines.append(line)
+    for tag, value in changes.items():
+        if tag not in seen:
+            lines.extend(("", f"{tag} = {value}"))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def wrap_launcher_with_precondition(launcher_text: str, *, launcher_name: str) -> str:
+    """Wrap a single-VASP-call launcher so it runs the preconditioner first.
+
+    The preconditioner runs in a ``precondition/`` subdirectory (its outputs
+    never shadow the MD's), its ``WAVECAR`` is copied up, then the MD runs.
+    The ``[ -s WAVECAR ]`` guard makes a requeue skip straight to the MD.
+    """
+
+    if _PRECONDITION_MARKER in launcher_text:
+        return launcher_text  # already wrapped
+    lines = launcher_text.splitlines()
+    hits = [i for i, line in enumerate(lines) if _VASP_INVOCATION.match(line)]
+    if len(hits) != 1:
+        raise SafetyError(
+            f"--precondition needs {launcher_name} to have exactly one line that "
+            f"runs vasp; found {len(hits)}. Supply a launcher it can wrap, or add "
+            "the preconditioner call by hand."
+        )
+    index = hits[0]
+    vasp_line = lines[index]
+    indent = vasp_line[: len(vasp_line) - len(vasp_line.lstrip())]
+    call = vasp_line.strip()
+    block = [
+        f"{indent}# --- {_PRECONDITION_MARKER}: static electronic warm-up (NSW=0) ---",
+        f"{indent}if [ ! -s WAVECAR ]; then",
+        f"{indent}    mkdir -p precondition",
+        f"{indent}    cp -f POSCAR KPOINTS INCAR.precondition precondition/",
+        f"{indent}    [ -s POTCAR ] && cp -f POTCAR precondition/",
+        f"{indent}    ( cd precondition && mv -f INCAR.precondition INCAR && {call} )",
+        f"{indent}    if [ -s precondition/WAVECAR ]; then",
+        f"{indent}        cp -f precondition/WAVECAR ./",
+        f"{indent}    else",
+        f'{indent}        echo "InterfaceForge: preconditioner wrote no WAVECAR; MD starts fresh" >&2',
+        f"{indent}    fi",
+        f"{indent}fi",
+        f"{indent}# --- preheat MD, restarting from the preconditioned WAVECAR ---",
+        vasp_line,
+    ]
+    wrapped = lines[:index] + block + lines[index + 1 :]
+    return "\n".join(wrapped) + ("\n" if launcher_text.endswith("\n") else "")
+
 
 def _step1_conservative_overrides(
     conservative: bool,
@@ -2050,6 +2145,7 @@ def _render_step1_incar(
     langevin_gamma: float | None = None,
     ramp_from: float | None = None,
     n_species: int = 0,
+    precondition: bool = False,
 ) -> dict[str, Any]:
     """Render a Step1 preheat INCAR from an OPT run.
 
@@ -2082,7 +2178,7 @@ def _render_step1_incar(
         "TEBEG": text_temp,
         "TEEND": text_temp,
         "NSW": str(int(nsw)),
-        "ISTART": str(int(istart)),
+        "ISTART": "1" if precondition else str(int(istart)),
     }
     drop: set[str] = set()
     if conservative:
@@ -2161,6 +2257,7 @@ def prepare_step1_series(
     langevin_gamma: float | None = None,
     ramp_from: float | None = None,
     keep_velocities: bool = False,
+    precondition: bool = False,
 ) -> dict[str, Any]:
     """Promote a recursive OPT tree into a sibling ``Step1`` preheat tree.
 
@@ -2187,6 +2284,12 @@ def prepare_step1_series(
     block stripped so VASP draws fresh Maxwell-Boltzmann velocities at
     ``TEBEG``; pass ``keep_velocities=True`` to copy the CONTCAR verbatim.
 
+    ``precondition=True`` (conservative only) writes an ``INCAR.precondition``
+    (NSW=0, ``ALGO=Normal``, ``EDIFF=1E-6``, ``LWAVE=.TRUE.``) per run, sets
+    the MD ``ISTART=1``, and rewraps the launcher so it runs that static SCF
+    in a ``precondition/`` subdirectory first and the MD restarts from its
+    converged ``WAVECAR`` -- one job, no atomic-density first step.
+
     A launcher (``runvasp.sh`` / ``run.slurm``) is also accepted from the
     current working directory — the folder the command is run from — even
     when it sits above ``source`` and so falls outside the normal
@@ -2195,10 +2298,15 @@ def prepare_step1_series(
 
     if fresh_start and require_wavecar:
         raise SafetyError("--fresh-start and --require-wavecar cannot be combined")
-    _tuned = algo != "Normal" or langevin_gamma is not None or ramp_from is not None
+    _tuned = (
+        algo != "Normal"
+        or langevin_gamma is not None
+        or ramp_from is not None
+        or precondition
+    )
     if _tuned and not conservative:
         raise SafetyError(
-            "--algo / --langevin / --ramp-from only apply with --conservative"
+            "--algo / --langevin / --ramp-from / --precondition only apply with --conservative"
         )
     if langevin_gamma is not None and langevin_gamma <= 0:
         raise SafetyError("--langevin-gamma must be positive")
@@ -2284,6 +2392,12 @@ def prepare_step1_series(
                 f"{relative.as_posix() or '.'}: no nonempty OPT WAVECAR; "
                 "preparing a fresh electronic start (ISTART=0)"
             )
+        if precondition and use_wavecar:
+            use_wavecar = False  # the preconditioner produces the restart WAVECAR itself
+            warnings.append(
+                f"{relative.as_posix() or '.'}: --precondition given; the OPT WAVECAR "
+                "is not staged (the NSW=0 preconditioner writes the restart WAVECAR)"
+            )
         istart = 1 if use_wavecar else 0
         resolved_inputs: dict[str, Path] = {}
         for input_name in STEP1_INHERITED_FILES:
@@ -2312,7 +2426,23 @@ def prepare_step1_series(
             langevin_gamma=langevin_gamma,
             ramp_from=ramp_from,
             n_species=len(elements),
+            precondition=precondition,
         )
+        precondition_incar = None
+        wrapped_launcher: tuple[str, str] | None = None
+        if precondition:
+            system = f"Step1_preheat_{_temperature_label(float(temperature))}K_precondition"
+            precondition_incar = build_precondition_incar(rendered["text"], system=system)
+            launcher_name = next(
+                name for name in ("runvasp.sh", "run.slurm") if name in resolved_inputs
+            )
+            wrapped_launcher = (
+                launcher_name,
+                wrap_launcher_with_precondition(
+                    resolved_inputs[launcher_name].read_text(encoding="utf-8", errors="ignore"),
+                    launcher_name=launcher_name,
+                ),
+            )
         for tag in ("LDAUL", "LDAUU", "LDAUJ"):
             value = rendered["inherited_tags"].get(tag)
             if value is not None and _vasp_list_length(value) != len(elements):
@@ -2338,6 +2468,9 @@ def prepare_step1_series(
                 "inputs": resolved_inputs,
                 "incar_text": rendered["text"],
                 "inherited_tags": rendered["inherited_tags"],
+                "precondition": bool(precondition),
+                "precondition_incar": precondition_incar,
+                "wrapped_launcher": wrapped_launcher,
             }
         )
 
@@ -2358,12 +2491,20 @@ def prepare_step1_series(
                     link_modes[plan["relative"].as_posix() or "."] = _verified_hardlink(
                         plan["wavecar"], destination / "WAVECAR"
                     )
+                wrapped = plan.get("wrapped_launcher")
                 for name, path in plan["inputs"].items():
                     target = destination / name
-                    shutil.copy2(path, target)
+                    if wrapped is not None and name == wrapped[0]:
+                        target.write_text(wrapped[1], encoding="utf-8")
+                    else:
+                        shutil.copy2(path, target)
                     if name in {"runvasp.sh", "run.slurm"}:
                         target.chmod(target.stat().st_mode | 0o111)
                 (destination / "INCAR").write_text(plan["incar_text"], encoding="utf-8")
+                if plan.get("precondition_incar"):
+                    (destination / "INCAR.precondition").write_text(
+                        plan["precondition_incar"], encoding="utf-8"
+                    )
             manifest = {
                 "format": "interfaceforge-step1-series",
                 "schema_version": 1,
@@ -2383,6 +2524,7 @@ def prepare_step1_series(
                     ramp_from=ramp_from,
                 ),
                 "keep_velocities": bool(keep_velocities),
+                "precondition": bool(precondition),
                 "warnings": warnings,
                 "precedence": {
                     "ordinary_incar_tags": "Step1 template",
@@ -2441,6 +2583,7 @@ def prepare_step1_series(
         "langevin_gamma": langevin_gamma if conservative else None,
         "ramp_from_k": ramp_from if conservative else None,
         "keep_velocities": bool(keep_velocities),
+        "precondition": bool(precondition),
         "prepared_runs": len(plans),
         "fresh_start_runs": sum(1 for plan in plans if plan["istart"] == 0),
         "wavecar_link_mode": link_modes,
@@ -2476,7 +2619,8 @@ def _audit_step1_plans(
                 "Step1 INCAR is not a thermostatted preheat "
                 "(IBRION=0 with SMASS=-1 or MDALGO=3)"
             )
-        expected_istart = str(plan.get("istart", 1))
+        preconditioned = bool(plan.get("precondition"))
+        expected_istart = "1" if preconditioned else str(plan.get("istart", 1))
         if parsed.get("ISTART") != expected_istart:
             issues.append(f"ISTART is not {expected_istart}")
         poscar = destination / "POSCAR"
@@ -2488,10 +2632,29 @@ def _audit_step1_plans(
         if plan.get("wavecar") is not None:
             if not (wavecar.is_file() and wavecar.stat().st_size):
                 issues.append("missing WAVECAR")
-        elif wavecar.exists():
+        elif wavecar.exists() and not preconditioned:
             issues.append("unexpected WAVECAR in a fresh-start (ISTART=0) run")
+        if preconditioned:
+            precondition_incar = destination / "INCAR.precondition"
+            if not (precondition_incar.is_file() and precondition_incar.stat().st_size):
+                issues.append("--precondition: missing INCAR.precondition")
+            elif parse_incar(precondition_incar).get("NSW") != "0":
+                issues.append("--precondition: INCAR.precondition is not a static (NSW=0)")
         for name in plan["inputs"]:
             target = destination / name
+            is_wrapped_launcher = (
+                preconditioned
+                and name in {"runvasp.sh", "run.slurm"}
+                and (plan.get("wrapped_launcher") or ("", ""))[0] == name
+            )
+            if is_wrapped_launcher:
+                if not target.is_file() or _PRECONDITION_MARKER not in target.read_text(
+                    encoding="utf-8", errors="ignore"
+                ):
+                    issues.append(f"--precondition: {name} is not the two-phase wrapper")
+                elif not os.access(target, os.X_OK):
+                    issues.append(f"inherited launcher {name} is not executable")
+                continue
             if not target.is_file() or _sha256_file(target) != _sha256_file(plan["inputs"][name]):
                 issues.append(f"inherited {name} missing or altered")
             elif name in {"runvasp.sh", "run.slurm"} and not os.access(target, os.X_OK):
