@@ -159,6 +159,7 @@ iface vasp opt-launch OPT --execute
 # Promote completed optimizations into short MLIP-training trajectories.
 iface vasp step1-prepare OPT --protocol training --dry-run
 iface vasp step1-prepare OPT --protocol training
+iface vasp step1-launch Step1 --execute            # submit the prepared runs
 # Proton-rich surfaces (OH50): same 400-step budget, 0.5 fs, tighter SCF,
 # Langevin friction, and a gentle warm-up ramp.
 iface vasp step1-prepare OPT_OH50 --protocol training --fresh-start --conservative \
@@ -168,6 +169,7 @@ iface vasp step1-status Step1
 iface vasp step1-repair Step1
 # Archive failed state, rewind, tighten the SCF, and prepare the remaining steps.
 iface vasp step1-repair Step1 --execute --langevin
+iface vasp step1-launch Step1 --execute            # resubmit only the repaired runs
 iface vasp step2-prepare Step1 --temperatures 300 450 600 --protocol training
 iface vasp step2-launch Step2_300K Step2_450K Step2_600K
 iface vasp step2-launch Step2_300K Step2_450K Step2_600K --execute
@@ -209,6 +211,15 @@ tightened SCF, and optional `--langevin` / `--ramp-from`. The failed state is
 archived, the accepted prefix is recorded in `step1_repair.json`, and runs
 updated within the last six hours are protected from mutation. Repair
 preparation never submits jobs.
+
+`iface vasp step1-launch Step1` is the submit step (dry-run by default,
+`--execute` calls `sbatch`) — the Step1 analogue of `step2-launch`. It
+submits every run written by `step1-prepare` (hashes still matching
+`step1_manifest.json`) or `step1-repair` (`step1_repair.json` is `PREPARED`)
+that carries no runtime outputs and is not already recorded in
+`step1_launch.json`, so after a repair it relaunches exactly the repaired
+runs and leaves the finished ones alone. `--only-repaired` restricts it to
+repaired runs; `--launcher` picks a non-default script.
 
 ### Slab vacuum and band-edge alignment
 
@@ -355,6 +366,7 @@ iface vasp step1-prepare OPT --protocol training --fresh-start --conservative --
 iface vasp step1-status Step1
 iface vasp step1-repair Step1                       # inspect only
 iface vasp step1-repair Step1 --execute --langevin  # archive + prepare; never submits
+iface vasp step1-launch Step1 --execute             # submit prepared + repaired runs
 iface vasp step2-prepare Step1 --protocol training --temperatures 300 450 600
 iface vasp step2-launch Step2_300K Step2_450K Step2_600K --execute
 iface vasp ml-recover continue run/ --temperature 450 --nsw 3000

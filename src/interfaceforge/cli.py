@@ -69,6 +69,7 @@ from .separation_energy import separation_energy
 from .separation_energy import write_reports as write_separation_energy_reports
 from .slab_alignment import analyze_slab_alignment
 from .slab_publication import plot_slab_publication
+from .step1_launch import launch_step1_runs
 from .step1_repair import prepare_step1_repair
 from .step1_status import render as render_step1_status
 from .step1_status import step1_status
@@ -540,6 +541,19 @@ def cmd_vasp_step1_repair(args: argparse.Namespace) -> int:
             max_temperature_k=args.max_temperature,
             langevin_gamma=args.langevin_gamma if args.langevin else None,
             ramp_from=args.ramp_from,
+        )
+    )
+    return 0
+
+
+def cmd_vasp_step1_launch(args: argparse.Namespace) -> int:
+    _json(
+        launch_step1_runs(
+            args.roots,
+            execute=args.execute,
+            launcher=args.launcher,
+            only_repaired=args.only_repaired,
+            progress=lambda message: print(message, file=sys.stderr, flush=True),
         )
     )
     return 0
@@ -2147,6 +2161,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Archive and prepare the repairs; without this flag only print the plan",
     )
     step1_repair.set_defaults(func=cmd_vasp_step1_repair)
+
+    step1_launch = vasp_commands.add_parser(
+        "step1-launch",
+        help="Submit prepared and repaired Step1 runs (dry-run by default; skips started/done runs)",
+    )
+    step1_launch.add_argument(
+        "roots", nargs="+", help="Step1 tree root(s) or single run directory(ies)"
+    )
+    step1_launch.add_argument(
+        "--launcher",
+        help="Launcher name to submit (default: prefer runvasp.sh, then run.slurm)",
+    )
+    step1_launch.add_argument(
+        "--only-repaired",
+        action="store_true",
+        help="Launch only step1-repair PREPARED runs, not freshly step1-prepare'd ones",
+    )
+    step1_launch.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually call sbatch; without this flag only print the verified launch plan",
+    )
+    step1_launch.set_defaults(func=cmd_vasp_step1_launch)
 
     step2_status_parser = vasp_commands.add_parser(
         "step2-status",

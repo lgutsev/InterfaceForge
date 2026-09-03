@@ -139,6 +139,26 @@ inherited tags survived, confirms `IBRION=0`/`SMASS=-1` and the expected
 notes a thin [slab vacuum](#slab-vacuum-check). Existing `Step1/` is never
 overwritten; re-audit with `--audit-only`.
 
+### Submit the Step1 runs
+
+`iface vasp step1-launch <Step1_root>` is the submit step — dry-run by
+default, `--execute` calls `sbatch`, the Step1 analogue of `step2-launch`.
+It preflights every root, then submits each run that was written by
+`step1-prepare` (INCAR/POSCAR hashes still matching `step1_manifest.json`)
+or by `step1-repair` (`step1_repair.json` is `PREPARED`), carries no runtime
+outputs (`OUTCAR` / `OSZICAR` / `vasprun.xml`), and is not already recorded
+in `step1_launch.json`. Finished and running folders are skipped, so after a
+`step1-repair` it relaunches exactly the repaired runs.
+
+```bash
+iface vasp step1-launch Step1                 # verified plan only
+iface vasp step1-launch Step1 --execute       # submit
+iface vasp step1-launch Step1 --only-repaired --execute
+```
+
+Each root gets `step1_launch.{json,tsv}` recording the submitted job ids; a
+second launch refuses the folders it already submitted.
+
 Then feed `Step1/` to `step2-prepare` as usual.
 
 ### Check how the Step1 runs are doing
