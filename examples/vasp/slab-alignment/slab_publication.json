@@ -18,5 +18,6 @@
   "energy_window_eV": [-7.0, -2.0],
   "sumo_gaussian_eV": 0.05,
   "atom_match_tolerance_angstrom": 1.5,
+  "vacuum_context_angstrom": 2.0,
   "dpi": 600
 }

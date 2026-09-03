@@ -63,6 +63,7 @@ def load_publication_config(path: str | Path) -> dict[str, Any]:
         "energy_window_eV": [-7.0, -2.0],
         "sumo_gaussian_eV": 0.05,
         "atom_match_tolerance_angstrom": 1.5,
+        "vacuum_context_angstrom": 2.0,
         "dpi": 600,
         "allow_suspect": False,
     }
@@ -84,6 +85,8 @@ def load_publication_config(path: str | Path) -> dict[str, Any]:
     window = config.get("energy_window_eV")
     if not isinstance(window, list) or len(window) != 2 or float(window[0]) >= float(window[1]):
         raise SafetyError("energy_window_eV must be [minimum, maximum]")
+    if float(config["vacuum_context_angstrom"]) < 0:
+        raise SafetyError("vacuum_context_angstrom must be nonnegative")
     return config
 
 
@@ -336,18 +339,52 @@ def _matplotlib() -> Any:
     return plt
 
 
+def _selected_side_plot_window(case: PublicationCase, context_angstrom: float) -> tuple[float, float]:
+    """Return a publication crop containing only the selected vacuum side.
+
+    Context is added toward the adjacent surface, never toward the periodic
+    seam or a detected dipole-correction reset.  The fitted plateau boundary
+    therefore remains the outer edge of the plotted data.
+    """
+
+    if context_angstrom < 0:
+        raise SafetyError("vacuum_context_angstrom must be nonnegative")
+    if case.selected.side == "high-z":
+        start = max(0.0, case.selected.window_start_A - context_angstrom)
+        end = case.selected.window_end_A
+    else:
+        start = case.selected.window_start_A
+        end = min(case.profile.c_length_A, case.selected.window_end_A + context_angstrom)
+    if end <= start:
+        raise SafetyError(f"{case.name}: selected-side publication crop is empty")
+    return start, end
+
+
 def _plot_vacuum(
     pair_cases: list[tuple[str, PublicationCase, PublicationCase]],
+    config: dict[str, Any],
     output_dir: Path,
     dpi: int,
 ) -> dict[str, str]:
     plt = _matplotlib()
     figure, axes = plt.subplots(len(pair_cases), 2, figsize=(7.2, 2.75 * len(pair_cases)), squeeze=False)
+    context_angstrom = float(config["vacuum_context_angstrom"])
     panel_index = 0
     for row, (label, reference, passivated) in enumerate(pair_cases):
         for column, (kind, case) in enumerate((("Pristine", reference), ("BPDCA", passivated))):
             axis = axes[row, column]
-            axis.plot(case.shifted_z, case.potential_minus_ef, color="black", linewidth=1.15)
+            crop_start, crop_end = _selected_side_plot_window(case, context_angstrom)
+            crop = (case.shifted_z >= crop_start) & (case.shifted_z <= crop_end)
+            if np.count_nonzero(crop) < 5:
+                raise SafetyError(
+                    f"{case.name}: selected-side publication crop contains fewer than five points"
+                )
+            axis.plot(
+                case.shifted_z[crop],
+                case.potential_minus_ef[crop],
+                color="black",
+                linewidth=1.15,
+            )
             axis.axvspan(
                 case.selected.window_start_A,
                 case.selected.window_end_A,
@@ -366,7 +403,9 @@ def _plot_vacuum(
             axis.text(
                 0.03,
                 0.94,
-                rf"$\Phi={plateau:.2f}$ eV" + "\n" + rf"swing $={case.selected.swing_eV:.3f}$ eV",
+                rf"$\Phi_{{\rm {case.selected.side}}}={plateau:.2f}$ eV"
+                + "\n"
+                + rf"swing $={case.selected.swing_eV:.3f}$ eV",
                 transform=axis.transAxes,
                 ha="left",
                 va="top",
@@ -383,7 +422,7 @@ def _plot_vacuum(
                 fontweight="bold",
             )
             panel_index += 1
-            axis.set_xlim(0, case.profile.c_length_A)
+            axis.set_xlim(crop_start, crop_end)
             axis.set_xlabel(r"Shifted distance along $c$ ($\AA$)")
             if column == 0:
                 axis.set_ylabel(r"$\overline{V}_{\rm loc}(z)-E_F$ (eV)")
@@ -606,7 +645,7 @@ def plot_slab_publication(
         pair_cases.append((str(pair["label"]), reference, passivated))
 
     dpi = int(settings["dpi"])
-    vacuum_outputs = _plot_vacuum(pair_cases, destination, dpi)
+    vacuum_outputs = _plot_vacuum(pair_cases, settings, destination, dpi)
     electronic_outputs = _plot_electronic(pair_cases, pdos, settings, destination, dpi)
     rows: list[dict[str, Any]] = []
     for label, reference, passivated in pair_cases:
@@ -642,6 +681,15 @@ def plot_slab_publication(
                 "rows": rows,
                 "passivant_species_local_indices": atom_selections,
                 "vacuum_figures": vacuum_outputs,
+                "vacuum_figure_scope": {
+                    "mode": "selected-side-only",
+                    "side": settings["side"],
+                    "surface_context_angstrom": settings["vacuum_context_angstrom"],
+                    "note": (
+                        "Each panel ends at the selected plateau boundary; the opposite-side "
+                        "vacuum and dipole-correction reset are excluded."
+                    ),
+                },
                 "electronic_figures": electronic_outputs,
                 "interpretation_guard": (
                     "Global VASP VBM/CBM values are shown. Inspect the BPDCA PDOS before assigning "

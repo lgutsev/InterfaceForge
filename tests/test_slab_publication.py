@@ -5,12 +5,14 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 from interfaceforge.cli import build_parser
 from interfaceforge.slab_alignment import largest_periodic_gap, parse_poscar_lines
 from interfaceforge.slab_publication import (
+    _selected_side_plot_window,
     match_excess_atoms,
     plot_slab_publication,
     read_sumo_curve,
@@ -126,6 +128,20 @@ class SlabPublicationTests(unittest.TestCase):
         self.assertTrue(np.allclose(energy, [0, 1]))
         self.assertTrue(np.allclose(density, [3, 7]))
 
+    def test_publication_crop_keeps_only_selected_surface_side(self) -> None:
+        high = SimpleNamespace(
+            name="high",
+            selected=SimpleNamespace(side="high-z", window_start_A=41.0, window_end_A=48.0),
+            profile=SimpleNamespace(c_length_A=52.0),
+        )
+        low = SimpleNamespace(
+            name="low",
+            selected=SimpleNamespace(side="low-z", window_start_A=2.0, window_end_A=9.0),
+            profile=SimpleNamespace(c_length_A=52.0),
+        )
+        self.assertEqual(_selected_side_plot_window(high, 2.0), (39.0, 48.0))
+        self.assertEqual(_selected_side_plot_window(low, 2.0), (2.0, 11.0))
+
     def test_end_to_end_publication_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -178,6 +194,8 @@ class SlabPublicationTests(unittest.TestCase):
             manifest = json.loads((destination / "publication_manifest.json").read_text())
             ligand = manifest["passivant_species_local_indices"]["MAPI_MAI_Surf_BPDCA"]
             self.assertEqual(ligand["C"], [2])
+            self.assertEqual(manifest["vacuum_figure_scope"]["mode"], "selected-side-only")
+            self.assertEqual(manifest["vacuum_figure_scope"]["side"], "high-z")
 
 
 if __name__ == "__main__":

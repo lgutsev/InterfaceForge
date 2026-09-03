@@ -143,7 +143,12 @@ reference; this prevents methylammonium C/N/H from being mislabeled as BPDCA.
 
 The command writes `vacuum_validation.{pdf,png,svg}` and
 `electronic_alignment.{pdf,png,svg}` under `publication_figures`. The first is
-a 2x2 selected-plateau validation figure. The second is a 2x3 figure containing
+a 2x2 selected-plateau validation figure. Each vacuum panel is cropped to the
+configured physical side: it shows the fitted plateau and
+`vacuum_context_angstrom` of the adjacent surface-side approach, but excludes
+the opposite vacuum and the dipole-correction reset. Because the plotted data
+are subset before drawing, the deep potential oscillations inside the slab do
+not set the panel's y scale. The second is a 2x3 figure containing
 pristine and passivated Pb/I/BPDCA PDOS plus the vacuum-aligned VBM/CBM diagram
 for each termination. It also writes `publication_band_edges.tsv` and a JSON
 manifest recording the exact folders, atom selections, and interpretation
