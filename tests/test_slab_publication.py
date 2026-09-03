@@ -113,7 +113,7 @@ class SlabPublicationTests(unittest.TestCase):
     def test_added_atoms_are_species_local_and_exclude_ma(self) -> None:
         reference = parse_poscar_lines(REFERENCE_POSCAR.splitlines())
         passivated = parse_poscar_lines(PASSIVATED_POSCAR.splitlines())
-        excess = match_excess_atoms(reference, passivated)
+        excess, delta = match_excess_atoms(reference, passivated)
         self.assertEqual(excess["C"], [2])
         self.assertEqual(excess["N"], [2])
         self.assertEqual(excess["H"], [2])
@@ -121,6 +121,7 @@ class SlabPublicationTests(unittest.TestCase):
         self.assertEqual(excess["Br"], [1])
         self.assertNotIn("Pb", excess)
         self.assertNotIn("I", excess)
+        self.assertEqual(delta, 0.0)
 
     def test_added_atoms_allow_different_vacuum_length(self) -> None:
         reference = parse_poscar_lines(REFERENCE_POSCAR.splitlines())
@@ -128,9 +129,18 @@ class SlabPublicationTests(unittest.TestCase):
         passivated = parse_poscar_lines(taller_cell.splitlines())
         # Preserve Cartesian slab geometry while adding 2 A of vacuum to each side.
         passivated.fractional[:, 2] = 0.5 + (passivated.fractional[:, 2] - 0.5) * 40.0 / 44.0
-        excess = match_excess_atoms(reference, passivated)
+        excess, _delta = match_excess_atoms(reference, passivated)
         self.assertEqual(excess["C"], [2])
         self.assertEqual(excess["O"], [1, 2])
+
+    def test_added_atoms_allow_small_in_plane_relaxation(self) -> None:
+        # ISIF 3/4 nudges the in-plane cell by a fraction of an A -- still matchable.
+        reference = parse_poscar_lines(REFERENCE_POSCAR.splitlines())
+        relaxed = PASSIVATED_POSCAR.replace("10 0 0", "10.134 0 0", 1).replace("0 10 0", "0 9.91 0", 1)
+        passivated = parse_poscar_lines(relaxed.splitlines())
+        excess, delta = match_excess_atoms(reference, passivated)
+        self.assertEqual(excess["C"], [2])
+        self.assertAlmostEqual(delta, 0.134, places=3)
 
     def test_added_atoms_reject_in_plane_cell_change(self) -> None:
         reference = parse_poscar_lines(REFERENCE_POSCAR.splitlines())

@@ -64,6 +64,7 @@ def load_publication_config(path: str | Path) -> dict[str, Any]:
         "energy_window_eV": [-7.0, -2.0],
         "sumo_gaussian_eV": 0.05,
         "atom_match_tolerance_angstrom": 1.5,
+        "in_plane_cell_tolerance_angstrom": 0.35,
         "vacuum_context_angstrom": 2.0,
         "dpi": 600,
         "allow_suspect": False,
@@ -142,20 +143,35 @@ def _load_case(root: Path, name: str, config: dict[str, Any]) -> PublicationCase
 def _atom_matching_geometry(
     reference: Structure,
     passivated: Structure,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    *,
+    in_plane_tolerance_angstrom: float = 0.35,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
     """Build safe coordinates for slabs with independently padded vacuum.
 
     Adsorbate builders commonly preserve the in-plane surface lattice while
-    choosing a different c length to retain a target amount of vacuum. That
-    does not invalidate species-local atom matching. In-plane changes or a
-    rotated surface normal remain unsafe and are rejected.
+    choosing a different c length to retain a target amount of vacuum; an
+    ``ISIF`` 3/4 relaxation also nudges the in-plane cell by a fraction of an
+    angstrom.  Neither invalidates species-local atom matching (which runs on
+    fractional coordinates against an averaged in-plane cell, with a much larger
+    ``atom_match_tolerance_angstrom`` as the real safety net).  A genuine
+    in-plane lattice change (different supercell, rotation) still shows up as a
+    multi-angstrom component difference and is rejected.
     """
 
-    if not np.allclose(reference.cell[:2], passivated.cell[:2], atol=0.05, rtol=1e-3):
-        maximum_delta = float(np.max(np.abs(reference.cell[:2] - passivated.cell[:2])))
+    maximum_delta = float(np.max(np.abs(reference.cell[:2] - passivated.cell[:2])))
+    if maximum_delta > in_plane_tolerance_angstrom:
         raise SafetyError(
             "Reference and passivated in-plane cells differ "
-            f"(maximum component difference {maximum_delta:.4f} A); ligand atom matching is unsafe"
+            f"(maximum component difference {maximum_delta:.4f} A > "
+            f"{in_plane_tolerance_angstrom:.2f} A); ligand atom matching is unsafe. "
+            "If this is an ISIF 3/4 relaxation, raise in_plane_cell_tolerance_angstrom "
+            "in the config; otherwise the two models are not the same surface."
+        )
+    if maximum_delta > 0.05:
+        print(
+            f"  [slab-publish] reference/passivated in-plane cells differ by "
+            f"{maximum_delta:.3f} A (<= {in_plane_tolerance_angstrom:.2f} A tolerance); "
+            "matching against the averaged cell."
         )
 
     reference_c = reference.cell[2]
@@ -195,7 +211,13 @@ def _atom_matching_geometry(
 
     average_in_plane = 0.5 * (reference.cell[:2] + passivated.cell[:2])
     c_direction = reference_c / reference_length
-    return average_in_plane, c_direction, centered_z(reference), centered_z(passivated)
+    return (
+        average_in_plane,
+        c_direction,
+        centered_z(reference),
+        centered_z(passivated),
+        maximum_delta,
+    )
 
 
 def _matching_distance(
@@ -217,15 +239,23 @@ def match_excess_atoms(
     passivated: Structure,
     *,
     tolerance_angstrom: float = 1.5,
-) -> dict[str, list[int]]:
-    """Return 1-based species-local indices added to the passivated slab.
+    in_plane_tolerance_angstrom: float = 0.35,
+) -> tuple[dict[str, list[int]], float]:
+    """Return ``(excess_indices, in_plane_cell_delta_angstrom)``.
 
-    Matching by geometry, rather than assuming appended POSCAR ordering, keeps
-    methylammonium C/N/H out of the BPDCA projection.
+    ``excess_indices`` are 1-based species-local indices added to the passivated
+    slab.  Matching by geometry, rather than assuming appended POSCAR ordering,
+    keeps methylammonium C/N/H out of the BPDCA projection.
     """
 
-    in_plane_cell, c_direction, reference_z, passivated_z = _atom_matching_geometry(
-        reference, passivated
+    (
+        in_plane_cell,
+        c_direction,
+        reference_z,
+        passivated_z,
+        in_plane_delta,
+    ) = _atom_matching_geometry(
+        reference, passivated, in_plane_tolerance_angstrom=in_plane_tolerance_angstrom
     )
     ref_by_symbol: dict[str, list[tuple[np.ndarray, float]]] = {}
     pass_by_symbol: dict[str, list[tuple[int, np.ndarray, float]]] = {}
@@ -270,7 +300,7 @@ def match_excess_atoms(
             unmatched.pop(best)
         if unmatched:
             excess[symbol] = [index for index, _coordinate, _z_value in unmatched]
-    return excess
+    return excess, in_plane_delta
 
 
 def _sumo_atom_selection(
@@ -767,14 +797,17 @@ def plot_slab_publication(
     pdos: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
     missing_projections: dict[str, list[str]] = {}
     atom_selections: dict[str, dict[str, list[int]]] = {}
+    in_plane_deltas: dict[str, float] = {}
     for pair in settings["pairs"]:
         reference = _load_case(root_path, str(pair["reference"]), settings)
         passivated = _load_case(root_path, str(pair["passivated"]), settings)
-        excess = match_excess_atoms(
+        excess, in_plane_delta = match_excess_atoms(
             reference.structure,
             passivated.structure,
             tolerance_angstrom=float(settings["atom_match_tolerance_angstrom"]),
+            in_plane_tolerance_angstrom=float(settings["in_plane_cell_tolerance_angstrom"]),
         )
+        in_plane_deltas[str(pair["label"])] = round(in_plane_delta, 4)
         selected_excess = {
             symbol: indices
             for symbol, indices in excess.items()
@@ -823,6 +856,7 @@ def plot_slab_publication(
                 "reference_swing_eV": reference.selected.swing_eV,
                 "passivated_swing_eV": passivated.selected.swing_eV,
                 "pdos_review_required": True,
+                "in_plane_cell_delta_angstrom": in_plane_deltas.get(label, 0.0),
                 "reference_pdos_missing": ";".join(missing_projections.get(reference.name, [])),
                 "passivated_pdos_missing": ";".join(missing_projections.get(passivated.name, [])),
             }

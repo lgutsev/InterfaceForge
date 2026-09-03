@@ -141,9 +141,13 @@ same vacuum reference used for the VBM and CBM. The ligand projection is based
 on atoms present in the passivated structure but absent from its pristine
 reference; this prevents methylammonium C/N/H from being mislabeled as BPDCA.
 The two calculations may use different surface-normal cell lengths when they
-retain the same in-plane lattice and surface-normal direction; independently
-padding each model to a target vacuum thickness does not invalidate atom
-matching. In-plane lattice changes are still rejected.
+retain the same surface-normal direction; independently padding each model to a
+target vacuum thickness does not invalidate atom matching. A small in-plane cell
+relaxation (an `ISIF` 3/4 run nudges the surface lattice by a fraction of an
+angstrom) is also tolerated up to `in_plane_cell_tolerance_angstrom` (default
+0.35 A) and matched against the averaged in-plane cell. A genuine in-plane
+lattice change -- a different supercell or a rotation -- is a multi-angstrom
+component difference and is still rejected.
 
 The command writes `vacuum_validation.{pdf,png,svg}` and
 `electronic_alignment.{pdf,png,svg}` under `publication_figures`. The first is
