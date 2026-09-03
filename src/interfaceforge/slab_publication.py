@@ -20,6 +20,7 @@ from .slab_alignment import (
     analyze_profile,
     band_edges_from_vasprun,
     efermi_from_outcar,
+    largest_periodic_gap,
     plateau_status,
     read_locpot,
 )
@@ -138,10 +139,77 @@ def _load_case(root: Path, name: str, config: dict[str, Any]) -> PublicationCase
     )
 
 
-def _cell_distance(first: np.ndarray, second: np.ndarray, cell: np.ndarray) -> float:
-    delta = np.asarray(first) - np.asarray(second)
-    delta -= np.round(delta)
-    return float(np.linalg.norm(delta @ cell))
+def _atom_matching_geometry(
+    reference: Structure,
+    passivated: Structure,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build safe coordinates for slabs with independently padded vacuum.
+
+    Adsorbate builders commonly preserve the in-plane surface lattice while
+    choosing a different c length to retain a target amount of vacuum. That
+    does not invalidate species-local atom matching. In-plane changes or a
+    rotated surface normal remain unsafe and are rejected.
+    """
+
+    if not np.allclose(reference.cell[:2], passivated.cell[:2], atol=0.05, rtol=1e-3):
+        maximum_delta = float(np.max(np.abs(reference.cell[:2] - passivated.cell[:2])))
+        raise SafetyError(
+            "Reference and passivated in-plane cells differ "
+            f"(maximum component difference {maximum_delta:.4f} A); ligand atom matching is unsafe"
+        )
+
+    reference_c = reference.cell[2]
+    passivated_c = passivated.cell[2]
+    reference_length = float(np.linalg.norm(reference_c))
+    passivated_length = float(np.linalg.norm(passivated_c))
+    direction_cosine = float(
+        np.dot(reference_c, passivated_c) / (reference_length * passivated_length)
+    )
+    if direction_cosine < 0.9999:
+        raise SafetyError(
+            "Reference and passivated surface-normal directions differ; "
+            "ligand atom matching is unsafe"
+        )
+    reference_counts = dict(zip(reference.species, reference.counts, strict=True))
+    passivated_counts = dict(zip(passivated.species, passivated.counts, strict=True))
+    anchor_symbols = {
+        symbol
+        for symbol, count in reference_counts.items()
+        if count > 0 and passivated_counts.get(symbol) == count
+    }
+    if not anchor_symbols:
+        raise SafetyError(
+            "Reference and passivated structures have no unchanged species for slab alignment"
+        )
+
+    def centered_z(structure: Structure) -> np.ndarray:
+        gap_start, _gap_end, gap_width = largest_periodic_gap(
+            structure.z_angstrom, structure.c_length
+        )
+        vacuum_center = (gap_start + 0.5 * gap_width) % structure.c_length
+        unwrapped = np.mod(structure.z_angstrom - vacuum_center, structure.c_length)
+        anchors = np.asarray(
+            [symbol in anchor_symbols for symbol in structure.elements], dtype=bool
+        )
+        return unwrapped - float(np.median(unwrapped[anchors]))
+
+    average_in_plane = 0.5 * (reference.cell[:2] + passivated.cell[:2])
+    c_direction = reference_c / reference_length
+    return average_in_plane, c_direction, centered_z(reference), centered_z(passivated)
+
+
+def _matching_distance(
+    first: np.ndarray,
+    first_z: float,
+    second: np.ndarray,
+    second_z: float,
+    in_plane_cell: np.ndarray,
+    c_direction: np.ndarray,
+) -> float:
+    delta_xy = np.asarray(first[:2]) - np.asarray(second[:2])
+    delta_xy -= np.round(delta_xy)
+    displacement = delta_xy @ in_plane_cell + (first_z - second_z) * c_direction
+    return float(np.linalg.norm(displacement))
 
 
 def match_excess_atoms(
@@ -156,28 +224,42 @@ def match_excess_atoms(
     methylammonium C/N/H out of the BPDCA projection.
     """
 
-    if not np.allclose(reference.cell, passivated.cell, atol=1e-5, rtol=1e-5):
-        raise SafetyError("Reference and passivated cells differ; ligand atom matching is unsafe")
-    ref_by_symbol: dict[str, list[np.ndarray]] = {}
-    pass_by_symbol: dict[str, list[tuple[int, np.ndarray]]] = {}
+    in_plane_cell, c_direction, reference_z, passivated_z = _atom_matching_geometry(
+        reference, passivated
+    )
+    ref_by_symbol: dict[str, list[tuple[np.ndarray, float]]] = {}
+    pass_by_symbol: dict[str, list[tuple[int, np.ndarray, float]]] = {}
     ref_local: dict[str, int] = {}
     pass_local: dict[str, int] = {}
-    for symbol, coordinate in zip(reference.elements, reference.fractional, strict=True):
+    for symbol, coordinate, z_value in zip(
+        reference.elements, reference.fractional, reference_z, strict=True
+    ):
         ref_local[symbol] = ref_local.get(symbol, 0) + 1
-        ref_by_symbol.setdefault(symbol, []).append(coordinate)
-    for symbol, coordinate in zip(passivated.elements, passivated.fractional, strict=True):
+        ref_by_symbol.setdefault(symbol, []).append((coordinate, float(z_value)))
+    for symbol, coordinate, z_value in zip(
+        passivated.elements, passivated.fractional, passivated_z, strict=True
+    ):
         pass_local[symbol] = pass_local.get(symbol, 0) + 1
-        pass_by_symbol.setdefault(symbol, []).append((pass_local[symbol], coordinate))
+        pass_by_symbol.setdefault(symbol, []).append(
+            (pass_local[symbol], coordinate, float(z_value))
+        )
 
     excess: dict[str, list[int]] = {}
     for symbol, candidates in pass_by_symbol.items():
         unmatched = list(candidates)
-        for ref_coordinate in ref_by_symbol.get(symbol, []):
+        for ref_coordinate, ref_z in ref_by_symbol.get(symbol, []):
             if not unmatched:
                 raise SafetyError(f"Passivated structure contains fewer {symbol} atoms than its reference")
             distances = [
-                _cell_distance(ref_coordinate, coordinate, reference.cell)
-                for _index, coordinate in unmatched
+                _matching_distance(
+                    ref_coordinate,
+                    ref_z,
+                    coordinate,
+                    z_value,
+                    in_plane_cell,
+                    c_direction,
+                )
+                for _index, coordinate, z_value in unmatched
             ]
             best = int(np.argmin(distances))
             if distances[best] > tolerance_angstrom:
@@ -187,7 +269,7 @@ def match_excess_atoms(
                 )
             unmatched.pop(best)
         if unmatched:
-            excess[symbol] = [index for index, _coordinate in unmatched]
+            excess[symbol] = [index for index, _coordinate, _z_value in unmatched]
     return excess
 
 

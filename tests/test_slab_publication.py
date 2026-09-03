@@ -120,6 +120,23 @@ class SlabPublicationTests(unittest.TestCase):
         self.assertNotIn("Pb", excess)
         self.assertNotIn("I", excess)
 
+    def test_added_atoms_allow_different_vacuum_length(self) -> None:
+        reference = parse_poscar_lines(REFERENCE_POSCAR.splitlines())
+        taller_cell = PASSIVATED_POSCAR.replace("0 0 40", "0 0 44", 1)
+        passivated = parse_poscar_lines(taller_cell.splitlines())
+        # Preserve Cartesian slab geometry while adding 2 A of vacuum to each side.
+        passivated.fractional[:, 2] = 0.5 + (passivated.fractional[:, 2] - 0.5) * 40.0 / 44.0
+        excess = match_excess_atoms(reference, passivated)
+        self.assertEqual(excess["C"], [2])
+        self.assertEqual(excess["O"], [1, 2])
+
+    def test_added_atoms_reject_in_plane_cell_change(self) -> None:
+        reference = parse_poscar_lines(REFERENCE_POSCAR.splitlines())
+        changed_surface = PASSIVATED_POSCAR.replace("10 0 0", "10.5 0 0", 1)
+        passivated = parse_poscar_lines(changed_surface.splitlines())
+        with self.assertRaisesRegex(Exception, "in-plane cells differ"):
+            match_excess_atoms(reference, passivated)
+
     def test_sumo_curve_combines_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "Pb_dos.dat"

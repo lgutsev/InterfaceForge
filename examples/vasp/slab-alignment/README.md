@@ -140,6 +140,10 @@ for all four cases, then moves each DOS energy axis onto the
 same vacuum reference used for the VBM and CBM. The ligand projection is based
 on atoms present in the passivated structure but absent from its pristine
 reference; this prevents methylammonium C/N/H from being mislabeled as BPDCA.
+The two calculations may use different surface-normal cell lengths when they
+retain the same in-plane lattice and surface-normal direction; independently
+padding each model to a target vacuum thickness does not invalidate atom
+matching. In-plane lattice changes are still rejected.
 
 The command writes `vacuum_validation.{pdf,png,svg}` and
 `electronic_alignment.{pdf,png,svg}` under `publication_figures`. The first is
