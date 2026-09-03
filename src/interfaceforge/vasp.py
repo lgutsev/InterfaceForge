@@ -43,6 +43,7 @@ _ARCHIVE_FILES = (
     "ML_FF",
     "ML_FFN",
     "vasprun.xml",
+    "step1_repair.json",
 )
 
 INCAR_PRESETS = ("static", "relax", "md", "dos")
@@ -479,7 +480,6 @@ def prepare_step2_series(
             raise FileNotFoundError(template_path)
         template_label = str(template_path)
         template_text = template_path.read_text(encoding="utf-8", errors="ignore")
-
     normalized_temperatures = [float(value) for value in temperatures]
     labels = [_temperature_label(value) for value in normalized_temperatures]
     if len(set(labels)) != len(labels):
@@ -1949,6 +1949,7 @@ def _render_step1_incar(
     temperature: float,
     nsw: int,
     istart: int = 1,
+    conservative: bool = False,
 ) -> dict[str, Any]:
     """Render a Step1 preheat INCAR from an OPT run.
 
@@ -1958,7 +1959,9 @@ def _render_step1_incar(
     set are copied byte-for-byte from the OPT INCAR; the requested
     temperature overrides ``SYSTEM`` / ``TEBEG`` / ``TEEND`` and ``NSW`` is
     set from the protocol. ``ISTART`` is ``1`` when the OPT WAVECAR is
-    inherited and ``0`` for a fresh electronic start.
+    inherited and ``0`` for a fresh electronic start.  Conservative mode
+    keeps the protocol's ionic-step budget but reduces ``POTIM`` to 0.5 fs
+    and replaces ``ALGO=Fast`` with the more robust ``ALGO=Normal``.
     """
 
     inherited_lines, inherited_values = _collect_verbatim_source_tags(
@@ -1973,6 +1976,8 @@ def _render_step1_incar(
         "NSW": str(int(nsw)),
         "ISTART": str(int(istart)),
     }
+    if conservative:
+        replacements.update({"POTIM": "0.5", "ALGO": "Normal"})
 
     found: set[str] = set()
     output: list[str] = []
@@ -2027,6 +2032,7 @@ def prepare_step1_series(
     audit_only: bool = False,
     fresh_start: bool = False,
     require_wavecar: bool = False,
+    conservative: bool = False,
 ) -> dict[str, Any]:
     """Promote a recursive OPT tree into a sibling ``Step1`` preheat tree.
 
@@ -2041,6 +2047,11 @@ def prepare_step1_series(
     warning. ``fresh_start=True`` forces the fresh start for every run even
     when a ``WAVECAR`` exists; ``require_wavecar=True`` restores the old
     strict behaviour and refuses any run without one.
+
+    ``conservative=True`` is intended for proton-rich/reactive surfaces.  It
+    keeps the selected protocol's ``NSW`` budget unchanged, uses a 0.5 fs
+    ionic timestep, and switches the electronic solver to ``ALGO=Normal``.
+    Magnetic and DFT+U tags remain inherited verbatim from OPT.
 
     A launcher (``runvasp.sh`` / ``run.slurm``) is also accepted from the
     current working directory — the folder the command is run from — even
@@ -2076,6 +2087,11 @@ def prepare_step1_series(
             raise FileNotFoundError(template_path)
         template_label = str(template_path)
         template_text = template_path.read_text(encoding="utf-8", errors="ignore")
+    template_tags = {
+        assignment[0]: assignment[1]
+        for line in template_text.splitlines()
+        if (assignment := _incar_assignment(line)) is not None
+    }
 
     output_root_path = destination_parent / "Step1"
     if audit_only:
@@ -2148,6 +2164,7 @@ def prepare_step1_series(
             temperature=temperature,
             nsw=nsw,
             istart=istart,
+            conservative=conservative,
         )
         for tag in ("LDAUL", "LDAUU", "LDAUJ"):
             value = rendered["inherited_tags"].get(tag)
@@ -2206,6 +2223,10 @@ def prepare_step1_series(
                 "wavecar_link_mode": link_modes,
                 "fresh_start": bool(fresh_start),
                 "require_wavecar": bool(require_wavecar),
+                "conservative": bool(conservative),
+                "conservative_overrides": (
+                    {"POTIM": "0.5", "ALGO": "Normal"} if conservative else {}
+                ),
                 "warnings": warnings,
                 "precedence": {
                     "ordinary_incar_tags": "Step1 template",
@@ -2258,6 +2279,9 @@ def prepare_step1_series(
         "protocol": protocol,
         "temperature_k": float(temperature),
         "nsw": nsw,
+        "conservative": bool(conservative),
+        "potim_fs": 0.5 if conservative else float(template_tags.get("POTIM", 1.0)),
+        "algo": "Normal" if conservative else template_tags.get("ALGO"),
         "prepared_runs": len(plans),
         "fresh_start_runs": sum(1 for plan in plans if plan["istart"] == 0),
         "wavecar_link_mode": link_modes,

@@ -152,6 +152,45 @@ class Step1PrepareTests(unittest.TestCase):
             self.assertFalse((run / "WAVECAR").exists())
             self.assertEqual(result["fresh_start_runs"], 1)
 
+    def test_conservative_mode_preserves_budget_and_afm_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            opt = _opt_tree(root, wavecar=False)
+            result = prepare_step1_series(
+                opt, protocol="training", fresh_start=True, conservative=True
+            )
+            incar = parse_incar(root / "Step1" / "NiO_m110_Big_U46" / "INCAR")
+            self.assertTrue(result["conservative"])
+            self.assertEqual(result["nsw"], 400)
+            self.assertEqual(result["potim_fs"], 0.5)
+            self.assertEqual(result["algo"], "Normal")
+            self.assertEqual(incar["NSW"], "400")
+            self.assertEqual(incar["POTIM"], "0.5")
+            self.assertEqual(incar["ALGO"], "Normal")
+            self.assertEqual(incar["MAGMOM"], "2*2.0 3*-2.0")
+            self.assertEqual(incar["ISTART"], "0")
+
+    def test_cli_conservative_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            opt = _opt_tree(root)
+            self.assertEqual(
+                main(
+                    [
+                        "vasp",
+                        "step1-prepare",
+                        str(opt),
+                        "--protocol",
+                        "training",
+                        "--conservative",
+                    ]
+                ),
+                0,
+            )
+            incar = parse_incar(root / "Step1" / "NiO_m110_Big_U46" / "INCAR")
+            self.assertEqual(incar["POTIM"], "0.5")
+            self.assertEqual(incar["ALGO"], "Normal")
+
     def test_magmom_length_mismatch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

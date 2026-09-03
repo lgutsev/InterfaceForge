@@ -28,6 +28,7 @@ from typing import Any
 
 from .aimd import _first_float, _first_int, preheat_ps
 from .audit import parse_oszicar, read_tail
+from .step1_repair import diagnose_step1_run
 from .vasp import parse_incar
 
 _EXCLUDED = ("archive", "backup", ".interfaceforge")
@@ -160,9 +161,20 @@ def _run_status(run: Path, *, stale_hours: float) -> dict[str, Any]:
     potim = summary["potim_fs"]
 
     oszicar = parse_oszicar(run / "OSZICAR")
-    frames_oszicar = oszicar["md_steps"] or 0
+    frames_segment = oszicar["md_steps"] or 0
     last_step = oszicar["last_oszicar_step"]
     frames_xdatcar = _xdatcar_frames(run / "XDATCAR")
+
+    repair: dict[str, Any] = {}
+    repair_path = run / "step1_repair.json"
+    if repair_path.is_file():
+        try:
+            repair = json.loads(repair_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            repair = {}
+    prefix_steps = _first_int(repair.get("safe_prefix_steps"), 0) or 0
+    original_target = _first_int(repair.get("original_nsw"), nsw) or nsw
+    frames_oszicar = prefix_steps + frames_segment
 
     outcar = run / "OUTCAR"
     outcar_tail = read_tail(outcar) if _nonempty(outcar) else ""
@@ -178,22 +190,44 @@ def _run_status(run: Path, *, stale_hours: float) -> dict[str, Any]:
         updated=updated,
         stale_hours=stale_hours,
     )
+    if prefix_steps and state == "not-started":
+        state = "repair-prepared"
+    stability = diagnose_step1_run(run)
+    if stability["unstable"] and state not in {"done", "not-started", "no-incar"}:
+        state = "unstable"
 
-    done_step = last_step if last_step is not None else frames_oszicar
+    done_step = frames_oszicar
+    original_potim = _first_float(repair.get("original_potim_fs"), potim)
+    produced_ps = preheat_ps(prefix_steps, original_potim) or 0.0
+    produced_ps += preheat_ps(frames_segment, potim) or 0.0
+    target_ps = None
+    if original_target:
+        repair_target = _first_int(repair.get("repair_nsw"))
+        if repair_target is not None:
+            target_ps = (preheat_ps(prefix_steps, original_potim) or 0.0) + (
+                preheat_ps(repair_target, potim) or 0.0
+            )
+        else:
+            target_ps = preheat_ps(original_target, potim)
     return {
         "run": run.name,
         "path": str(run),
         "state": state,
         "stale": stale,
         "frames_oszicar": frames_oszicar,
+        "frames_oszicar_segment": frames_segment,
+        "accepted_prefix_steps": prefix_steps,
         "frames_xdatcar": frames_xdatcar,
         "last_step": last_step,
-        "nsw_target": nsw,
+        "nsw_target": original_target,
+        "nsw_segment_target": nsw,
         "percent_complete": (
-            round(100.0 * done_step / nsw, 1) if nsw and done_step is not None else None
+            round(100.0 * done_step / original_target, 1)
+            if original_target and done_step is not None
+            else None
         ),
-        "produced_ps": preheat_ps(done_step, potim),
-        "target_ps": preheat_ps(nsw, potim),
+        "produced_ps": produced_ps if done_step else None,
+        "target_ps": target_ps,
         "temperature_mean_k": oszicar["temperature_mean_k"],
         "temperature_std_k": oszicar["temperature_std_k"],
         "temperature_last_k": oszicar["temperature_last_k"],
@@ -203,6 +237,8 @@ def _run_status(run: Path, *, stale_hours: float) -> dict[str, Any]:
         "potcar_enmax_ev": potcar_enmax,
         "updated": _iso(updated),
         "incar": summary,
+        "stability": stability,
+        "repair": repair or None,
     }
 
 
@@ -270,7 +306,11 @@ def render(payload: dict[str, Any]) -> str:
         count = f"{frames}/{target}" if target else f"{frames}/?"
         pct_txt = f"{pct:>5.1f}%" if pct is not None else "   -  "
         xdat = row["frames_xdatcar"]
-        xdat_txt = f" (XDATCAR {xdat})" if xdat is not None and xdat != frames else ""
+        prefix = row.get("accepted_prefix_steps", 0)
+        if prefix:
+            xdat_txt = f" (accepted prefix {prefix}; repair XDATCAR {xdat or 0})"
+        else:
+            xdat_txt = f" (XDATCAR {xdat})" if xdat is not None and xdat != frames else ""
         ps_txt = ""
         if row["produced_ps"] is not None and row["target_ps"] is not None:
             ps_txt = f"  {row['produced_ps']:.2f}/{row['target_ps']:.2f} ps"
@@ -300,6 +340,19 @@ def render(payload: dict[str, Any]) -> str:
             + f"IBRION={_fmt(inc['ibrion'])}  NSW={_fmt(inc['nsw'])}  POTIM={_fmt(inc['potim_fs'])}  "
             + f"SMASS={_fmt(inc['smass'])}  TEBEG={_fmt(inc['tebeg'], '.0f')}"
         )
+        stability = row.get("stability", {})
+        if stability.get("unstable"):
+            detail = []
+            if stability.get("first_bad_step") is not None:
+                detail.append(f"first unsafe ionic step {stability['first_bad_step']}")
+                detail.extend(stability.get("first_bad_reasons", []))
+            fraction = stability.get("scf_ceiling_fraction")
+            if fraction is not None:
+                detail.append(
+                    f"NELM ceiling {stability['scf_ceiling_steps']}/"
+                    f"{stability['scf_window_steps']} steps ({100.0*fraction:.0f}%)"
+                )
+            lines.append("      stability: UNSTABLE — " + "; ".join(detail))
 
     summary = "  ".join(f"{state}: {n}" for state, n in sorted(payload["state_tally"].items()))
     lines += ["", f"{len(payload['runs'])} runs  ({summary})"]

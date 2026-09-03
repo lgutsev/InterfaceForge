@@ -69,6 +69,7 @@ from .separation_energy import separation_energy
 from .separation_energy import write_reports as write_separation_energy_reports
 from .slab_alignment import analyze_slab_alignment
 from .slab_publication import plot_slab_publication
+from .step1_repair import prepare_step1_repair
 from .step1_status import render as render_step1_status
 from .step1_status import step1_status
 from .step2_status import render as render_step2_status
@@ -506,6 +507,7 @@ def cmd_vasp_step1_prepare(args: argparse.Namespace) -> int:
             audit_only=args.audit_only,
             fresh_start=args.fresh_start,
             require_wavecar=args.require_wavecar,
+            conservative=args.conservative,
         )
     )
     return 0
@@ -517,6 +519,22 @@ def cmd_vasp_step1_status(args: argparse.Namespace) -> int:
         _json(payload)
     else:
         print(render_step1_status(payload))
+    return 0
+
+
+def cmd_vasp_step1_repair(args: argparse.Namespace) -> int:
+    _json(
+        prepare_step1_repair(
+            args.root,
+            execute=args.execute,
+            stale_hours=args.stale_hours,
+            potim_fs=args.potim,
+            algo=args.algo,
+            safety_steps=args.safety_steps,
+            energy_jump_ev=args.energy_jump,
+            max_temperature_k=args.max_temperature,
+        )
+    )
     return 0
 
 
@@ -1978,6 +1996,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Restore the old strict behaviour: refuse any run without a nonempty "
         "OPT WAVECAR instead of falling back to a fresh start",
     )
+    step1_prepare.add_argument(
+        "--conservative",
+        action="store_true",
+        help=(
+            "Keep the protocol NSW budget but use POTIM=0.5 fs and ALGO=Normal; "
+            "recommended for proton-rich/reactive surfaces such as OH50"
+        ),
+    )
     step1_prepare.add_argument("--dry-run", action="store_true")
     step1_prepare.add_argument("--audit-only", action="store_true")
     step1_prepare.set_defaults(func=cmd_vasp_step1_prepare)
@@ -1999,6 +2025,49 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit the raw payload instead of a table"
     )
     step1_status_parser.set_defaults(func=cmd_vasp_step1_status)
+
+    step1_repair = vasp_commands.add_parser(
+        "step1-repair",
+        help="Rewind unstable Step1 AIMD runs and prepare a smaller-timestep recovery segment",
+    )
+    step1_repair.add_argument(
+        "root", nargs="?", default=".", help="Step1 tree root or a single run directory"
+    )
+    step1_repair.add_argument(
+        "--potim", type=float, default=0.5, help="Recovery ionic timestep in fs (default 0.5)"
+    )
+    step1_repair.add_argument(
+        "--algo", default="Normal", help="Recovery electronic minimizer (default Normal)"
+    )
+    step1_repair.add_argument(
+        "--safety-steps",
+        type=int,
+        default=8,
+        help="Rewind this many ionic steps before the first runaway (default 8)",
+    )
+    step1_repair.add_argument(
+        "--energy-jump",
+        type=float,
+        default=50.0,
+        help="Absolute free-energy departure marking a runaway, in eV (default 50)",
+    )
+    step1_repair.add_argument(
+        "--max-temperature",
+        type=float,
+        help="Runaway temperature threshold in K (default max(1200, 4*TEBEG))",
+    )
+    step1_repair.add_argument(
+        "--stale-hours",
+        type=float,
+        default=6.0,
+        help="Refuse to mutate runs updated more recently than this (default 6)",
+    )
+    step1_repair.add_argument(
+        "--execute",
+        action="store_true",
+        help="Archive and prepare the repairs; without this flag only print the plan",
+    )
+    step1_repair.set_defaults(func=cmd_vasp_step1_repair)
 
     step2_status_parser = vasp_commands.add_parser(
         "step2-status",
