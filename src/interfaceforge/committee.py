@@ -18,7 +18,16 @@ from .errors import ConfigurationError, SafetyError
 from .state import sha256_file, utc_now
 
 _SEED_NAME = re.compile(r"^seed[_-](?P<seed>-?\d+)$")
-_RUN_ARTIFACTS = ("results", "mace_model", "checkpoints", "logs")
+_DEEPMD_MODEL_DIR = re.compile(r"^model_(?P<index>\d+)$")
+# Frozen (deployable) DeePMD models, in preference order. ``dp freeze`` writes
+# ``frozen_model.pth`` (PyTorch) or ``frozen_model.pb`` (TensorFlow); ``.pt`` /
+# ``.pt2`` appear with some backend/version combinations.
+_FROZEN_MODEL_NAMES = ("frozen_model.pth", "frozen_model.pt", "frozen_model.pt2", "frozen_model.pb")
+_RUN_ARTIFACTS = {
+    "mace": ("results", "mace_model", "checkpoints", "logs"),
+    "deepmd": ("input.json", "lcurve.out", "model.ckpt.pt", "test_results"),
+}
+_ENGINES = ("mace", "deepmd")
 
 
 def _resolved(path: str | Path) -> Path:
@@ -93,6 +102,99 @@ def _discover_mace_models(source: Path, pattern: str) -> list[tuple[int, str, Pa
         discovered.append((seed, run_name, model))
 
     return sorted(discovered, key=lambda item: (item[0], item[1]))
+
+
+def _load_deepmd_ensemble(source: Path) -> dict[str, Any]:
+    """Read the sibling ``ensemble_manifest.json`` written by ``iface train deepmd``.
+
+    ``source`` is a ``models/deepmd/<arch>`` directory, so the manifest is one
+    level up. Returns ``{}`` when it is absent or not an InterfaceForge DeePMD
+    manifest, so collection still works on a hand-arranged committee.
+    """
+
+    candidate = source.parent / "ensemble_manifest.json"
+    if not candidate.is_file():
+        return {}
+    try:
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if isinstance(payload, dict) and str(payload.get("engine", "")).lower() == "deepmd":
+        return payload
+    return {}
+
+
+def _deepmd_seed_lookup(ensemble: dict[str, Any], architecture: str) -> dict[int, int]:
+    lookup: dict[int, int] = {}
+    for entry in ensemble.get("models", []) or []:
+        if str(entry.get("architecture", "")) != architecture:
+            continue
+        try:
+            lookup[int(entry["index"])] = int(entry["seed"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return lookup
+
+
+def _discover_deepmd_members(source: Path) -> list[dict[str, Any]]:
+    """Discover ``model_NNN/`` committee members under a DeePMD architecture directory."""
+
+    members: list[dict[str, Any]] = []
+    seen_index: set[int] = set()
+    for child in sorted(source.iterdir()):
+        if not child.is_dir():
+            continue
+        match = _DEEPMD_MODEL_DIR.fullmatch(child.name)
+        if match is None:
+            continue
+        index = int(match.group("index"))
+        if index in seen_index:
+            raise SafetyError(f"DeePMD committee member index appears more than once: {index}")
+        seen_index.add(index)
+
+        frozen: Path | None = None
+        for name in _FROZEN_MODEL_NAMES:
+            candidate = child / name
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                frozen = candidate
+                break
+        if frozen is None:
+            raise SafetyError(
+                f"DeePMD committee member {child.name} has no non-empty frozen model "
+                f"({', '.join(_FROZEN_MODEL_NAMES)}); run 'dp freeze' before collecting"
+            )
+
+        model_input: dict[str, Any] | None = None
+        input_path = child / "input.json"
+        if input_path.is_file():
+            try:
+                model_input = json.loads(input_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                model_input = None
+
+        members.append(
+            {
+                "index": index,
+                "run_name": child.name,
+                "model": frozen,
+                "frozen_format": frozen.suffix.lstrip("."),
+                "input": model_input,
+            }
+        )
+    return sorted(members, key=lambda item: item["index"])
+
+
+def _deepmd_input_value(members: Sequence[dict[str, Any]], *keys: str) -> Any:
+    for member in members:
+        node: Any = member.get("input")
+        for key in keys:
+            if not isinstance(node, dict):
+                node = None
+                break
+            node = node.get(key)
+        if node is not None:
+            return node
+    return None
 
 
 def _bundle_digest(engine: str, members: Sequence[dict[str, Any]]) -> str:
@@ -247,8 +349,10 @@ def collect_committee(
     """
 
     engine = engine.strip().lower()
-    if engine != "mace":
-        raise ConfigurationError("Committee collection currently supports engine='mace'")
+    if engine not in _ENGINES:
+        raise ConfigurationError(
+            f"Committee collection supports engine {' or '.join(repr(name) for name in _ENGINES)}"
+        )
     if expected_members < 1:
         raise ConfigurationError("expected_members must be positive")
 
@@ -274,31 +378,80 @@ def collect_committee(
     if any(path == source or _inside(path, source) for path in planned_outputs):
         raise SafetyError("Committee bundle output must be outside the source run directory")
 
-    discovered = _discover_mace_models(source, model_pattern)
-    if len(discovered) != expected_members:
-        raise SafetyError(
-            f"Expected {expected_members} completed committee members but found {len(discovered)} "
-            f"with pattern {model_pattern!r} under {source}"
-        )
-
-    source_records: list[dict[str, Any]] = []
-    hashes: set[str] = set()
-    for seed, run_name, model in discovered:
-        checksum = sha256_file(model)
-        if checksum in hashes:
-            raise SafetyError(
-                f"Duplicate committee model content detected at {model}; every member must be distinct"
-            )
-        hashes.add(checksum)
-        source_records.append(
+    engine_manifest: dict[str, Any] = {}
+    if engine == "mace":
+        normalized = [
             {
                 "seed": seed,
+                "model_index": None,
                 "run_name": run_name,
                 "model": model,
-                "sha256": checksum,
-                "size_bytes": model.stat().st_size,
+                "stored_model": f"models/seed_{seed}.model",
+                "member_extra": {},
             }
+            for seed, run_name, model in _discover_mace_models(source, model_pattern)
+        ]
+        found_hint = f"with pattern {model_pattern!r} under {source}"
+    else:
+        ensemble = _load_deepmd_ensemble(source)
+        # `iface train deepmd` writes each architecture to models/deepmd/<arch>/,
+        # so the directory name is the architecture identifier.
+        architecture = source.name
+        seed_lookup = _deepmd_seed_lookup(ensemble, architecture)
+        deepmd_members = _discover_deepmd_members(source)
+        normalized = []
+        for spec in deepmd_members:
+            index = int(spec["index"])
+            seed = seed_lookup.get(index)
+            normalized.append(
+                {
+                    "seed": seed if seed is not None else index,
+                    "model_index": index,
+                    "run_name": spec["run_name"],
+                    "model": spec["model"],
+                    "stored_model": f"models/model_{index:03d}.{spec['frozen_format']}",
+                    "member_extra": {
+                        "frozen_format": spec["frozen_format"],
+                        "seed_source": "ensemble_manifest" if seed is not None else "model_index",
+                        "input": spec["input"],
+                    },
+                }
+            )
+        formats = {str(spec["frozen_format"]) for spec in deepmd_members}
+        engine_manifest = {
+            "architecture": architecture,
+            "backend": ensemble.get("backend")
+            or ("tensorflow" if formats == {"pb"} else "pytorch"),
+            "type_map": ensemble.get("type_map")
+            or _deepmd_input_value(deepmd_members, "model", "type_map"),
+            "numb_steps": ensemble.get("numb_steps")
+            or _deepmd_input_value(deepmd_members, "training", "numb_steps"),
+            "base_checkpoint": (
+                (ensemble.get("finetune") or {}).get(architecture, {}).get("pretrained")
+                if isinstance(ensemble.get("finetune"), dict)
+                else None
+            ),
+            "campaign": ensemble.get("campaign"),
+            "frozen_model_formats": sorted(formats),
+        }
+        found_hint = f"under {source} (expected model_NNN/ directories with a frozen model)"
+
+    if len(normalized) != expected_members:
+        raise SafetyError(
+            f"Expected {expected_members} completed committee members but found "
+            f"{len(normalized)} {found_hint}"
         )
+
+    hashes: set[str] = set()
+    for record in normalized:
+        checksum = sha256_file(record["model"])
+        if checksum in hashes:
+            raise SafetyError(
+                f"Duplicate committee model content detected at {record['model']}; "
+                "every member must be distinct"
+            )
+        hashes.add(checksum)
+        record["sha256"] = checksum
 
     data_records: list[dict[str, Any]] = []
     for value in training_data:
@@ -329,9 +482,10 @@ def collect_committee(
         members: list[dict[str, Any]] = []
         checksum_lines: list[str] = []
         model_lines: list[str] = []
-        for index, record in enumerate(source_records):
-            stored = Path("models") / f"seed_{record['seed']}.model"
+        for index, record in enumerate(normalized):
+            stored = pathlib.PurePosixPath(str(record["stored_model"]))
             target = temporary / stored
+            target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(record["model"], target)
             copied_checksum = sha256_file(target)
             if copied_checksum != record["sha256"]:
@@ -339,6 +493,7 @@ def collect_committee(
             run_root = source / str(record["run_name"])
             member = {
                 "index": index,
+                "model_index": record["model_index"],
                 "seed": record["seed"],
                 "run_name": record["run_name"],
                 "source_model": str(record["model"]),
@@ -347,8 +502,9 @@ def collect_committee(
                 "sha256": copied_checksum,
                 "size_bytes": target.stat().st_size,
                 "source_run_artifacts": {
-                    name: (run_root / name).is_dir() for name in _RUN_ARTIFACTS
+                    name: (run_root / name).exists() for name in _RUN_ARTIFACTS[engine]
                 },
+                **record["member_extra"],
             }
             members.append(member)
             checksum_lines.append(f"{copied_checksum}  {stored.as_posix()}")
@@ -363,11 +519,12 @@ def collect_committee(
             "source_root": str(source),
             "expected_members": expected_members,
             "model_count": len(members),
-            "model_pattern": model_pattern,
+            "model_pattern": model_pattern if engine == "mace" else None,
             "members": members,
             "training_data": data_records,
             "training_data_archive": str(data_archive) if data_archive is not None else None,
             "notes": notes,
+            **engine_manifest,
         }
         manifest["bundle_sha256"] = _bundle_digest(engine, members)
 

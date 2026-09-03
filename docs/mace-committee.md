@@ -89,3 +89,12 @@ sha256sum -c checksums.sha256
 For AI2-Kit, use the four files under the bundle's `models/` directory as
 `active_learning.ai2kit.committee_models`. The original full training runs should
 still be retained separately if future restart or forensic inspection is needed.
+
+## DeePMD committees and Hugging Face packaging
+
+`iface committee collect --engine deepmd` produces the same bundle shape from a
+`models/deepmd/<arch>` directory of `model_NNN/` runs (frozen models required).
+`iface package huggingface <bundle> <output>` turns any collected bundle — MACE
+or DeePMD — into an upload-ready Hugging Face model repository with a generated
+model card. InterfaceForge does not push to the Hub. See
+[the packaging guide](packaging.md).

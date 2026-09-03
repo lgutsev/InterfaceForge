@@ -194,3 +194,21 @@ The audit converts the first canonical frame into a temporary LAMMPS data
 file, loads every committee model through `pair_style deepmd`, runs one step,
 and requires model-deviation output. A failure here is a runtime compatibility
 failure even when `dp test` under the 3.2 training module succeeds.
+
+## Archiving a committee
+
+Once every member is frozen, collect the committee into an immutable,
+checksummed bundle and (optionally) an upload-ready Hugging Face model repo:
+
+```bash
+iface committee collect models/deepmd/dpa2 stored_models/sintin_dpa2_v1 \
+    --engine deepmd --expected-members 4 --label "SiN/TiN DPA-2 v1"
+iface committee verify stored_models/sintin_dpa2_v1
+iface package huggingface stored_models/sintin_dpa2_v1 hf/sintin_dpa2_v1 \
+    --repo-id myorg/sintin-dpa2 \
+    --metrics models/deepmd/evaluation/dpa2/job_<jobid>/rmse_overall.csv --zip
+```
+
+Each `model_NNN/` must contain a non-empty `frozen_model.pth` / `.pb`; seeds,
+architecture, backend and `type_map` are recovered from `ensemble_manifest.json`.
+InterfaceForge never pushes to the Hub. See [the packaging guide](packaging.md).

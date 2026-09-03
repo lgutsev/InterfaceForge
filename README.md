@@ -53,6 +53,14 @@ not used as package-generated templates.
 - **HPC guardrails:** LONI profiles include the current DeePMD 3.2 GPU module,
   explicit legacy VASP 6.5.1 options, runtime preflights, restartable arrays,
   and independent DeePMD/LAMMPS compatibility checks.
+- **Portable archiving and Hugging Face packaging:** `iface committee collect`
+  now also bundles DeePMD frozen-model committees (`--engine deepmd`).
+  `iface collect --archive` / `iface package dataset-archive` write one
+  checksummed ZIP of a canonical dataset for a backup drive, and
+  `iface package huggingface` turns a verified committee bundle into an
+  upload-ready Hugging Face model repository — generated model card,
+  `.gitattributes`, provenance manifest and the exact `hf upload` command.
+  InterfaceForge never contacts the Hub.
 
 ## Verification status
 
@@ -88,7 +96,7 @@ known gaps, and the minimum checks needed to promote a feature's status.
 | VASP-MLFF | train → refit → stability scaffolding, continuation/capacity recovery, mode-aware audits | **Human-tested on real campaigns.** This is the most mature part of the repository, but each new VASP version, cluster profile, and recovery condition still requires inspection. |
 | Dataset | streaming OUTCAR collection, leakage-resistant splits, synchronized extxyz and DeePMD NPY layouts | **Human-tested for data generation.** Real VASP data have been exported for MACE and DeePMD. This does not validate downstream training or model quality. |
 | MACE | two-stage energy/force job generation; committee training/evaluation; optional interface-local force weighting and thermodynamic-cycle loss | **Human-tested for standard committee training and evaluation.** A real four-seed committee completed on the periodic SiN/TiN/TiO campaign and produced held-out energy/force metrics. Foundation-model fine-tuning, MACE-ROI, deployment and transferability remain unverified separately. |
-| MLIP archiving | immutable collection of completed MACE committees into a checksummed directory and ZIP; final models only by default, with optional training data written to a separate ZIP | **Automated-test verified.** Collection, duplicate/missing-member rejection, archive safety, checksums, and verification are tested; long-term storage and restore have not yet been human-tested on a real committee archive. |
+| MLIP archiving | immutable collection of completed MACE **and DeePMD** committees into a checksummed directory and ZIP; final models only by default, with optional training data written to a separate ZIP; canonical-dataset backup archives (`iface collect --archive` / `iface package dataset-archive`); upload-ready Hugging Face model repositories (`iface package huggingface`, no push) | **Automated-test verified.** Collection, duplicate/missing-member rejection, archive safety, checksums, verification, dataset archives, and Hugging Face model-card generation are tested; long-term storage, restore, and a real Hub upload have not yet been human-tested. |
 | DeePMD | DPA-1, DPA-2, DPA-3, experimental DPA-4 and DPA-2 foundation-checkpoint fine-tuning; TensorFlow/PyTorch backends; preflight → smoke → full → evaluation | **Human-tested for PyTorch DPA-2 committee training and evaluation.** Real LONI runs exercised checkpoint continuation, model freezing and per-system `dp test` reporting. Other architectures, fine-tuning and LAMMPS deployment remain separate unverified gates. |
 | Allegro | training/job-generation and LAMMPS-oriented adapter code | **Code-only.** No human-tested training or LAMMPS deployment. |
 | Active learning | thermodynamic exploration matrix and uncertainty-plus-diversity labeling queue; AI2-Kit TESLA MACE/OpenMM/VASP with oh-my-batch; legacy config-driven DeepMD/LAMMPS/VASP | **Code-only.** No completed external-engine loop. |
@@ -292,19 +300,34 @@ translation parity. The bundled NiO(110)/Me4PACz benchmark independently
 recovers the 200-atom `[[4,0],[0,5]]` compromise. See the
 [reactive-surface guide](docs/reactive-surfaces.md).
 
-Collect a completed four-member MACE committee into a compact, immutable bundle
-before deployment or active learning:
+Collect a completed four-member MACE or DeePMD committee into a compact,
+immutable bundle before deployment or active learning:
 
 ```bash
 iface committee collect mace_committee stored_models/tin_sin_mace_v1.zip \
   --expected-members 4
+iface committee collect models/deepmd/dpa2 stored_models/tin_sin_dpa2_v1 \
+  --engine deepmd --expected-members 4
 iface committee verify stored_models/tin_sin_mace_v1
 ```
 
 The collector creates both an extracted bundle and ZIP archive, copies only
-final models, rejects missing or duplicate members, and writes checksums plus
-source provenance. See
+final models (MACE `*_stagetwo.model` or DeePMD frozen models), rejects missing
+or duplicate members, and writes checksums plus source provenance. See
 [the MACE committee guide](docs/mace-committee.md).
+
+Package a collected committee as an upload-ready Hugging Face model repo
+(InterfaceForge never pushes), or archive the canonical dataset for a backup
+drive:
+
+```bash
+iface package huggingface stored_models/tin_sin_dpa2_v1 hf/tin_sin_dpa2_v1 \
+  --repo-id myorg/tinsin-dpa2 --zip
+iface collect --archive backups/tin_sin_dataset_v1.zip     # or: iface package dataset-archive datasets/canonical backups/tin_sin_dataset_v1.zip
+iface package verify hf/tin_sin_dpa2_v1
+```
+
+See [the archiving and Hugging Face packaging guide](docs/packaging.md).
 
 For interface-local and thermodynamic-cycle-aware MACE training, configure
 `models.mace.roi`, then prepare the immutable derived data before generating
@@ -532,8 +555,10 @@ commands correctly use the public `--pt` switch. `dpa2_ft` requires the
 See [the campaign format](docs/campaign.md),
 [the VASP guide](docs/vasp.md), and
 [the DeePMD guide](docs/deepmd.md). The experimental method is documented in
-[the MACE-ROI guide](docs/mace-roi.md), and deployable committee storage in
-[the MACE committee guide](docs/mace-committee.md). Active-learning adapters
+[the MACE-ROI guide](docs/mace-roi.md), deployable committee storage in
+[the MACE committee guide](docs/mace-committee.md), and dataset archives plus
+Hugging Face packaging in [the packaging guide](docs/packaging.md).
+Active-learning adapters
 are covered by [the AI2-Kit guide](docs/ai2kit.md), crystalline matching by
 [the InterMat guide](docs/intermat.md), and reactive magnetic slabs by
 [the surface-campaign guide](docs/reactive-surfaces.md). A complete editable

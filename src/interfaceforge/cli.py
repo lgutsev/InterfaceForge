@@ -54,6 +54,7 @@ from .mlff_interfaces import (
     write_throttled_array_launcher,
 )
 from .mlip_compare import comparison_status, finalize_comparison, prepare_comparison
+from .packaging import pack_dataset_archive, pack_huggingface, verify_package
 from .progress import mlip_progress
 from .progress import render as render_progress
 from .reference_import import (
@@ -203,15 +204,23 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_collect(args: argparse.Namespace) -> int:
-    _json(
-        collect_dataset(
-            _campaign(args),
-            source_root=args.source,
-            output_root=args.output,
-            force=args.force,
-            seed=args.seed,
-        )
+    campaign = _campaign(args)
+    payload = collect_dataset(
+        campaign,
+        source_root=args.source,
+        output_root=args.output,
+        force=args.force,
+        seed=args.seed,
     )
+    if args.archive:
+        archive = pack_dataset_archive(
+            payload["output_root"], args.archive, force=args.force
+        )
+        payload["archive"] = archive
+        from .state import StateStore
+
+        StateStore(campaign.root).artifact("dataset_archive", archive["archive"])
+    _json(payload)
     return 0
 
 
@@ -231,6 +240,35 @@ def cmd_committee(args: argparse.Namespace) -> int:
             label=args.label,
             notes=args.notes,
         )
+    _json(payload)
+    return 0
+
+
+def cmd_package(args: argparse.Namespace) -> int:
+    if args.package_command == "huggingface":
+        payload = pack_huggingface(
+            args.bundle,
+            args.output,
+            repo_id=args.repo_id,
+            license_id=args.license,
+            base_model=args.base_model,
+            extra_tags=tuple(args.tag),
+            dataset_repo_id=args.dataset_repo_id,
+            metrics_path=args.metrics,
+            make_zip=args.zip,
+            force=args.force,
+        )
+    elif args.package_command == "dataset-archive":
+        payload = pack_dataset_archive(
+            args.dataset_root,
+            args.output,
+            include_extxyz=not args.no_extxyz,
+            compression=args.compression,
+            label=args.label,
+            force=args.force,
+        )
+    else:
+        payload = verify_package(args.path)
     _json(payload)
     return 0
 
@@ -1283,6 +1321,11 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--output")
     collect.add_argument("--seed", type=int, default=20260730)
     collect.add_argument("--force", action="store_true")
+    collect.add_argument(
+        "--archive",
+        metavar="OUT.zip",
+        help="Also write a checksummed ZIP of the collected dataset for cold storage / reuse",
+    )
     collect.set_defaults(func=cmd_collect)
 
     committee = commands.add_parser(
@@ -1290,18 +1333,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     committee_commands = committee.add_subparsers(dest="committee_command", required=True)
     committee_collect = committee_commands.add_parser(
-        "collect", help="Copy completed seed models into a checksummed deployment bundle"
+        "collect", help="Copy completed committee models into a checksummed deployment bundle"
     )
-    committee_collect.add_argument("source", help="Directory containing seed_* training runs")
+    committee_collect.add_argument(
+        "source",
+        help="MACE: directory of seed_* training runs. DeePMD: a models/deepmd/<arch> "
+        "directory of model_NNN/ runs.",
+    )
     committee_collect.add_argument(
         "output", help="New bundle directory or .zip name; both directory and ZIP are created"
     )
-    committee_collect.add_argument("--engine", choices=("mace",), default="mace")
+    committee_collect.add_argument("--engine", choices=("mace", "deepmd"), default="mace")
     committee_collect.add_argument("--expected-members", type=int, default=4)
     committee_collect.add_argument(
         "--model-pattern",
         default="seed_*/mace_model/*_stagetwo.model",
-        help="Source-relative glob identifying one final model per seed run",
+        help="MACE only: source-relative glob identifying one final model per seed run",
     )
     committee_collect.add_argument(
         "--training-data",
@@ -1327,6 +1374,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     committee_verify.add_argument("bundle")
     committee_verify.set_defaults(func=cmd_committee)
+
+    package = commands.add_parser(
+        "package",
+        help="Archive datasets for cold storage and package committees for Hugging Face",
+    )
+    package_commands = package.add_subparsers(dest="package_command", required=True)
+
+    package_hf = package_commands.add_parser(
+        "huggingface",
+        help="Turn a committee bundle into an upload-ready Hugging Face model repo (no push)",
+    )
+    package_hf.add_argument("bundle", help="An extracted committee bundle directory (MACE or DeePMD)")
+    package_hf.add_argument("output", help="New directory for the Hugging Face model repo")
+    package_hf.add_argument("--repo-id", help="Target Hub repo id, e.g. myorg/sintin-dpa2")
+    package_hf.add_argument("--license", default="mit", help="SPDX license id for the model card (default: mit)")
+    package_hf.add_argument(
+        "--base-model", help="Hub id of the foundation model this was fine-tuned from"
+    )
+    package_hf.add_argument(
+        "--tag", action="append", default=[], help="Extra model-card tag; repeat as needed"
+    )
+    package_hf.add_argument("--dataset-repo-id", help="Hub dataset id to link in the model card")
+    package_hf.add_argument(
+        "--metrics",
+        help="mlip-compare comparison.json or deepmd rmse_overall.csv to embed as evaluation metrics",
+    )
+    package_hf.add_argument("--zip", action="store_true", help="Also write <output>.zip")
+    package_hf.add_argument("--force", action="store_true")
+    package_hf.set_defaults(func=cmd_package)
+
+    package_dataset = package_commands.add_parser(
+        "dataset-archive",
+        help="Write one checksummed ZIP of an 'iface collect' canonical dataset",
+    )
+    package_dataset.add_argument("dataset_root", help="A datasets/canonical directory")
+    package_dataset.add_argument("output", help="Output .zip path")
+    package_dataset.add_argument(
+        "--no-extxyz", action="store_true", help="Exclude the *.extxyz files (keep only DeePMD NPY)"
+    )
+    package_dataset.add_argument(
+        "--compression", choices=("deflated", "stored"), default="deflated"
+    )
+    package_dataset.add_argument("--label")
+    package_dataset.add_argument("--force", action="store_true")
+    package_dataset.set_defaults(func=cmd_package)
+
+    package_verify = package_commands.add_parser(
+        "verify", help="Verify a dataset archive, Hugging Face package, or committee bundle"
+    )
+    package_verify.add_argument("path")
+    package_verify.set_defaults(func=cmd_package)
 
     mace_roi = commands.add_parser(
         "mace-roi", help="Prepare region- and thermodynamic-cycle-aware MACE data"
