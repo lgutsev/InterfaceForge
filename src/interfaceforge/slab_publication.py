@@ -339,6 +339,13 @@ def _run_sumo(
         raise DependencyError("sumo-dosplot was not found on PATH")
     data_dir = case.path / "publication_dos_data"
     data_dir.mkdir(exist_ok=True)
+    # These files are generated exclusively by this workflow. Remove earlier
+    # malformed or differently selected SUMO output before regenerating it so
+    # a stale projection can never be mistaken for the current calculation.
+    for pattern in ("*_dos.dat", "dos.*"):
+        for generated in data_dir.glob(pattern):
+            if generated.is_file():
+                generated.unlink()
     elements, atoms = _sumo_atom_selection(
         case.structure, framework_elements, passivant_elements, excess
     )
