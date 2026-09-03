@@ -149,6 +149,15 @@ angstrom) is also tolerated up to `in_plane_cell_tolerance_angstrom` (default
 lattice change -- a different supercell or a rotation -- is a multi-angstrom
 component difference and is still rejected.
 
+SUMO writes its raw `*_dos.dat` energy column relative to the internally
+adjusted Fermi level (the VBM for a semiconductor), even when `--no-shift` is
+used for SUMO's own plot. InterfaceForge restores the vacuum reference by
+adding the independently calculated vacuum-aligned VBM. It also expands every
+framework species into explicit species-local atom indices because bare atom
+selectors such as `Pb,I` produce empty projections in current SUMO releases.
+An electronic figure is refused if appreciable total DOS remains inside the
+eigenvalue-defined gap after alignment.
+
 The command writes `vacuum_validation.{pdf,png,svg}` and
 `electronic_alignment.{pdf,png,svg}` under `publication_figures`. The first is
 a 2x2 selected-plateau validation figure. Each vacuum panel is cropped to the

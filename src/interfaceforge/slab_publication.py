@@ -304,13 +304,21 @@ def match_excess_atoms(
 
 
 def _sumo_atom_selection(
+    structure: Structure,
     framework_elements: list[str],
     passivant_elements: list[str],
     excess: dict[str, list[int]],
 ) -> tuple[str, str]:
     ligand_symbols = [symbol for symbol in passivant_elements if excess.get(symbol)]
     elements = list(dict.fromkeys(framework_elements + ligand_symbols))
-    atom_parts = list(framework_elements)
+    species_counts = dict(zip(structure.species, structure.counts, strict=True))
+    atom_parts = [
+        symbol
+        + "."
+        + ".".join(str(index) for index in range(1, species_counts[symbol] + 1))
+        for symbol in framework_elements
+        if species_counts.get(symbol, 0) > 0
+    ]
     for symbol in passivant_elements:
         indices = excess.get(symbol, [])
         if indices:
@@ -331,7 +339,9 @@ def _run_sumo(
         raise DependencyError("sumo-dosplot was not found on PATH")
     data_dir = case.path / "publication_dos_data"
     data_dir.mkdir(exist_ok=True)
-    elements, atoms = _sumo_atom_selection(framework_elements, passivant_elements, excess)
+    elements, atoms = _sumo_atom_selection(
+        case.structure, framework_elements, passivant_elements, excess
+    )
     command = [
         executable,
         "--no-shift",
@@ -431,6 +441,46 @@ def _interpolate_density(
     return np.interp(target_energy, source_energy, source_density, left=0.0, right=0.0)
 
 
+def _sumo_energy_to_vacuum(case: PublicationCase, energy: np.ndarray) -> np.ndarray:
+    """Convert SUMO data-file energies to the selected vacuum reference.
+
+    SUMO's ``write_files`` routine writes ``dos.energies - dos.efermi`` and
+    ``load_dos`` moves ``dos.efermi`` to the VBM for semiconductors. This is
+    independent of the ``--no-shift`` plotting option. Zero in a SUMO
+    ``*_dos.dat`` file is therefore the VBM, not VASP's absolute energy zero.
+    """
+
+    if case.cbm_vac_eV <= case.vbm_vac_eV:
+        raise SafetyError(
+            f"{case.name}: SUMO vacuum alignment currently requires a semiconductor"
+        )
+    return np.asarray(energy, dtype=float) + case.vbm_vac_eV
+
+
+def _validate_dos_edge_alignment(
+    case: PublicationCase,
+    energy_vac: np.ndarray,
+    density: np.ndarray,
+) -> None:
+    """Reject an electronic figure whose DOS reference is inconsistent."""
+
+    gap = case.cbm_vac_eV - case.vbm_vac_eV
+    margin = min(0.15, 0.2 * gap)
+    interior = (energy_vac > case.vbm_vac_eV + margin) & (
+        energy_vac < case.cbm_vac_eV - margin
+    )
+    if not np.any(interior):
+        return
+    maximum = float(np.max(np.abs(density)))
+    gap_maximum = float(np.max(np.abs(density[interior])))
+    if maximum > 0 and gap_maximum > 0.10 * maximum:
+        raise SafetyError(
+            f"{case.name}: DOS has substantial weight inside the eigenvalue gap "
+            f"({gap_maximum / maximum:.1%} of peak DOS); refusing to draw inconsistent "
+            "VBM/CBM markers"
+        )
+
+
 def _load_pdos(
     case: PublicationCase,
     config: dict[str, Any],
@@ -463,7 +513,9 @@ def _load_pdos(
         )
 
     total_energy, total_density = read_sumo_curve(_find_sumo_file(data_dir, "total"))
-    result = {"Total": (total_energy - case.vacuum_eV, total_density)}
+    total_energy_vac = _sumo_energy_to_vacuum(case, total_energy)
+    _validate_dos_edge_alignment(case, total_energy_vac, total_density)
+    result = {"Total": (total_energy_vac, total_density)}
     missing: list[str] = []
 
     for symbol in framework:
@@ -471,7 +523,7 @@ def _load_pdos(
         if curve is None:
             missing.append(symbol)
             continue
-        result[symbol] = (curve[0] - case.vacuum_eV, curve[1])
+        result[symbol] = (_sumo_energy_to_vacuum(case, curve[0]), curve[1])
 
     ligand_density = np.zeros_like(total_density)
     found_ligand = False
@@ -486,7 +538,7 @@ def _load_pdos(
         found_ligand = True
     if found_ligand:
         result[str(config["passivant_label"])] = (
-            total_energy - case.vacuum_eV,
+            total_energy_vac,
             ligand_density,
         )
 

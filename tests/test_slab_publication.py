@@ -15,6 +15,9 @@ from interfaceforge.slab_alignment import largest_periodic_gap, parse_poscar_lin
 from interfaceforge.slab_publication import (
     _optional_sumo_curve,
     _selected_side_plot_window,
+    _sumo_atom_selection,
+    _sumo_energy_to_vacuum,
+    _validate_dos_edge_alignment,
     match_excess_atoms,
     plot_slab_publication,
     read_sumo_curve,
@@ -61,17 +64,18 @@ def _write_sumo(folder: Path, passivated: bool) -> None:
     data = folder / "publication_dos_data"
     data.mkdir()
     energy = np.linspace(-2.0, 3.0, 101)
-    total = np.exp(-((energy + 1.0) / 0.35) ** 2) + np.exp(-((energy - 1.0) / 0.35) ** 2)
+    # SUMO raw data files are VBM-referenced for a semiconductor.
+    total = np.exp(-((energy + 0.6) / 0.25) ** 2) + np.exp(-((energy - 2.5) / 0.25) ** 2)
 
     def write(stem: str, density: np.ndarray) -> None:
         np.savetxt(data / f"{stem}_dos.dat", np.column_stack((energy, density)))
 
     write("total", total)
-    write("Pb", 0.6 * np.exp(-((energy - 1.0) / 0.35) ** 2))
-    write("I", 0.7 * np.exp(-((energy + 1.0) / 0.35) ** 2))
+    write("Pb", 0.6 * np.exp(-((energy - 2.5) / 0.25) ** 2))
+    write("I", 0.7 * np.exp(-((energy + 0.6) / 0.25) ** 2))
     if passivated:
         for symbol, scale in (("C", 0.08), ("N", 0.04), ("H", 0.02), ("O", 0.12), ("Br", 0.06)):
-            write(symbol, scale * np.exp(-((energy - 0.4) / 0.5) ** 2))
+            write(symbol, scale * np.exp(-((energy - 2.3) / 0.25) ** 2))
 
 
 def _write_case(folder: Path, poscar: str, vacuum: float, vbm: float, cbm: float) -> None:
@@ -156,6 +160,31 @@ class SlabPublicationTests(unittest.TestCase):
             energy, density = read_sumo_curve(path)
         self.assertTrue(np.allclose(energy, [0, 1]))
         self.assertTrue(np.allclose(density, [3, 7]))
+
+    def test_sumo_atom_selection_expands_framework_indices(self) -> None:
+        structure = parse_poscar_lines(PASSIVATED_POSCAR.splitlines())
+        elements, atoms = _sumo_atom_selection(
+            structure,
+            ["Pb", "I"],
+            ["C", "N", "O", "Br", "H"],
+            {"C": [2], "N": [2], "O": [1, 2], "Br": [1], "H": [2]},
+        )
+        self.assertEqual(elements, "Pb,I,C,N,O,Br,H")
+        self.assertEqual(atoms, "Pb.1,I.1,C.2,N.2,O.1.2,Br.1,H.2")
+
+    def test_sumo_vbm_referenced_energy_is_vacuum_aligned(self) -> None:
+        case = SimpleNamespace(
+            name="semiconductor", vbm_vac_eV=-5.0, cbm_vac_eV=-3.0
+        )
+        aligned = _sumo_energy_to_vacuum(case, np.array([-1.0, 0.0, 2.0]))
+        self.assertTrue(np.allclose(aligned, [-6.0, -5.0, -3.0]))
+
+    def test_dos_alignment_guard_rejects_weight_inside_gap(self) -> None:
+        case = SimpleNamespace(name="bad", vbm_vac_eV=-5.0, cbm_vac_eV=-3.0)
+        energy = np.linspace(-6.0, -2.0, 401)
+        density = np.exp(-((energy + 4.0) / 0.2) ** 2)
+        with self.assertRaisesRegex(SafetyError, "inside the eigenvalue gap"):
+            _validate_dos_edge_alignment(case, energy, density)
 
     def test_sumo_curve_without_projection_raises_actionable_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
