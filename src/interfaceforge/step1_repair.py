@@ -21,7 +21,14 @@ from typing import Any
 
 from .aimd import _first_float, _first_int
 from .errors import SafetyError
-from .vasp import archive_run, parse_incar, require_files, update_incar
+from .vasp import (
+    CONSERVATIVE_ELECTRONIC_OVERRIDES,
+    _poscar_elements,
+    archive_run,
+    parse_incar,
+    require_files,
+    update_incar,
+)
 
 _MD_STEP = re.compile(r"^\s*(\d+)\s+.*?\bT=\s*([^\s]+)")
 _FREE_ENERGY = re.compile(r"\bF=\s*([-+0-9.Ee]+)")
@@ -235,8 +242,18 @@ def prepare_step1_repair(
     safety_steps: int = 8,
     energy_jump_ev: float = 50.0,
     max_temperature_k: float | None = None,
+    langevin_gamma: float | None = None,
+    ramp_from: float | None = None,
 ) -> dict[str, Any]:
-    """Plan or prepare bounded recovery segments for unstable, inactive runs."""
+    """Plan or prepare bounded recovery segments for unstable, inactive runs.
+
+    The recovery segment always tightens the electronic loop
+    (``EDIFF=1E-5``, ``NELM=120``, ``NELMIN=6``) on top of ``ALGO=algo`` and
+    ``POTIM=potim_fs`` -- the crashes are driven by forces read off a
+    sloshing SCF, not the timestep alone. ``langevin_gamma`` swaps
+    ``SMASS=-1`` for a Langevin thermostat (``MDALGO=3``); ``ramp_from`` sets
+    a lower initial ``TEBEG`` so the rewound geometry re-thermalises gently.
+    """
 
     root_path = Path(root).expanduser().resolve()
     if not root_path.is_dir():
@@ -245,6 +262,10 @@ def prepare_step1_repair(
         raise SafetyError("repair POTIM must be positive and finite")
     if safety_steps < 0:
         raise SafetyError("safety_steps cannot be negative")
+    if langevin_gamma is not None and langevin_gamma <= 0:
+        raise SafetyError("--langevin-gamma must be positive")
+    if ramp_from is not None and ramp_from <= 0:
+        raise SafetyError("--ramp-from must be a positive temperature in K")
 
     plans: list[dict[str, Any]] = []
     for run in _discover_runs(root_path):
@@ -293,6 +314,9 @@ def prepare_step1_repair(
             "original_potim_fs": _first_float(incar.get("POTIM"), 1.0),
             "repair_potim_fs": float(potim_fs),
             "repair_algo": algo,
+            "repair_electronic": dict(CONSERVATIVE_ELECTRONIC_OVERRIDES),
+            "repair_langevin_gamma": langevin_gamma,
+            "repair_ramp_from_k": ramp_from,
             "archive": None,
         }
         plans.append(plan)
@@ -336,16 +360,24 @@ def prepare_step1_repair(
             "MD_TempPlot.png",
         ):
             (run / name).unlink(missing_ok=True)
-        update_incar(
-            run / "INCAR",
-            {
-                "ISTART": 0,
-                "ALGO": algo,
-                "POTIM": f"{potim_fs:g}",
-                "NSW": plan["repair_nsw"],
-            },
-            delete={"ICHARG"},
-        )
+        incar_changes: dict[str, Any] = {
+            "ISTART": 0,
+            "ALGO": algo,
+            "POTIM": f"{potim_fs:g}",
+            "NSW": plan["repair_nsw"],
+            **CONSERVATIVE_ELECTRONIC_OVERRIDES,
+        }
+        incar_delete = {"ICHARG"}
+        if ramp_from is not None:
+            incar_changes["TEBEG"] = f"{ramp_from:g}"
+        if langevin_gamma is not None:
+            n_species = len(_poscar_elements(run / "POSCAR"))
+            incar_changes["MDALGO"] = 3
+            incar_changes["LANGEVIN_GAMMA"] = " ".join(
+                f"{langevin_gamma:g}" for _ in range(n_species)
+            )
+            incar_delete.add("SMASS")
+        update_incar(run / "INCAR", incar_changes, delete=incar_delete)
         repair_record = {
             "format": "interfaceforge-step1-repair",
             "schema_version": 1,
@@ -369,6 +401,9 @@ def prepare_step1_repair(
             "stale_hours": stale_hours,
             "potim_fs": potim_fs,
             "algo": algo,
+            "electronic_overrides": dict(CONSERVATIVE_ELECTRONIC_OVERRIDES),
+            "langevin_gamma": langevin_gamma,
+            "ramp_from_k": ramp_from,
             "safety_steps": safety_steps,
             "energy_jump_ev": energy_jump_ev,
             "max_temperature_k": max_temperature_k,

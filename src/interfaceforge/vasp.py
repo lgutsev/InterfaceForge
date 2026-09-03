@@ -442,6 +442,7 @@ def prepare_step2_series(
     dry_run: bool = False,
     audit_only: bool = False,
     reprotocol: bool = False,
+    keep_velocities: bool = False,
 ) -> dict[str, Any]:
     """Promote a recursive Step1 tree into fixed-temperature Step2 DFT-MD runs.
 
@@ -456,6 +457,12 @@ def prepare_step2_series(
     workflows that build ``POTCAR`` at launch. The launcher (``runvasp.sh`` /
     ``run.slurm``) is also accepted from the current working directory, even
     when it sits above ``source``.
+
+    The promoted ``POSCAR`` has any trailing Step1 velocity block stripped so
+    Step2 draws fresh Maxwell-Boltzmann velocities at its own ``TEBEG`` -- this
+    matters when a Step2 temperature differs from the Step1 preheat, and when
+    Step1 used ``SMASS=-1`` (its end velocities are a post-rescale snapshot).
+    Pass ``keep_velocities=True`` to copy the CONTCAR byte-for-byte instead.
     """
 
     from .aimd import resolve_protocol
@@ -594,7 +601,12 @@ def prepare_step2_series(
                 if not reprotocol:
                     if destination not in output_roots:
                         destination.mkdir(parents=True, exist_ok=False)
-                    shutil.copy2(plan["structure"], destination / "POSCAR")
+                    if keep_velocities:
+                        shutil.copy2(plan["structure"], destination / "POSCAR")
+                    else:
+                        _write_poscar_without_velocities(
+                            plan["structure"], destination / "POSCAR"
+                        )
                     for name, source_path in plan["inputs"].items():
                         target = destination / name
                         shutil.copy2(source_path, target)
@@ -707,6 +719,7 @@ def prepare_step2_series(
         "prepared_runs": len(plans),
         "warnings": warnings,
         "source_structure": source_structure,
+        "keep_velocities": bool(keep_velocities),
         "hubbard_rule": "preserve exact active LDAU* and LMAXMIX assignments per source run",
         "protocol": protocol,
         "sampling": _step2_sampling_block(protocol),
@@ -1728,7 +1741,7 @@ def _audit_step2_plans(
             notes.extend(_overconverged_notes(parsed))
         if not poscar_path.is_file():
             issues.append("missing POSCAR")
-        elif _sha256_file(poscar_path) != _sha256_file(plan["structure"]):
+        elif _poscar_geometry_sha256(poscar_path) != _poscar_geometry_sha256(plan["structure"]):
             issues.append(f"POSCAR does not match Step1 {source_structure}")
         vacuum_a = _step2_slab_vacuum(plan["structure"])
         if vacuum_a is not None and vacuum_a["vacuum_a"] < STEP2_MIN_VACUUM_A:
@@ -1942,6 +1955,88 @@ def _verified_hardlink(source: Path, target: Path) -> str:
     return "hardlink"
 
 
+def _poscar_layout_indices(lines: list[str], label: str | Path) -> tuple[int, int, int]:
+    """Return ``(count_index, ion_count, mode_index)`` for a POSCAR/CONTCAR.
+
+    ``mode_index`` points at the ``Direct`` / ``Cartesian`` line; the coordinate
+    block is the ``ion_count`` lines that follow it.
+    """
+
+    if len(lines) < 8:
+        raise SafetyError(f"POSCAR is too short: {label}")
+    count_index = 5 if all(re.fullmatch(r"\d+", t) for t in lines[5].split()) else 6
+    counts = lines[count_index].split()
+    if not counts or not all(re.fullmatch(r"\d+", t) for t in counts):
+        raise SafetyError(f"POSCAR has no valid ion-count line: {label}")
+    ion_count = sum(int(t) for t in counts)
+    mode_index = count_index + 1
+    if mode_index < len(lines) and lines[mode_index].strip()[:1].lower() == "s":
+        mode_index += 1  # Selective dynamics
+    if mode_index >= len(lines) or lines[mode_index].strip()[:1].lower() not in {"d", "c", "k"}:
+        raise SafetyError(f"POSCAR has no Direct/Cartesian coordinate mode: {label}")
+    return count_index, ion_count, mode_index
+
+
+def _poscar_geometry_sha256(path: str | Path) -> str:
+    """SHA-256 of a POSCAR/CONTCAR header + coordinate block only.
+
+    Any trailing molecular-dynamics velocity / predictor-corrector block and
+    trailing blank lines are ignored, so a stripped POSCAR still compares equal
+    to the CONTCAR it was promoted from.
+    """
+
+    lines = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
+    _, ion_count, mode_index = _poscar_layout_indices(lines, path)
+    end = mode_index + 1 + ion_count
+    if end > len(lines):
+        raise SafetyError(f"POSCAR has fewer coordinate rows than ions: {path}")
+    body = "\n".join(lines[:end]).rstrip() + "\n"
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _write_poscar_without_velocities(source: str | Path, destination: str | Path) -> bool:
+    """Copy ``source`` to ``destination`` without a trailing MD velocity block.
+
+    Returns ``True`` when a nonempty trailing block was dropped. The header and
+    coordinate block are written verbatim (Selective-dynamics flags included).
+    """
+
+    lines = Path(source).read_text(encoding="utf-8", errors="ignore").splitlines()
+    _, ion_count, mode_index = _poscar_layout_indices(lines, source)
+    end = mode_index + 1 + ion_count
+    if end > len(lines):
+        raise SafetyError(f"POSCAR has fewer coordinate rows than ions: {source}")
+    dropped = any(line.strip() for line in lines[end:])
+    Path(destination).write_text("\n".join(lines[:end]) + "\n", encoding="utf-8")
+    return dropped
+
+
+CONSERVATIVE_ELECTRONIC_OVERRIDES = {"EDIFF": "1E-5", "NELM": "120", "NELMIN": "6"}
+
+
+def _step1_conservative_overrides(
+    conservative: bool,
+    *,
+    algo: str = "Normal",
+    potim_fs: float = 0.5,
+    langevin_gamma: float | None = None,
+    ramp_from: float | None = None,
+) -> dict[str, str]:
+    """The exact INCAR tags conservative mode forces, for the manifest."""
+
+    if not conservative:
+        return {}
+    overrides = {"POTIM": f"{float(potim_fs):g}", "ALGO": str(algo)}
+    overrides.update(CONSERVATIVE_ELECTRONIC_OVERRIDES)
+    if ramp_from is not None:
+        overrides["TEBEG"] = f"{float(ramp_from):g}"
+    if langevin_gamma is not None:
+        overrides["MDALGO"] = "3"
+        overrides["LANGEVIN_GAMMA"] = f"{float(langevin_gamma):g} (per species)"
+        overrides["SMASS"] = "(removed)"
+    return overrides
+
+
 def _render_step1_incar(
     opt_incar_text: str,
     template_text: str,
@@ -1950,6 +2045,11 @@ def _render_step1_incar(
     nsw: int,
     istart: int = 1,
     conservative: bool = False,
+    algo: str = "Normal",
+    potim_fs: float = 0.5,
+    langevin_gamma: float | None = None,
+    ramp_from: float | None = None,
+    n_species: int = 0,
 ) -> dict[str, Any]:
     """Render a Step1 preheat INCAR from an OPT run.
 
@@ -1959,9 +2059,17 @@ def _render_step1_incar(
     set are copied byte-for-byte from the OPT INCAR; the requested
     temperature overrides ``SYSTEM`` / ``TEBEG`` / ``TEEND`` and ``NSW`` is
     set from the protocol. ``ISTART`` is ``1`` when the OPT WAVECAR is
-    inherited and ``0`` for a fresh electronic start.  Conservative mode
-    keeps the protocol's ionic-step budget but reduces ``POTIM`` to 0.5 fs
-    and replaces ``ALGO=Fast`` with the more robust ``ALGO=Normal``.
+    inherited and ``0`` for a fresh electronic start.
+
+    Conservative mode keeps the protocol's ionic-step budget but hardens the
+    run for proton-rich/reactive surfaces: ``POTIM`` drops to ``potim_fs``
+    (0.5 fs), ``ALGO=Fast`` becomes ``algo`` (``Normal`` by default;
+    ``All``/``Conjugate`` recommended by VASP for magnetic + DFT+U), and the
+    electronic loop is tightened (``EDIFF=1E-5``, ``NELM=120``, ``NELMIN=6``)
+    so forces are not read off a sloshing SCF. ``ramp_from`` starts ``TEBEG``
+    below the target and lets it ramp to ``TEEND``; ``langevin_gamma`` swaps
+    the ``SMASS=-1`` velocity rescale for a Langevin thermostat
+    (``MDALGO=3``) whose friction also damps an incipient runaway.
     """
 
     inherited_lines, inherited_values = _collect_verbatim_source_tags(
@@ -1976,8 +2084,22 @@ def _render_step1_incar(
         "NSW": str(int(nsw)),
         "ISTART": str(int(istart)),
     }
+    drop: set[str] = set()
     if conservative:
-        replacements.update({"POTIM": "0.5", "ALGO": "Normal"})
+        replacements.update({"POTIM": f"{float(potim_fs):g}", "ALGO": str(algo)})
+        replacements.update(CONSERVATIVE_ELECTRONIC_OVERRIDES)
+        if ramp_from is not None:
+            replacements["TEBEG"] = f"{float(ramp_from):g}"
+        if langevin_gamma is not None:
+            if n_species <= 0:
+                raise SafetyError(
+                    "Langevin preheat needs the POSCAR species count (n_species)"
+                )
+            replacements["MDALGO"] = "3"
+            replacements["LANGEVIN_GAMMA"] = " ".join(
+                f"{float(langevin_gamma):g}" for _ in range(n_species)
+            )
+            drop.add("SMASS")
 
     found: set[str] = set()
     output: list[str] = []
@@ -1991,6 +2113,8 @@ def _render_step1_incar(
         if tag in seen:
             raise SafetyError(f"Step1 template has a duplicate active tag {tag}")
         seen.add(tag)
+        if tag in drop:
+            continue  # replaced by a different mechanism (e.g. Langevin vs SMASS)
         if tag in replacements:
             prefix = line[: len(line) - len(line.lstrip())]
             output.append(f"{prefix}{tag} = {replacements[tag]}")
@@ -2033,6 +2157,10 @@ def prepare_step1_series(
     fresh_start: bool = False,
     require_wavecar: bool = False,
     conservative: bool = False,
+    algo: str = "Normal",
+    langevin_gamma: float | None = None,
+    ramp_from: float | None = None,
+    keep_velocities: bool = False,
 ) -> dict[str, Any]:
     """Promote a recursive OPT tree into a sibling ``Step1`` preheat tree.
 
@@ -2050,8 +2178,14 @@ def prepare_step1_series(
 
     ``conservative=True`` is intended for proton-rich/reactive surfaces.  It
     keeps the selected protocol's ``NSW`` budget unchanged, uses a 0.5 fs
-    ionic timestep, and switches the electronic solver to ``ALGO=Normal``.
-    Magnetic and DFT+U tags remain inherited verbatim from OPT.
+    ionic timestep, switches the electronic solver to ``algo`` (``Normal`` by
+    default), and tightens the SCF (``EDIFF=1E-5``, ``NELM=120``,
+    ``NELMIN=6``).  ``ramp_from`` sets an initial ``TEBEG`` below the target;
+    ``langevin_gamma`` replaces the ``SMASS=-1`` rescale with a Langevin
+    thermostat (``MDALGO=3``).  Magnetic and DFT+U tags remain inherited
+    verbatim from OPT.  The promoted structure has its trailing MD velocity
+    block stripped so VASP draws fresh Maxwell-Boltzmann velocities at
+    ``TEBEG``; pass ``keep_velocities=True`` to copy the CONTCAR verbatim.
 
     A launcher (``runvasp.sh`` / ``run.slurm``) is also accepted from the
     current working directory — the folder the command is run from — even
@@ -2061,6 +2195,15 @@ def prepare_step1_series(
 
     if fresh_start and require_wavecar:
         raise SafetyError("--fresh-start and --require-wavecar cannot be combined")
+    _tuned = algo != "Normal" or langevin_gamma is not None or ramp_from is not None
+    if _tuned and not conservative:
+        raise SafetyError(
+            "--algo / --langevin / --ramp-from only apply with --conservative"
+        )
+    if langevin_gamma is not None and langevin_gamma <= 0:
+        raise SafetyError("--langevin-gamma must be positive")
+    if ramp_from is not None and ramp_from <= 0:
+        raise SafetyError("--ramp-from must be a positive temperature in K")
 
     from .aimd import resolve_protocol
 
@@ -2165,6 +2308,10 @@ def prepare_step1_series(
             nsw=nsw,
             istart=istart,
             conservative=conservative,
+            algo=algo,
+            langevin_gamma=langevin_gamma,
+            ramp_from=ramp_from,
+            n_species=len(elements),
         )
         for tag in ("LDAUL", "LDAUU", "LDAUJ"):
             value = rendered["inherited_tags"].get(tag)
@@ -2201,7 +2348,12 @@ def prepare_step1_series(
             for plan in plans:
                 destination: Path = plan["destination"]
                 destination.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(plan["structure"], destination / "POSCAR")
+                if keep_velocities:
+                    shutil.copy2(plan["structure"], destination / "POSCAR")
+                else:
+                    _write_poscar_without_velocities(
+                        plan["structure"], destination / "POSCAR"
+                    )
                 if plan["wavecar"] is not None:
                     link_modes[plan["relative"].as_posix() or "."] = _verified_hardlink(
                         plan["wavecar"], destination / "WAVECAR"
@@ -2224,9 +2376,13 @@ def prepare_step1_series(
                 "fresh_start": bool(fresh_start),
                 "require_wavecar": bool(require_wavecar),
                 "conservative": bool(conservative),
-                "conservative_overrides": (
-                    {"POTIM": "0.5", "ALGO": "Normal"} if conservative else {}
+                "conservative_overrides": _step1_conservative_overrides(
+                    conservative,
+                    algo=algo,
+                    langevin_gamma=langevin_gamma,
+                    ramp_from=ramp_from,
                 ),
+                "keep_velocities": bool(keep_velocities),
                 "warnings": warnings,
                 "precedence": {
                     "ordinary_incar_tags": "Step1 template",
@@ -2281,7 +2437,10 @@ def prepare_step1_series(
         "nsw": nsw,
         "conservative": bool(conservative),
         "potim_fs": 0.5 if conservative else float(template_tags.get("POTIM", 1.0)),
-        "algo": "Normal" if conservative else template_tags.get("ALGO"),
+        "algo": str(algo) if conservative else template_tags.get("ALGO"),
+        "langevin_gamma": langevin_gamma if conservative else None,
+        "ramp_from_k": ramp_from if conservative else None,
+        "keep_velocities": bool(keep_velocities),
         "prepared_runs": len(plans),
         "fresh_start_runs": sum(1 for plan in plans if plan["istart"] == 0),
         "wavecar_link_mode": link_modes,
@@ -2311,13 +2470,19 @@ def _audit_step1_plans(
         for tag, value in plan["inherited_tags"].items():
             if parsed.get(tag) != value:
                 issues.append(f"{tag} not inherited from OPT")
-        if parsed.get("IBRION") != "0" or parsed.get("SMASS") != "-1":
-            issues.append("Step1 INCAR is not a velocity-rescaled preheat (IBRION=0, SMASS=-1)")
+        _thermostat_ok = parsed.get("SMASS") == "-1" or parsed.get("MDALGO") == "3"
+        if parsed.get("IBRION") != "0" or not _thermostat_ok:
+            issues.append(
+                "Step1 INCAR is not a thermostatted preheat "
+                "(IBRION=0 with SMASS=-1 or MDALGO=3)"
+            )
         expected_istart = str(plan.get("istart", 1))
         if parsed.get("ISTART") != expected_istart:
             issues.append(f"ISTART is not {expected_istart}")
         poscar = destination / "POSCAR"
-        if not poscar.is_file() or _sha256_file(poscar) != _sha256_file(plan["structure"]):
+        if not poscar.is_file() or _poscar_geometry_sha256(poscar) != _poscar_geometry_sha256(
+            plan["structure"]
+        ):
             issues.append(f"POSCAR does not match OPT {source_structure}")
         wavecar = destination / "WAVECAR"
         if plan.get("wavecar") is not None:

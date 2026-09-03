@@ -169,6 +169,55 @@ class Step1PrepareTests(unittest.TestCase):
             self.assertEqual(incar["ALGO"], "Normal")
             self.assertEqual(incar["MAGMOM"], "2*2.0 3*-2.0")
             self.assertEqual(incar["ISTART"], "0")
+            # electronic loop is tightened so forces are not read off a sloshing SCF
+            self.assertEqual(incar["EDIFF"], "1E-5")
+            self.assertEqual(incar["NELM"], "120")
+            self.assertEqual(incar["NELMIN"], "6")
+
+    def test_conservative_langevin_and_ramp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            opt = _opt_tree(root, wavecar=False)
+            result = prepare_step1_series(
+                opt,
+                protocol="training",
+                fresh_start=True,
+                conservative=True,
+                algo="All",
+                langevin_gamma=12.0,
+                ramp_from=150.0,
+            )
+            incar = parse_incar(root / "Step1" / "NiO_m110_Big_U46" / "INCAR")
+            self.assertEqual(incar["ALGO"], "All")
+            self.assertEqual(incar["MDALGO"], "3")
+            # one friction value per POSCAR species (Ni O -> 2)
+            self.assertEqual(incar["LANGEVIN_GAMMA"], "12 12")
+            self.assertNotIn("SMASS", incar)
+            self.assertEqual(incar["TEBEG"], "150")
+            self.assertEqual(incar["TEEND"], "300")
+            self.assertEqual(result["langevin_gamma"], 12.0)
+            self.assertEqual(result["ramp_from_k"], 150.0)
+
+    def test_tuning_flags_require_conservative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            opt = _opt_tree(Path(tmp))
+            with self.assertRaises(SafetyError):
+                prepare_step1_series(opt, protocol="training", langevin_gamma=10.0)
+
+    def test_promoted_poscar_drops_velocity_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            opt = _opt_tree(root)
+            run = opt / "NiO_m110_Big_U46"
+            base = (run / "CONTCAR").read_text(encoding="utf-8")
+            (run / "CONTCAR").write_text(
+                base + "\n" + "\n".join("0.001 0.0 0.0" for _ in range(5)) + "\n",
+                encoding="utf-8",
+            )
+            prepare_step1_series(opt, protocol="training", fresh_start=True)
+            poscar = (root / "Step1" / "NiO_m110_Big_U46" / "POSCAR").read_text(encoding="utf-8")
+            self.assertNotIn("0.001 0.0 0.0", poscar)
+            self.assertEqual(poscar.strip().splitlines()[-1].split()[:3], ["0.1", "0.1", "0.3800"])
 
     def test_cli_conservative_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

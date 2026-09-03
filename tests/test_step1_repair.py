@@ -114,6 +114,10 @@ class Step1RepairTests(unittest.TestCase):
             poscar = (run / "POSCAR").read_text(encoding="utf-8")
             self.assertIn("0.13000000  0.10  0.50  T  T  T", poscar)
             self.assertIn("0.20  0.20  0.50  F  F  F", poscar)
+            # the recovery segment always tightens the electronic loop
+            self.assertEqual(incar["EDIFF"], "1E-5")
+            self.assertEqual(incar["NELM"], "120")
+            self.assertEqual(incar["NELMIN"], "6")
             record = json.loads((run / "step1_repair.json").read_text(encoding="utf-8"))
             self.assertEqual(record["safe_prefix_steps"], 12)
             status = step1_status(run)["runs"][0]
@@ -122,6 +126,18 @@ class Step1RepairTests(unittest.TestCase):
             self.assertEqual(status["frames_oszicar_segment"], 0)
             self.assertEqual(status["nsw_target"], 400)
             self.assertEqual(status["nsw_segment_target"], 388)
+
+    def test_execute_langevin_and_ramp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _run(Path(tmp))
+            prepare_step1_repair(
+                run, execute=True, langevin_gamma=15.0, ramp_from=120.0
+            )
+            incar = parse_incar(run / "INCAR")
+            self.assertEqual(incar["MDALGO"], "3")
+            self.assertEqual(incar["LANGEVIN_GAMMA"], "15 15")  # H O -> 2 species
+            self.assertNotIn("SMASS", incar)
+            self.assertEqual(incar["TEBEG"], "120")
 
     def test_cli_is_dry_run_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

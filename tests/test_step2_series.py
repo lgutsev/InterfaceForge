@@ -107,6 +107,35 @@ class Step2SeriesTests(unittest.TestCase):
             self.assertTrue((run / "KPOINTS").is_file())
             self.assertFalse((run / "POTCAR").exists())
 
+    def test_promoted_poscar_strips_step1_velocities_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            step1 = self._fixture(root)
+            run = step1 / "Real/N_Term/x0.25"
+            elements = ["C", "H", "N", "Ni", "O", "P"]
+            (run / "CONTCAR").write_text(
+                _poscar(elements)
+                + "\n"
+                + "\n".join("-0.001 0.002 0.000" for _ in elements)
+                + "\n",
+                encoding="utf-8",
+            )
+
+            prepare_step2_series(step1, temperatures=[300])
+            stripped = (root / "Step2_300K" / "Real/N_Term/x0.25" / "POSCAR").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("-0.001 0.002 0.000", stripped)
+            self.assertEqual(stripped.strip().splitlines()[-1], "0 0 0")
+
+            prepare_step2_series(
+                step1, temperatures=[450], keep_velocities=True
+            )
+            kept = (root / "Step2_450K" / "Real/N_Term/x0.25" / "POSCAR").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("-0.001 0.002 0.000", kept)
+
     def test_launcher_is_found_in_the_invocation_directory(self) -> None:
         import os
 

@@ -159,13 +159,15 @@ iface vasp opt-launch OPT --execute
 # Promote completed optimizations into short MLIP-training trajectories.
 iface vasp step1-prepare OPT --protocol training --dry-run
 iface vasp step1-prepare OPT --protocol training
-# Proton-rich surfaces: same 400-step budget, 0.5 fs, robust SCF solver.
-iface vasp step1-prepare OPT_OH50 --protocol training --fresh-start --conservative
+# Proton-rich surfaces (OH50): same 400-step budget, 0.5 fs, tighter SCF,
+# Langevin friction, and a gentle warm-up ramp.
+iface vasp step1-prepare OPT_OH50 --protocol training --fresh-start --conservative \
+    --langevin --ramp-from 200
 iface vasp step1-status Step1
 # Dry-run first: identify numerical runaways and the clean rewind frame.
 iface vasp step1-repair Step1
-# Archive failed state, rewind, and prepare the remaining steps at 0.5 fs.
-iface vasp step1-repair Step1 --execute
+# Archive failed state, rewind, tighten the SCF, and prepare the remaining steps.
+iface vasp step1-repair Step1 --execute --langevin
 iface vasp step2-prepare Step1 --temperatures 300 450 600 --protocol training
 iface vasp step2-launch Step2_300K Step2_450K Step2_600K
 iface vasp step2-launch Step2_300K Step2_450K Step2_600K --execute
@@ -180,15 +182,30 @@ the launcher and is therefore optional at this stage. See the
 
 Use `--conservative` for proton-rich or reactive starting structures. It
 preserves the selected protocol's `NSW` budget and AFM initialization while
-setting `POTIM=0.5` and `ALGO=Normal`. It therefore improves robustness without
-silently doubling the number of ionic steps; the sampled physical duration is
-correspondingly half that of a 1 fs run with the same `NSW`.
+hardening the run against the failure mode seen on dissociated-hydroxyl
+surfaces — forces read off a sloshing SCF, not just an over-large timestep:
+
+- `POTIM=0.5` fs and `ALGO=Normal` (override with `--algo All`/`Conjugate`,
+  which VASP recommends for magnetic + DFT+U);
+- a tighter electronic loop: `EDIFF=1E-5`, `NELM=120`, `NELMIN=6`;
+- `--langevin` swaps `SMASS=-1` velocity rescaling for a Langevin thermostat
+  (`MDALGO=3`, `LANGEVIN_GAMMA` per species, default 10 ps⁻¹) whose friction
+  also damps an incipient runaway;
+- `--ramp-from T0` starts `TEBEG` at `T0` and ramps to the target, softening
+  the cold start.
+
+The sampled physical duration is half that of a 1 fs run with the same `NSW`.
+The promoted `POSCAR` has its trailing MD velocity block stripped (pass
+`--keep-velocities` to keep it) so VASP draws fresh Maxwell-Boltzmann
+velocities at `TEBEG`; `step2-prepare` does the same on the Step1 → Step2
+hand-off, which matters when a Step2 temperature differs from the preheat.
 
 `step1-status` also diagnoses energy/temperature runaways and repeated hits at
 the electronic `NELM` ceiling. `step1-repair` never trusts a crash-time
 `CONTCAR` or `WAVECAR`: it selects an earlier saved XDATCAR frame, keeps an
-eight-step safety margin, starts the electrons cleanly with `ALGO=Normal`, and
-uses `POTIM=0.5` for only the remaining step budget. The failed state is
+eight-step safety margin, and prepares only the remaining step budget with
+`ISTART=0`, `ALGO=Normal` (or `--algo`), `POTIM=0.5` (or `--potim`), the same
+tightened SCF, and optional `--langevin` / `--ramp-from`. The failed state is
 archived, the accepted prefix is recorded in `step1_repair.json`, and runs
 updated within the last six hours are protected from mutation. Repair
 preparation never submits jobs.
@@ -334,10 +351,10 @@ iface vasp opt-prepare generated --manifest generated/manifest_batch.csv --exclu
 iface vasp opt-prepare generated --manifest generated/manifest_batch.csv --exclude-prefix OH0 --launcher-template runvasp.sh
 iface vasp opt-launch generated                 # full preflight; no submission
 iface vasp opt-launch generated --execute       # submit the unchanged PASS-audited batch
-iface vasp step1-prepare OPT --protocol training --fresh-start --conservative
+iface vasp step1-prepare OPT --protocol training --fresh-start --conservative --langevin --ramp-from 200
 iface vasp step1-status Step1
-iface vasp step1-repair Step1                # inspect only
-iface vasp step1-repair Step1 --execute      # archive + prepare; never submits
+iface vasp step1-repair Step1                       # inspect only
+iface vasp step1-repair Step1 --execute --langevin  # archive + prepare; never submits
 iface vasp step2-prepare Step1 --protocol training --temperatures 300 450 600
 iface vasp step2-launch Step2_300K Step2_450K Step2_600K --execute
 iface vasp ml-recover continue run/ --temperature 450 --nsw 3000

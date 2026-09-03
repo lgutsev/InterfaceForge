@@ -34,7 +34,9 @@ IBRION = 0
 NSW    = 2000
 POTIM  = 1.0
 
-# Rescale velocities to the target temperature every NBLOCK steps
+# Thermostat: SMASS=-1 rescales velocities to the target every NBLOCK steps.
+# `iface vasp step1-prepare --conservative --langevin` swaps this for a
+# Langevin thermostat (MDALGO=3) whose friction also damps a runaway.
 SMASS  = -1
 NBLOCK = 4
 TEBEG  = 300

@@ -489,6 +489,7 @@ def cmd_vasp_step2_series(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             audit_only=args.audit_only,
             reprotocol=args.set_protocol,
+            keep_velocities=args.keep_velocities,
         )
     )
     return 0
@@ -508,6 +509,10 @@ def cmd_vasp_step1_prepare(args: argparse.Namespace) -> int:
             fresh_start=args.fresh_start,
             require_wavecar=args.require_wavecar,
             conservative=args.conservative,
+            algo=args.algo,
+            langevin_gamma=args.langevin_gamma if args.langevin else None,
+            ramp_from=args.ramp_from,
+            keep_velocities=args.keep_velocities,
         )
     )
     return 0
@@ -533,6 +538,8 @@ def cmd_vasp_step1_repair(args: argparse.Namespace) -> int:
             safety_steps=args.safety_steps,
             energy_jump_ev=args.energy_jump,
             max_temperature_k=args.max_temperature,
+            langevin_gamma=args.langevin_gamma if args.langevin else None,
+            ramp_from=args.ramp_from,
         )
     )
     return 0
@@ -1948,6 +1955,15 @@ def build_parser() -> argparse.ArgumentParser:
             "thinned by decorrelation via 'iface vasp step2-sample'"
         ),
     )
+    step2.add_argument(
+        "--keep-velocities",
+        action="store_true",
+        help=(
+            "Copy the Step1 CONTCAR verbatim instead of stripping its trailing "
+            "velocity block (default: strip, so Step2 draws fresh Maxwell-"
+            "Boltzmann velocities at its own TEBEG)"
+        ),
+    )
     step2.add_argument("--dry-run", action="store_true", help="Validate and print the exact plan only")
     step2.add_argument(
         "--audit-only",
@@ -2000,8 +2016,50 @@ def build_parser() -> argparse.ArgumentParser:
         "--conservative",
         action="store_true",
         help=(
-            "Keep the protocol NSW budget but use POTIM=0.5 fs and ALGO=Normal; "
-            "recommended for proton-rich/reactive surfaces such as OH50"
+            "Keep the protocol NSW budget but harden the run for proton-rich/"
+            "reactive surfaces (OH50): POTIM=0.5 fs, ALGO=Normal, and a tighter "
+            "SCF (EDIFF=1E-5, NELM=120, NELMIN=6)"
+        ),
+    )
+    step1_prepare.add_argument(
+        "--algo",
+        default="Normal",
+        help=(
+            "Electronic minimiser for --conservative (default Normal). VASP "
+            "recommends All or Conjugate for magnetic + DFT+U; slower per step "
+            "but more robust for the worst dissociated-proton cases"
+        ),
+    )
+    step1_prepare.add_argument(
+        "--langevin",
+        action="store_true",
+        help=(
+            "With --conservative: replace SMASS=-1 velocity rescaling with a "
+            "Langevin thermostat (MDALGO=3) whose friction also damps an "
+            "incipient runaway"
+        ),
+    )
+    step1_prepare.add_argument(
+        "--langevin-gamma",
+        type=float,
+        default=10.0,
+        help="Langevin friction in ps^-1, applied to every species (default 10)",
+    )
+    step1_prepare.add_argument(
+        "--ramp-from",
+        type=float,
+        help=(
+            "With --conservative: start TEBEG at this temperature (K) and let it "
+            "ramp to the target, softening the cold start"
+        ),
+    )
+    step1_prepare.add_argument(
+        "--keep-velocities",
+        action="store_true",
+        help=(
+            "Copy the OPT CONTCAR verbatim instead of stripping its trailing "
+            "velocity block (default: strip, so VASP draws fresh Maxwell-"
+            "Boltzmann velocities at TEBEG)"
         ),
     )
     step1_prepare.add_argument("--dry-run", action="store_true")
@@ -2037,7 +2095,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--potim", type=float, default=0.5, help="Recovery ionic timestep in fs (default 0.5)"
     )
     step1_repair.add_argument(
-        "--algo", default="Normal", help="Recovery electronic minimizer (default Normal)"
+        "--algo",
+        default="Normal",
+        help=(
+            "Recovery electronic minimiser (default Normal). The segment always "
+            "also tightens EDIFF=1E-5, NELM=120, NELMIN=6"
+        ),
+    )
+    step1_repair.add_argument(
+        "--langevin",
+        action="store_true",
+        help="Replace SMASS=-1 with a Langevin thermostat (MDALGO=3) on the recovery segment",
+    )
+    step1_repair.add_argument(
+        "--langevin-gamma",
+        type=float,
+        default=10.0,
+        help="Langevin friction in ps^-1, applied to every species (default 10)",
+    )
+    step1_repair.add_argument(
+        "--ramp-from",
+        type=float,
+        help="Start the recovery segment's TEBEG at this temperature (K) and ramp to the original target",
     )
     step1_repair.add_argument(
         "--safety-steps",

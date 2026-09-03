@@ -190,7 +190,12 @@ def audit_step1_incar(incar_path: str | Path, protocol: str) -> dict[str, Any]:
     tebeg = _first_float(parsed.get("TEBEG"))
     teend = _first_float(parsed.get("TEEND"))
     if tebeg is not None and teend is not None and abs(tebeg - teend) > 1e-6:
-        notes.append(f"TEBEG={tebeg} != TEEND={teend}; a fixed-T preheat usually sets them equal")
+        # A monotonic warm-up ramp (TEBEG < TEEND) is a deliberate, supported way
+        # to soften a cold start; only flag a cooling ramp or an odd config.
+        if tebeg > teend:
+            notes.append(
+                f"TEBEG={tebeg} > TEEND={teend}; a preheat should not cool the system"
+            )
     if "SMASS" not in parsed and "MDALGO" not in parsed:
         notes.append("no SMASS or MDALGO: preheat has no thermostat / velocity control")
     if ps is not None and not (lo <= ps <= hi):
