@@ -10,8 +10,10 @@ from types import SimpleNamespace
 import numpy as np
 
 from interfaceforge.cli import build_parser
+from interfaceforge.errors import SafetyError
 from interfaceforge.slab_alignment import largest_periodic_gap, parse_poscar_lines
 from interfaceforge.slab_publication import (
+    _optional_sumo_curve,
     _selected_side_plot_window,
     match_excess_atoms,
     plot_slab_publication,
@@ -145,6 +147,21 @@ class SlabPublicationTests(unittest.TestCase):
         self.assertTrue(np.allclose(energy, [0, 1]))
         self.assertTrue(np.allclose(density, [3, 7]))
 
+    def test_sumo_curve_without_projection_raises_actionable_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "Pb_dos.dat"
+            path.write_text("# Energy(eV)\n-1.0\n0.0\n1.0\n", encoding="utf-8")  # energy column only
+            with self.assertRaisesRegex(SafetyError, "LORBIT"):
+                read_sumo_curve(path)
+
+    def test_optional_sumo_curve_returns_none_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary)
+            (data / "total_dos.dat").write_text("# E s\n0 1\n1 2\n", encoding="utf-8")
+            self.assertIsNone(_optional_sumo_curve(data, "Pb"))
+            (data / "I_dos.dat").write_text("# Energy\n0\n1\n", encoding="utf-8")
+            self.assertIsNone(_optional_sumo_curve(data, "I"))
+
     def test_publication_crop_keeps_only_selected_surface_side(self) -> None:
         high = SimpleNamespace(
             name="high",
@@ -213,6 +230,45 @@ class SlabPublicationTests(unittest.TestCase):
             self.assertEqual(ligand["C"], [2])
             self.assertEqual(manifest["vacuum_figure_scope"]["mode"], "selected-side-only")
             self.assertEqual(manifest["vacuum_figure_scope"]["side"], "high-z")
+            self.assertEqual(manifest["pdos_projections_missing"], {})
+
+    def test_end_to_end_tolerates_missing_element_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for label in ("MAI", "PbI2"):
+                _write_case(root / f"MAPI_{label}_Surf", REFERENCE_POSCAR, 5.4, -1.0, 1.0)
+                _write_case(root / f"MAPI_{label}_Surf_BPDCA", PASSIVATED_POSCAR, 5.2, -0.9, 1.1)
+                _write_sumo(root / f"MAPI_{label}_Surf", False)
+                _write_sumo(root / f"MAPI_{label}_Surf_BPDCA", True)
+            # simulate a DOS run without projected DOS for one reference: energy-only Pb file
+            bad = root / "MAPI_MAI_Surf" / "publication_dos_data" / "Pb_dos.dat"
+            bad.write_text("# Energy(eV)\n-2.0\n-1.0\n0.0\n1.0\n", encoding="utf-8")
+            config = root / "slab_publication.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "side": "high-z",
+                        "pairs": [
+                            {"label": "MAI-rich", "reference": "MAPI_MAI_Surf",
+                             "passivated": "MAPI_MAI_Surf_BPDCA"},
+                            {"label": "PbI2-rich", "reference": "MAPI_PbI2_Surf",
+                             "passivated": "MAPI_PbI2_Surf_BPDCA"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = plot_slab_publication(root, config=config)
+            self.assertIn("Total-only", payload["status"])
+            self.assertEqual(payload["pdos_projections_missing"], {"MAPI_MAI_Surf": ["Pb"]})
+            destination = root / "publication_figures"
+            self.assertTrue((destination / "electronic_alignment.pdf").is_file())
+            manifest = json.loads((destination / "publication_manifest.json").read_text())
+            self.assertEqual(manifest["pdos_projections_missing"], {"MAPI_MAI_Surf": ["Pb"]})
+            with (destination / "publication_band_edges.tsv").open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+            self.assertEqual(rows[0]["reference_pdos_missing"], "Pb")
+            self.assertEqual(rows[1]["reference_pdos_missing"], "")
 
 
 if __name__ == "__main__":

@@ -316,7 +316,8 @@ def _run_sumo(
         "--gaussian",
         str(gaussian_eV),
     ]
-    with (case.path / "publication_sumo_dosplot.log").open("w", encoding="utf-8") as log:
+    log_path = case.path / "publication_sumo_dosplot.log"
+    with log_path.open("w", encoding="utf-8") as log:
         result = subprocess.run(
             command,
             cwd=case.path,
@@ -324,27 +325,62 @@ def _run_sumo(
             stderr=subprocess.STDOUT,
             check=False,
         )
+    log_tail = "\n".join(log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-20:])
     if result.returncode:
         raise SafetyError(
             f"sumo-dosplot failed for {case.name} with exit code {result.returncode}; "
-            "see publication_sumo_dosplot.log"
+            f"see {log_path.name}\n--- log tail ---\n{log_tail}"
+        )
+    # Some sumo versions write the *_dos.dat / dos.pdf next to the vasprun.xml
+    # (cwd) instead of into --directory; consolidate them into data_dir.
+    for produced in list(case.path.glob("*_dos.dat")) + list(case.path.glob("dos.*")):
+        target = data_dir / produced.name
+        if not target.exists():
+            shutil.move(str(produced), str(target))
+    if not any(data_dir.glob("*_dos.dat")):
+        raise SafetyError(
+            f"sumo-dosplot produced no *_dos.dat files for {case.name} in {data_dir.name}; "
+            f"see {log_path.name}\n--- log tail ---\n{log_tail}"
         )
     return data_dir
 
 
 def read_sumo_curve(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
-    """Read a SUMO *_dos.dat file and combine all projected DOS columns."""
+    """Read a SUMO *_dos.dat file and combine all projected DOS columns.
+
+    Raises ``SafetyError`` if the file is missing or has no DOS column -- which
+    for an *element* file (e.g. ``Pb_dos.dat``) usually means the DOS run has no
+    projected DOS (``LORBIT >= 10`` and a ``<partial>`` block in vasprun.xml).
+    """
 
     input_path = Path(path)
     if not input_path.is_file():
         raise SafetyError(f"SUMO data file not found: {input_path}")
-    values = np.loadtxt(input_path, comments="#", ndmin=2)
-    if values.ndim != 2 or values.shape[1] < 2 or values.shape[0] < 2:
-        raise SafetyError(f"SUMO data file has insufficient data: {input_path}")
+    try:
+        values = np.loadtxt(input_path, comments="#", ndmin=2)
+    except ValueError as exc:
+        raise SafetyError(f"SUMO data file could not be parsed ({input_path}): {exc}") from exc
+    if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] < 2:
+        raise SafetyError(
+            f"SUMO data file has no DOS data ({input_path}; shape {values.shape}). "
+            "For an element file this means the calculation was run without "
+            "projected DOS -- rerun that DOS step with LORBIT = 10 or 11."
+        )
     order = np.argsort(values[:, 0])
     energy = values[order, 0]
     density = np.sum(np.abs(values[order, 1:]), axis=1)
     return energy, density
+
+
+def _optional_sumo_curve(data_dir: Path, stem: str) -> tuple[np.ndarray, np.ndarray] | None:
+    """``read_sumo_curve`` for a projection that may legitimately be absent
+    (element / ligand PDOS when the run lacks projected DOS).  Returns ``None``
+    instead of raising when the file is missing or has no DOS column."""
+
+    try:
+        return read_sumo_curve(_find_sumo_file(data_dir, stem))
+    except SafetyError:
+        return None
 
 
 def _find_sumo_file(data_dir: Path, stem: str) -> Path:
@@ -371,7 +407,15 @@ def _load_pdos(
     excess: dict[str, list[int]],
     *,
     run_sumo: bool,
-) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+) -> tuple[dict[str, tuple[np.ndarray, np.ndarray]], list[str]]:
+    """Return ``(curves, missing_projections)``.
+
+    ``Total`` is required (it is the alignment reference).  Element and ligand
+    projections are optional: if the DOS run lacks projected DOS their files
+    come out empty, and those labels are dropped from the figure and listed in
+    ``missing_projections`` for the manifest -- the launcher still completes.
+    """
+
     framework = [str(item) for item in config["framework_elements"]]
     passivant = [str(item) for item in config["passivant_elements"]]
     data_dir = case.path / "publication_dos_data"
@@ -387,25 +431,42 @@ def _load_pdos(
         raise SafetyError(
             f"{case.name}: {data_dir.name} is missing; rerun with --run-sumo on a compute node"
         )
+
     total_energy, total_density = read_sumo_curve(_find_sumo_file(data_dir, "total"))
     result = {"Total": (total_energy - case.vacuum_eV, total_density)}
+    missing: list[str] = []
+
     for symbol in framework:
-        energy, density = read_sumo_curve(_find_sumo_file(data_dir, symbol))
-        result[symbol] = (energy - case.vacuum_eV, density)
+        curve = _optional_sumo_curve(data_dir, symbol)
+        if curve is None:
+            missing.append(symbol)
+            continue
+        result[symbol] = (curve[0] - case.vacuum_eV, curve[1])
+
     ligand_density = np.zeros_like(total_density)
     found_ligand = False
     for symbol in passivant:
         if not excess.get(symbol):
             continue
-        energy, density = read_sumo_curve(_find_sumo_file(data_dir, symbol))
-        ligand_density += _interpolate_density(total_energy, energy, density)
+        curve = _optional_sumo_curve(data_dir, symbol)
+        if curve is None:
+            missing.append(f"{config['passivant_label']}:{symbol}")
+            continue
+        ligand_density += _interpolate_density(total_energy, curve[0], curve[1])
         found_ligand = True
     if found_ligand:
         result[str(config["passivant_label"])] = (
             total_energy - case.vacuum_eV,
             ligand_density,
         )
-    return result
+
+    if missing:
+        print(
+            f"  [slab-publish] {case.name}: no projected DOS for {', '.join(missing)} "
+            "-- plotting Total only for those (rerun that DOS step with LORBIT >= 10 "
+            "to get element / ligand PDOS)."
+        )
+    return result, missing
 
 
 def _matplotlib() -> Any:
@@ -530,15 +591,23 @@ def _plot_pdos_axis(
     window: tuple[float, float],
     title: str,
     scale: float,
+    missing: list[str] | None = None,
 ) -> None:
     colors = {"Total": "#111111", "Pb": "#0072B2", "I": "#CC79A7", "BPDCA": "#E69F00"}
     if scale <= 0:
         raise SafetyError(f"{case.name}: total DOS is zero in the requested plot range")
     for label in ("Total", "Pb", "I", "BPDCA"):
-        if label not in curves:
+        curve = curves.get(label)
+        if curve is None:
             continue
-        energy, density = curves[label]
-        axis.plot(energy, density / scale, color=colors[label], linewidth=1.15, label=label)
+        energy, density = curve
+        axis.plot(energy, density / scale, color=colors.get(label, "#888888"),
+                  linewidth=1.15, label=label)
+    if missing:
+        axis.text(
+            0.02, 0.97, "no projected DOS:\n" + ", ".join(missing),
+            transform=axis.transAxes, ha="left", va="top", fontsize=6.5, color="#B00020",
+        )
     axis.axvline(
         case.vbm_vac_eV,
         color="#009E73",
@@ -617,7 +686,9 @@ def _plot_electronic(
     config: dict[str, Any],
     output_dir: Path,
     dpi: int,
+    missing_projections: dict[str, list[str]] | None = None,
 ) -> dict[str, str]:
+    missing_projections = missing_projections or {}
     plt = _matplotlib()
     figure, axes = plt.subplots(len(pair_cases), 3, figsize=(10.5, 3.0 * len(pair_cases)), squeeze=False)
     window = tuple(float(value) for value in config["energy_window_eV"])
@@ -636,6 +707,7 @@ def _plot_electronic(
             window,
             f"{label}: pristine",
             pair_scale,
+            missing_projections.get(reference.name),
         )
         _plot_pdos_axis(
             axes[row, 1],
@@ -644,6 +716,7 @@ def _plot_electronic(
             window,
             f"{label}: BPDCA",
             pair_scale,
+            missing_projections.get(passivated.name),
         )
         _plot_level_axis(axes[row, 2], reference, passivated, window)
         axes[row, 0].set_ylabel("Normalized DOS")
@@ -692,6 +765,7 @@ def plot_slab_publication(
 
     pair_cases: list[tuple[str, PublicationCase, PublicationCase]] = []
     pdos: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
+    missing_projections: dict[str, list[str]] = {}
     atom_selections: dict[str, dict[str, list[int]]] = {}
     for pair in settings["pairs"]:
         reference = _load_case(root_path, str(pair["reference"]), settings)
@@ -717,18 +791,19 @@ def plot_slab_publication(
             )
         atom_selections[reference.name] = {}
         atom_selections[passivated.name] = selected_excess
-        pdos[reference.name] = _load_pdos(reference, settings, {}, run_sumo=run_sumo)
-        pdos[passivated.name] = _load_pdos(
-            passivated,
-            settings,
-            selected_excess,
-            run_sumo=run_sumo,
+        pdos[reference.name], missing_projections[reference.name] = _load_pdos(
+            reference, settings, {}, run_sumo=run_sumo
+        )
+        pdos[passivated.name], missing_projections[passivated.name] = _load_pdos(
+            passivated, settings, selected_excess, run_sumo=run_sumo
         )
         pair_cases.append((str(pair["label"]), reference, passivated))
 
     dpi = int(settings["dpi"])
     vacuum_outputs = _plot_vacuum(pair_cases, settings, destination, dpi)
-    electronic_outputs = _plot_electronic(pair_cases, pdos, settings, destination, dpi)
+    electronic_outputs = _plot_electronic(
+        pair_cases, pdos, settings, destination, dpi, missing_projections
+    )
     rows: list[dict[str, Any]] = []
     for label, reference, passivated in pair_cases:
         rows.append(
@@ -748,6 +823,8 @@ def plot_slab_publication(
                 "reference_swing_eV": reference.selected.swing_eV,
                 "passivated_swing_eV": passivated.selected.swing_eV,
                 "pdos_review_required": True,
+                "reference_pdos_missing": ";".join(missing_projections.get(reference.name, [])),
+                "passivated_pdos_missing": ";".join(missing_projections.get(passivated.name, [])),
             }
         )
     tsv_path = destination / "publication_band_edges.tsv"
@@ -773,9 +850,14 @@ def plot_slab_publication(
                     ),
                 },
                 "electronic_figures": electronic_outputs,
+                "pdos_projections_missing": {
+                    name: symbols for name, symbols in missing_projections.items() if symbols
+                },
                 "interpretation_guard": (
                     "Global VASP VBM/CBM values are shown. Inspect the BPDCA PDOS before assigning "
-                    "an apparent edge displacement to the perovskite-derived band edge."
+                    "an apparent edge displacement to the perovskite-derived band edge. "
+                    "Any case listed in pdos_projections_missing was run without projected DOS "
+                    "(LORBIT >= 10); only its Total DOS is plotted."
                 ),
             },
             indent=2,
@@ -783,12 +865,14 @@ def plot_slab_publication(
         + "\n",
         encoding="utf-8",
     )
+    dropped = {name: syms for name, syms in missing_projections.items() if syms}
     return {
-        "status": "OK",
+        "status": "OK" if not dropped else "OK (Total-only PDOS for some cases)",
         "pairs": len(pair_cases),
         "output_dir": str(destination),
         "vacuum_figures": vacuum_outputs,
         "electronic_figures": electronic_outputs,
         "band_edges": str(tsv_path),
         "manifest": str(manifest_path),
+        "pdos_projections_missing": dropped,
     }
