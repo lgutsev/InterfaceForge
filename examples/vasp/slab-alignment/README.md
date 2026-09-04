@@ -52,15 +52,16 @@ Flatness triage is automatic. No calculation is submitted and no `INCAR` is
 ever overwritten:
 
 - `OK` writes `LOCPOT_FLATNESS_OK` and needs no dipole improvement;
-- `SUSPECT_FLATNESS` or `FAILED_FLATNESS` writes
-  `RELAUNCH_REVIEW_REQUIRED` and a proposed `INCAR.dipole_fix`;
+- `SUSPECT_FLATNESS`, `FAILED_FLATNESS`, or a VASP vacuum cross-check issue
+  writes `RELAUNCH_REVIEW_REQUIRED` and, when an INCAR-only recovery is
+  defensible, a proposed `INCAR.dipole_fix`;
 - `FAILED_ANALYSIS` writes `LOCPOT_AUDIT_FAILED` because a safe proposal could
   not be generated.
 
 The proposed `INCAR.dipole_fix` is a fresh static calculation (`NSW=0`,
 `IBRION=-1`, `ISTART=0`, `ICHARG=2`) and therefore ignores potentially stale
-`WAVECAR` and `CHGCAR` files. It also sets `PREC=Accurate`, `AMIN=0.01`, `NELM=200`, and
-`EDIFF=1E-6` for the slower charge redistribution that can accompany
+`WAVECAR` and `CHGCAR` files. It also sets `PREC=Accurate`, `AMIN=0.01`,
+`NELM=200`, and `EDIFF=1E-6` for the slower charge redistribution that can accompany
 `LDIPOL`; enables `LVHAR` and VASP 6.4.3+'s `LVACPOTAV` field-free vacuum
 analysis; and requests projected DOS with `LORBIT=11`. The original `INCAR`
 is never replaced automatically.
