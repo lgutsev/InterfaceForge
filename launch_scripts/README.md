@@ -45,6 +45,33 @@ environment paths, wall time, job name, executable, and resource counts before r
   directories into MACE `train.extxyz`, `valid.extxyz`, and `test.extxyz` files.
 - `collect_leaf_deepmd.py`: collects the same leaf trajectories into native DeePMD
   systems while physically retaining the source directory hierarchy.
+- `separation_energy_mace.sbatch` and `separation_energy_deepmd.sbatch`:
+  evaluate the N- and Ti-terminated adhesion trees in isolated GPU environments
+  and write backend-neutral JSON partials.
+- `separation_energy_merge.sbatch`: merges those partials on `single` and renders
+  the combined DFT/MACE/DeePMD reports.
+- `submit_separation_energy.sh`: submits both GPU jobs concurrently and attaches
+  the merge job with `afterok` dependencies.
+
+## SiN/TiN separation-energy comparison
+
+After all six DFT static calculations under `adhesion/{N_term_dft,Ti_term_dft}`
+finish, run this from the `Periodic_MLIPs` campaign root:
+
+```bash
+/path/to/InterfaceForge/launch_scripts/submit_separation_energy.sh
+```
+
+The wrapper submits the MACE and DeePMD jobs independently on `gpu2`; neither
+process loads the other's compiled stack. The final `single` job runs only if
+both GPU jobs exit successfully and writes the combined report under
+`audit/separation/`. Override the campaign location when submitting from
+elsewhere:
+
+```bash
+SEPARATION_CAMPAIGN_ROOT=/ddnB/work/lgutsev/LATech_PROJS/Cer_Interface/MD_Period/Periodic_MLIPs \
+  /path/to/InterfaceForge/launch_scripts/submit_separation_energy.sh
+```
 
 Submit four independent committee members from the directory containing
 `train.extxyz`, `valid.extxyz`, and `test.extxyz`:

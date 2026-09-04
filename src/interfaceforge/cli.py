@@ -72,7 +72,8 @@ from .reference_import import (
 from .regfgw import compare_registry_selection, regfgw_status, run_regfgw_optimize
 from .report import build_report
 from .selection import select_from_csv
-from .separation_energy import separation_energy
+from .separation_energy import merge_separation_energy, separation_energy
+from .separation_energy import write_json_payload as write_separation_energy_json
 from .separation_energy import write_reports as write_separation_energy_reports
 from .slab_alignment import analyze_slab_alignment
 from .slab_publication import plot_slab_publication
@@ -419,26 +420,39 @@ def cmd_validate(args: argparse.Namespace) -> int:
     elif args.validation == "separation":
         payload = separation_curve_from_csv(args.source, args.output)
     elif args.validation == "separation-energy":
-        entries: list[tuple[str, str]] = []
-        for item in args.entries:
-            spec, sep, directory = item.partition("=")
-            if not sep:
-                spec, directory = Path(item).name, item
-            entries.append((spec, directory))
         validation = None
         if args.campaign and Path(args.campaign).is_file():
             validation = load_campaign(args.campaign).validation
-        payload = separation_energy(
-            entries,
-            mace_models=args.mace_models,
-            deepmd_models=args.deepmd_models,
-            reference=args.reference,
-            n_interfaces=args.n_interfaces,
-            area_axis=args.area_axis,
-            device=args.device,
-            campaign_validation=validation,
+        if args.merge_json:
+            if args.entries or args.mace_models or args.deepmd_models or args.json_only:
+                raise SafetyError(
+                    "--merge-json cannot be combined with entries, model options, or --json-only"
+                )
+            payload = merge_separation_energy(
+                args.merge_json, campaign_validation=validation
+            )
+        else:
+            entries: list[tuple[str, str]] = []
+            for item in args.entries:
+                spec, sep, directory = item.partition("=")
+                if not sep:
+                    spec, directory = Path(item).name, item
+                entries.append((spec, directory))
+            payload = separation_energy(
+                entries,
+                mace_models=args.mace_models,
+                deepmd_models=args.deepmd_models,
+                reference=args.reference,
+                n_interfaces=args.n_interfaces,
+                area_axis=args.area_axis,
+                device=args.device,
+                campaign_validation=validation,
+            )
+        payload["outputs"] = (
+            write_separation_energy_json(payload, args.output)
+            if args.json_only
+            else write_separation_energy_reports(payload, args.output)
         )
-        payload["outputs"] = write_separation_energy_reports(payload, args.output)
     elif args.validation == "interface-energy":
         campaign = _campaign(args)
         payload = interface_energy(
@@ -1653,7 +1667,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     separation_energy_parser.add_argument(
         "entries",
-        nargs="+",
+        nargs="*",
         metavar="[LABEL=]SET_DIR",
         help="Each SET_DIR is either a directory with interface/ slab_a/ slab_b/ "
         "sub-directories, or an 'iface vasp adhesion prepare' output tree "
@@ -1676,6 +1690,18 @@ def build_parser() -> argparse.ArgumentParser:
     separation_energy_parser.add_argument("--n-interfaces", type=int, default=1)
     separation_energy_parser.add_argument("--area-axis", choices=("a", "b", "c"))
     separation_energy_parser.add_argument("--device", default="cpu")
+    separation_energy_parser.add_argument(
+        "--merge-json",
+        action="append",
+        default=[],
+        help="Merge a backend-isolated separation_energy.json partial (repeatable); "
+        "cannot be combined with entries or model options",
+    )
+    separation_energy_parser.add_argument(
+        "--json-only",
+        action="store_true",
+        help="Write only separation_energy.json (recommended for isolated backend jobs)",
+    )
     add_campaign_option(separation_energy_parser)
     separation_energy_parser.set_defaults(func=cmd_validate)
 
@@ -2927,3 +2953,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (InterfaceForgeError, FileNotFoundError, ValueError, KeyError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

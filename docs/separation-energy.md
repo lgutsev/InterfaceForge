@@ -79,6 +79,68 @@ iface validate separation-energy audit/separation \
   (`quantity: work_of_adhesion`) value to overlay, for both the DFT and the
   MLIP numbers.
 
+### Isolated MACE and DeePMD environments
+
+Do not load MACE's conda environment and LONI's compiled DeePMD module into the
+same Python process. Run the same structures once per backend and merge their
+small JSON results afterward. The merge process imports neither MACE nor
+DeePMD and verifies that the interface specs, directories, atom counts, areas,
+reference convention, and completed DFT energies agree.
+
+MACE job (inside `/project/lgutsev/env/mace_env`):
+
+```bash
+iface validate separation-energy audit/separation/stages/mace \
+  "interface/300K/MD_Vac/N_Term/SiN_TiN_N-term=adhesion/N_term_dft" \
+  "interface/300K/MD_Vac/Ti_Term/SiN-TiN-Ti-term=adhesion/Ti_term_dft" \
+  --mace-model models/mace_committee/seed_11/…_stagetwo.model \
+  --mace-model models/mace_committee/seed_23/…_stagetwo.model \
+  --mace-model models/mace_committee/seed_37/…_stagetwo.model \
+  --mace-model models/mace_committee/seed_53/…_stagetwo.model \
+  --device cuda --json-only -c campaign.yaml
+```
+
+DeePMD job (after loading `deepmd-kit/r9.3-deepmd3.2.0.b.0-gpu` in a clean
+shell):
+
+```bash
+# Point only at the repository's pure-Python source; do not add another env's
+# complete site-packages directory to PYTHONPATH.
+export PYTHONPATH=/absolute/path/to/InterfaceForge/src${PYTHONPATH:+:$PYTHONPATH}
+
+python -m interfaceforge.separation_energy audit/separation/stages/deepmd \
+  "interface/300K/MD_Vac/N_Term/SiN_TiN_N-term=adhesion/N_term_dft" \
+  "interface/300K/MD_Vac/Ti_Term/SiN-TiN-Ti-term=adhesion/Ti_term_dft" \
+  --deepmd-model models/deepmd/dpa2/model_000/frozen_model.pth \
+  --deepmd-model models/deepmd/dpa2/model_001/frozen_model.pth \
+  --deepmd-model models/deepmd/dpa2/model_002/frozen_model.pth \
+  --deepmd-model models/deepmd/dpa2/model_003/frozen_model.pth \
+  --json-only -c campaign.yaml
+```
+
+Use `python -m interfaceforge.separation_energy` in the DeePMD job so the
+interpreter supplied by the module imports the small evaluator directly. The
+explicit repository `src/` path exposes InterfaceForge without exposing a
+second environment's NumPy/PyTorch/CUDA packages. A useful job preflight is:
+
+```bash
+command -v python
+python -c "import interfaceforge, deepmd; print(interfaceforge.__file__, deepmd.__file__)"
+```
+
+Finally, in the lightweight InterfaceForge development environment:
+
+```bash
+iface validate separation-energy audit/separation \
+  --merge-json audit/separation/stages/mace/separation_energy.json \
+  --merge-json audit/separation/stages/deepmd/separation_energy.json \
+  -c campaign.yaml
+```
+
+This writes the usual single `separation_energy.{json,csv,md,png,svg,pdf}` set.
+The two GPU jobs can run concurrently; submit the merge job with Slurm
+`afterok` dependencies if the whole workflow should complete automatically.
+
 ## Output
 
 `separation_energy.{json,csv,md}` plus a two-panel figure

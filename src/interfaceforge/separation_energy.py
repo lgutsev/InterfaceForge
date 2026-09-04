@@ -21,8 +21,10 @@ gamma_sep^DFT`` on identical geometry. The literature value, when a matching
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -129,6 +131,34 @@ def _dft_energy(run: Path) -> float | None:
 # --------------------------------------------------------------- MLIP back-ends
 
 
+def _model_member_labels(model_paths: Sequence[str]) -> list[str]:
+    """Return stable, unique labels without collapsing same-named models.
+
+    DeePMD committees normally contain paths such as
+    ``model_000/frozen_model.pth`` ... ``model_003/frozen_model.pth``. Using
+    only ``Path.stem`` silently overwrote all but the last member. Keep the
+    shortest unique trailing path instead.
+    """
+
+    normalized = [str(Path(path).expanduser()) for path in model_paths]
+    duplicates = [path for path, count in Counter(normalized).items() if count > 1]
+    if duplicates:
+        raise SafetyError(f"Duplicate MLIP model path: {duplicates[0]}")
+
+    stemmed_parts = [Path(path).with_suffix("").parts for path in normalized]
+    labels: list[str] = []
+    for index, parts in enumerate(stemmed_parts):
+        for depth in range(1, len(parts) + 1):
+            candidate = "/".join(parts[-depth:])
+            matches = sum("/".join(other[-depth:]) == candidate for other in stemmed_parts)
+            if matches == 1:
+                labels.append(candidate)
+                break
+        else:  # pragma: no cover - duplicate normalized paths are rejected above
+            labels.append(f"member_{index:03d}")
+    return labels
+
+
 def _mace_energies(model_paths: Sequence[str], atoms_by_part: Mapping[str, Any], device: str) -> dict[str, dict[str, float]]:
     try:
         from mace.calculators import MACECalculator
@@ -138,14 +168,14 @@ def _mace_energies(model_paths: Sequence[str], atoms_by_part: Mapping[str, Any],
             "or run this where the committee's environment is available"
         ) from exc
     out: dict[str, dict[str, float]] = {}
-    for path in model_paths:
+    for path, label in zip(model_paths, _model_member_labels(model_paths), strict=True):
         calc = MACECalculator(model_paths=[path], device=device, default_dtype="float64")
         member: dict[str, float] = {}
         for part, atoms in atoms_by_part.items():
             probe = atoms.copy()
             probe.calc = calc
             member[part] = float(probe.get_potential_energy())
-        out[Path(path).stem] = member
+        out[label] = member
     return out
 
 
@@ -158,14 +188,14 @@ def _deepmd_energies(model_paths: Sequence[str], atoms_by_part: Mapping[str, Any
             "environment is available"
         ) from exc
     out: dict[str, dict[str, float]] = {}
-    for path in model_paths:
+    for path, label in zip(model_paths, _model_member_labels(model_paths), strict=True):
         calc = DP(model=path)
         member: dict[str, float] = {}
         for part, atoms in atoms_by_part.items():
             probe = atoms.copy()
             probe.calc = calc
             member[part] = float(probe.get_potential_energy())
-        out[Path(path).stem] = member
+        out[label] = member
     return out
 
 
@@ -184,13 +214,51 @@ def _family_block(members: Mapping[str, Mapping[str, float]], denom: float, dft_
     spread = float(values.std(ddof=1)) if values.size > 1 else 0.0
     block: dict[str, Any] = {
         "members": len(per_member),
-        "gamma_sep_members_j_per_m2": {name: round(value, 4) for name, value in per_member.items()},
+        "gamma_sep_members_j_per_m2": {name: float(value) for name, value in per_member.items()},
         "gamma_sep_ensemble_j_per_m2": ensemble,
         "committee_spread_j_per_m2": spread,
     }
     if dft_gamma is not None:
         block["delta_vs_dft_j_per_m2"] = ensemble - dft_gamma
     return block
+
+
+def _family_block_from_gammas(members: Mapping[str, float], dft_gamma: float | None) -> dict[str, Any]:
+    values = np.array(list(members.values()), dtype=float)
+    if values.size == 0:
+        raise SafetyError("Cannot merge an empty MLIP committee")
+    ensemble = float(values.mean())
+    spread = float(values.std(ddof=1)) if values.size > 1 else 0.0
+    block: dict[str, Any] = {
+        "members": len(members),
+        "gamma_sep_members_j_per_m2": {name: float(value) for name, value in members.items()},
+        "gamma_sep_ensemble_j_per_m2": ensemble,
+        "committee_spread_j_per_m2": spread,
+    }
+    if dft_gamma is not None:
+        block["delta_vs_dft_j_per_m2"] = ensemble - dft_gamma
+    return block
+
+
+def _literature_hits(
+    row: Mapping[str, Any],
+    *,
+    lit_refs: Sequence[Mapping[str, Any]] | None,
+    interfaces_meta: Any,
+) -> list[dict[str, Any]]:
+    if not lit_refs:
+        return []
+    attrs = merge_interface_metadata(interfaces_meta, row["spec"]) if interfaces_meta else {}
+    probes: list[tuple[str, float]] = []
+    if row["dft"]["ready"]:
+        probes.append(("dft", float(row["dft"]["gamma_sep_j_per_m2"])))
+    for family, block in row["mlip"].items():
+        probes.append((family, float(block["gamma_sep_ensemble_j_per_m2"])))
+    hits: list[dict[str, Any]] = []
+    for source, value in probes:
+        for hit in compare_to_references(value, lit_refs, attrs, quantity="work_of_adhesion"):
+            hits.append({"source": source, **hit})
+    return hits
 
 
 # --------------------------------------------------------------------- driver
@@ -265,16 +333,9 @@ def separation_energy(
                 _deepmd_energies(deepmd_models, atoms), denom, dft_gamma
             )
 
-        if lit_refs:
-            attrs = merge_interface_metadata(interfaces_meta, spec) if interfaces_meta else {}
-            probes: list[tuple[str, float]] = []
-            if dft_gamma is not None:
-                probes.append(("dft", dft_gamma))
-            for family, block in row["mlip"].items():
-                probes.append((family, block["gamma_sep_ensemble_j_per_m2"]))
-            for source, value in probes:
-                for hit in compare_to_references(value, lit_refs, attrs, quantity="work_of_adhesion"):
-                    row["literature"].append({"source": source, **hit})
+        row["literature"] = _literature_hits(
+            row, lit_refs=lit_refs, interfaces_meta=interfaces_meta
+        )
 
         rows.append(row)
 
@@ -300,6 +361,158 @@ def separation_energy(
         "deepmd_models": [str(p) for p in deepmd_models],
         "interfaces": rows,
     }
+
+
+_MERGE_ROW_FIELDS = (
+    "label",
+    "spec",
+    "directory",
+    "slab_mode",
+    "area_axis",
+    "n_interfaces",
+    "reference",
+    "natoms",
+)
+
+
+def _load_partial(path: str | Path) -> tuple[Path, dict[str, Any]]:
+    source = Path(path).expanduser().resolve()
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise SafetyError(f"Separation-energy partial does not exist: {source}") from exc
+    except json.JSONDecodeError as exc:
+        raise SafetyError(f"Could not parse separation-energy partial {source}: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("quantity") != "separation_energy":
+        raise SafetyError(f"Not a separation-energy JSON payload: {source}")
+    if payload.get("schema_version") != 1 or not isinstance(payload.get("interfaces"), list):
+        raise SafetyError(f"Unsupported separation-energy payload schema in {source}")
+    return source, payload
+
+
+def _merge_dft(base: dict[str, Any], incoming: Mapping[str, Any], spec: str) -> dict[str, Any]:
+    if not base.get("ready") and incoming.get("ready"):
+        return copy.deepcopy(dict(incoming))
+    if base.get("ready") and incoming.get("ready"):
+        for part in _PARTS:
+            left = float(base["energies_ev"][part])
+            right = float(incoming["energies_ev"][part])
+            if not np.isclose(left, right, rtol=0.0, atol=1.0e-8):
+                raise SafetyError(
+                    f"DFT energy mismatch for {spec} {part}: {left} vs {right}; "
+                    "the partials do not describe the same completed calculation"
+                )
+    return base
+
+
+def merge_separation_energy(
+    partials: Sequence[str | Path],
+    *,
+    campaign_validation: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge backend-isolated separation-energy JSON payloads.
+
+    Each partial may be produced in a different Python/CUDA environment. This
+    function imports neither MACE nor DeePMD; it validates that every payload
+    describes the same structures, combines committee members, and recomputes
+    ensemble statistics and deltas against the best available DFT result.
+    """
+
+    if not partials:
+        raise SafetyError("separation-energy merge needs at least one --merge-json file")
+    loaded = [_load_partial(path) for path in partials]
+    first_path, first = loaded[0]
+    merged = copy.deepcopy(first)
+    merged.pop("outputs", None)
+    merged["merged_from"] = [str(first_path)]
+
+    top_fields = ("reference", "n_interfaces", "conversion_ev_a2_to_j_m2")
+    rows_by_spec = {row["spec"]: row for row in merged["interfaces"]}
+    if len(rows_by_spec) != len(merged["interfaces"]):
+        raise SafetyError(f"Duplicate interface spec in {first_path}")
+
+    for source, payload in loaded[1:]:
+        for field in top_fields:
+            if payload.get(field) != merged.get(field):
+                raise SafetyError(
+                    f"Cannot merge {source}: top-level {field!r} differs "
+                    f"({payload.get(field)!r} vs {merged.get(field)!r})"
+                )
+        incoming_by_spec = {row["spec"]: row for row in payload["interfaces"]}
+        if set(incoming_by_spec) != set(rows_by_spec):
+            raise SafetyError(
+                f"Cannot merge {source}: interface specs differ from {first_path}"
+            )
+        for spec, base_row in rows_by_spec.items():
+            incoming = incoming_by_spec[spec]
+            for field in _MERGE_ROW_FIELDS:
+                if incoming.get(field) != base_row.get(field):
+                    raise SafetyError(
+                        f"Cannot merge {source}: {spec} field {field!r} differs"
+                    )
+            if not np.isclose(
+                float(incoming["interface_area_ang2"]),
+                float(base_row["interface_area_ang2"]),
+                rtol=0.0,
+                atol=1.0e-8,
+            ):
+                raise SafetyError(f"Cannot merge {source}: {spec} interface area differs")
+            base_row["dft"] = _merge_dft(base_row["dft"], incoming["dft"], spec)
+            for family, block in incoming["mlip"].items():
+                if family not in base_row["mlip"]:
+                    base_row["mlip"][family] = copy.deepcopy(block)
+                    continue
+                members = dict(base_row["mlip"][family]["gamma_sep_members_j_per_m2"])
+                for name, value in block["gamma_sep_members_j_per_m2"].items():
+                    if name in members and not np.isclose(
+                        float(members[name]), float(value), rtol=0.0, atol=1.0e-8
+                    ):
+                        raise SafetyError(
+                            f"Cannot merge {source}: {spec} {family} member {name!r} differs"
+                        )
+                    members[name] = float(value)
+                dft_gamma = (
+                    float(base_row["dft"]["gamma_sep_j_per_m2"])
+                    if base_row["dft"]["ready"]
+                    else None
+                )
+                base_row["mlip"][family] = _family_block_from_gammas(members, dft_gamma)
+        for key in ("mace_models", "deepmd_models"):
+            merged[key] = list(dict.fromkeys([*merged.get(key, []), *payload.get(key, [])]))
+        merged["merged_from"].append(str(source))
+
+    lit_refs = (
+        references_for(campaign_validation.get("references"), "work_of_adhesion")
+        if campaign_validation
+        else None
+    )
+    interfaces_meta = campaign_validation.get("interfaces") if campaign_validation else None
+    for row in merged["interfaces"]:
+        dft_gamma = (
+            float(row["dft"]["gamma_sep_j_per_m2"])
+            if row["dft"]["ready"]
+            else None
+        )
+        for family, block in list(row["mlip"].items()):
+            row["mlip"][family] = _family_block_from_gammas(
+                block["gamma_sep_members_j_per_m2"], dft_gamma
+            )
+        if campaign_validation:
+            row["literature"] = _literature_hits(
+                row, lit_refs=lit_refs, interfaces_meta=interfaces_meta
+            )
+        else:
+            combined: list[dict[str, Any]] = []
+            seen: set[tuple[str, str]] = set()
+            for _, payload in loaded:
+                incoming = next(item for item in payload["interfaces"] if item["spec"] == row["spec"])
+                for hit in incoming.get("literature", []):
+                    key = (str(hit.get("source")), str(hit.get("key")))
+                    if key not in seen:
+                        seen.add(key)
+                        combined.append(copy.deepcopy(hit))
+            row["literature"] = combined
+    return merged
 
 
 # ---------------------------------------------------------------------- report
@@ -336,10 +549,19 @@ def _row_sources(row: dict[str, Any]) -> list[tuple[str, float | None, float, fl
     return out
 
 
-def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, str]:
+def write_json_payload(payload: dict[str, Any], output_dir: str | Path) -> dict[str, str]:
+    """Write only the backend-neutral JSON used by isolated evaluation stages."""
+
     out = Path(output_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
-    (out / "separation_energy.json").write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+    target = out / "separation_energy.json"
+    target.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+    return {"json": str(target)}
+
+
+def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, str]:
+    out = Path(output_dir).expanduser().resolve()
+    outputs = write_json_payload(payload, out)
 
     with (out / "separation_energy.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=_CSV_FIELDS, extrasaction="ignore")
@@ -397,11 +619,12 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
             )
     (out / "separation_energy.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    outputs = {
-        "json": str(out / "separation_energy.json"),
-        "csv": str(out / "separation_energy.csv"),
-        "markdown": str(out / "separation_energy.md"),
-    }
+    outputs.update(
+        {
+            "csv": str(out / "separation_energy.csv"),
+            "markdown": str(out / "separation_energy.md"),
+        }
+    )
     try:
         outputs.update(_write_figure(payload, out))
     except (DependencyError, SafetyError) as exc:
@@ -567,7 +790,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("output", help="Directory for separation_energy.{json,csv,md,png,svg,pdf}")
     parser.add_argument(
         "entries",
-        nargs="+",
+        nargs="*",
         metavar="[LABEL=]SET_DIR",
         help="Each SET_DIR holds interface/ slab_a/ slab_b/ sub-directories, or is "
         "an 'iface vasp adhesion prepare' output tree; the optional LABEL= prefix "
@@ -579,6 +802,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n-interfaces", type=int, default=1)
     parser.add_argument("--area-axis", choices=("a", "b", "c"))
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--merge-json",
+        action="append",
+        default=[],
+        help="Merge a separation_energy.json partial (repeatable); imports no ML backend",
+    )
+    parser.add_argument(
+        "--json-only",
+        action="store_true",
+        help="Write only separation_energy.json (recommended for isolated backend jobs)",
+    )
     parser.add_argument("-c", "--campaign", default=None)
     args = parser.parse_args(argv)
 
@@ -588,24 +822,34 @@ def main(argv: list[str] | None = None) -> int:
 
         validation = load_campaign(args.campaign).validation
 
-    entries: list[tuple[str, str]] = []
-    for item in args.entries:
-        spec, sep, directory = item.partition("=")
-        if not sep:
-            spec, directory = Path(item).name, item
-        entries.append((spec, directory))
-
-    payload = separation_energy(
-        entries,
-        mace_models=args.mace_models,
-        deepmd_models=args.deepmd_models,
-        reference=args.reference,
-        n_interfaces=args.n_interfaces,
-        area_axis=args.area_axis,
-        device=args.device,
-        campaign_validation=validation,
+    if args.merge_json:
+        if args.entries or args.mace_models or args.deepmd_models or args.json_only:
+            raise SafetyError(
+                "--merge-json cannot be combined with entries, model options, or --json-only"
+            )
+        payload = merge_separation_energy(args.merge_json, campaign_validation=validation)
+    else:
+        entries: list[tuple[str, str]] = []
+        for item in args.entries:
+            spec, sep, directory = item.partition("=")
+            if not sep:
+                spec, directory = Path(item).name, item
+            entries.append((spec, directory))
+        payload = separation_energy(
+            entries,
+            mace_models=args.mace_models,
+            deepmd_models=args.deepmd_models,
+            reference=args.reference,
+            n_interfaces=args.n_interfaces,
+            area_axis=args.area_axis,
+            device=args.device,
+            campaign_validation=validation,
+        )
+    payload["outputs"] = (
+        write_json_payload(payload, args.output)
+        if args.json_only
+        else write_reports(payload, args.output)
     )
-    payload["outputs"] = write_reports(payload, args.output)
     print(json.dumps(payload, indent=2, default=str))
     return 0
 
