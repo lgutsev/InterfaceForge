@@ -140,6 +140,58 @@ class SeparationEnergyLauncherTests(unittest.TestCase):
             self.assertIn("SUs available", result.stderr)
             self.assertIn("--dependency=afterok:1001:1002", calls.read_text(encoding="utf-8"))
 
+    def test_submitter_disambiguates_compiled_and_checkpoint_model_copies(self) -> None:
+        # Real mace_model/ layout: stage-one/stage-two, each with a *_compiled
+        # sibling (a TorchScript/LAMMPS export, not for MACECalculator), plus
+        # training's own checkpoints/ independently holding a same-suffixed
+        # *_stagetwo.model. All of that must resolve to exactly the one
+        # uncompiled stagetwo file in mace_model/.
+        with tempfile.TemporaryDirectory() as tmp:
+            campaign = Path(tmp) / "campaign"
+            campaign.mkdir()
+            (campaign / "campaign.yaml").write_text("name: test\n", encoding="utf-8")
+            for termination in ("N_term_dft", "Ti_term_dft"):
+                directory = campaign / "adhesion" / termination
+                directory.mkdir(parents=True)
+                (directory / "manifest.json").write_text("{}\n", encoding="utf-8")
+            for seed in (11, 23, 37, 53):
+                seed_dir = (
+                    campaign / "models" / "mace_committee_520eV" / "mace_committee" / f"seed_{seed}"
+                )
+                model_dir = seed_dir / "mace_model"
+                model_dir.mkdir(parents=True)
+                prefix = f"SiN_TiN_TiO_periodic_mace_seed{seed}"
+                for suffix in (".model", "_compiled.model", "_stagetwo.model", "_stagetwo_compiled.model"):
+                    (model_dir / f"{prefix}{suffix}").write_bytes(b"model")
+                checkpoints_dir = seed_dir / "checkpoints"
+                checkpoints_dir.mkdir()
+                (checkpoints_dir / f"{prefix}_run-{seed}_stagetwo.model").write_bytes(b"checkpoint copy")
+            for member in range(4):
+                directory = campaign / "models" / "deepmd" / "dpa2" / f"model_{member:03d}"
+                directory.mkdir(parents=True)
+                (directory / "model.ckpt.pt").write_bytes(b"checkpoint")
+
+            fake_bin = Path(tmp) / "bin"
+            fake_bin.mkdir()
+            sbatch = fake_bin / "sbatch"
+            sbatch.write_text(
+                "#!/usr/bin/env bash\necho 12345\n", encoding="utf-8"
+            )
+            sbatch.chmod(0o755)
+            env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+            result = subprocess.run(
+                [str(LAUNCHERS / "submit_separation_energy.sh")],
+                cwd=campaign,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("found 2", result.stderr)
+            self.assertNotIn("found 4", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

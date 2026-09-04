@@ -28,19 +28,26 @@ done
 # half-submitted workflow when one committee is incomplete.
 for seed in 11 23 37 53; do
     seed_dir="$MACE_COMMITTEE_ROOT/mace_committee/seed_${seed}"
+    # mace_train_committee.sh exports the final model into mace_model/; its own
+    # checkpoints/ can independently contain a same-named *_stagetwo.model as
+    # training-time bookkeeping. Prefer the canonical export directory, and
+    # always exclude checkpoints/ so the two are never ambiguous.
+    search_dir="$seed_dir/mace_model"
+    [[ -d "$search_dir" ]] || search_dir="$seed_dir"
     mapfile -t matches < <(
-        find "$seed_dir" -maxdepth 3 -type f \
-            -name '*_stagetwo.model' -print 2>/dev/null | sort
+        find "$search_dir" -maxdepth 3 -type f \
+            -name '*_stagetwo.model' ! -name '*_compiled.model' \
+            ! -path '*/checkpoints/*' -print 2>/dev/null | sort
     )
     if [[ "${#matches[@]}" -eq 0 ]]; then
         mapfile -t matches < <(
-            find "$seed_dir" -maxdepth 3 -type f -name '*.model' \
-                ! -name '*_compiled.model' -print 2>/dev/null | sort
+            find "$search_dir" -maxdepth 3 -type f -name '*.model' \
+                ! -name '*_compiled.model' ! -path '*/checkpoints/*' -print 2>/dev/null | sort
         )
     fi
     if [[ "${#matches[@]}" -ne 1 ]]; then
         echo "ERROR: expected one usable MACE model for seed $seed; found ${#matches[@]}" >&2
-        echo "  searched: $seed_dir" >&2
+        echo "  searched: $search_dir" >&2
         printf '  %s\n' "${matches[@]}" >&2
         exit 2
     fi
