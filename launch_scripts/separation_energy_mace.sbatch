@@ -17,6 +17,10 @@ set -eo pipefail
 
 CAMP="${SEPARATION_CAMPAIGN_ROOT:-${SLURM_SUBMIT_DIR:?Submit this script with sbatch}}"
 REPO_ROOT="${INTERFACEFORGE_ROOT:?Set INTERFACEFORGE_ROOT to the InterfaceForge checkout}"
+# Same default InterfaceForge itself uses (`iface mlip-progress`, `iface
+# package campaign`): the MACE committee lives under an ENCUT-tagged
+# sub-directory, not directly under models/.
+MACE_COMMITTEE_ROOT="${MACE_COMMITTEE_ROOT:-$CAMP/models/mace_committee_520eV}"
 OUTPUT="$CAMP/audit/separation/stages/mace"
 N_TERM="$CAMP/adhesion/N_term_dft"
 TI_TERM="$CAMP/adhesion/Ti_term_dft"
@@ -47,7 +51,7 @@ nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,nohea
 
 MODEL_ARGS=()
 for seed in 11 23 37 53; do
-    seed_dir="$CAMP/models/mace_committee/seed_${seed}"
+    seed_dir="$MACE_COMMITTEE_ROOT/mace_committee/seed_${seed}"
     mapfile -t matches < <(
         find "$seed_dir" -maxdepth 3 -type f \
             -name '*_stagetwo.model' -print 2>/dev/null | sort

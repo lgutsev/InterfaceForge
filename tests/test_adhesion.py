@@ -130,6 +130,60 @@ class AdhesionTests(unittest.TestCase):
             # A hard link to ML_FF is still expected in static mode.
             self.assertTrue((output / "slabs" / "lower" / "ML_FF").exists())
 
+    def test_md_thermostat_tags_are_stripped_from_generated_incars(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+            (source / "INCAR").write_text(
+                "ENCUT = 500\n"
+                "IBRION = 0\n"
+                "POTIM = 1.0\n"
+                "# ----------------------------\n"
+                "# MD settings\n"
+                "# ----------------------------\n"
+                "MDALGO = 2\n"
+                "SMASS  = 1.0\n"
+                "TEBEG  = 300\n"
+                "TEEND  = 300\n",
+                encoding="utf-8",
+            )
+
+            manifest = prepare_adhesion(
+                source, method="dft", distances=[1], slab_mode="static", interface_static=True
+            )
+
+            output = Path(manifest["output_directory"])
+            checked = [
+                output / "slabs" / "lower" / "INCAR",
+                output / "slabs" / "upper" / "INCAR",
+                output / "interface_static" / "INCAR",
+                output / "rigid_curve" / "sep_001.00_A" / "INCAR",
+            ]
+            for path in checked:
+                incar = path.read_text(encoding="utf-8")
+                for tag in ("MDALGO", "SMASS", "TEBEG", "TEEND"):
+                    self.assertNotIn(tag, incar, f"{tag} leaked into {path}")
+                self.assertIn("ENCUT = 500", incar)  # unrelated tags survive
+
+            # slab_mode="relax" (IBRION=2) is not MD either; same cleanup applies.
+            manifest_relax = prepare_adhesion(
+                source, method="dft", distances=[], output_dir=root / "relaxed"
+            )
+            relax_incar = (
+                Path(manifest_relax["output_directory"]) / "slabs" / "lower" / "INCAR"
+            ).read_text(encoding="utf-8")
+            for tag in ("MDALGO", "SMASS", "TEBEG", "TEEND"):
+                self.assertNotIn(tag, relax_incar)
+
+    def test_missing_incar_override_names_the_flag_not_a_bare_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_reference(root, with_ml_ff=False)
+            missing = root / "incar_ref" / "INCAR"
+
+            with self.assertRaisesRegex(FileNotFoundError, r"--incar not found: .*INCAR"):
+                prepare_adhesion(source, method="dft", distances=[], incar=str(missing))
+
     def test_invalid_slab_mode_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

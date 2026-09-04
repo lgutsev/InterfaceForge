@@ -9,6 +9,10 @@ set -euo pipefail
 CAMP="${SEPARATION_CAMPAIGN_ROOT:-$(pwd -P)}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+# Same default InterfaceForge itself uses (`iface mlip-progress`, `iface
+# package campaign`): the MACE committee lives under an ENCUT-tagged
+# sub-directory, not directly under models/.
+MACE_COMMITTEE_ROOT="${MACE_COMMITTEE_ROOT:-$CAMP/models/mace_committee_520eV}"
 
 for required in \
     "$CAMP/campaign.yaml" \
@@ -23,7 +27,7 @@ done
 # Validate every model before submitting either backend. This avoids leaving a
 # half-submitted workflow when one committee is incomplete.
 for seed in 11 23 37 53; do
-    seed_dir="$CAMP/models/mace_committee/seed_${seed}"
+    seed_dir="$MACE_COMMITTEE_ROOT/mace_committee/seed_${seed}"
     mapfile -t matches < <(
         find "$seed_dir" -maxdepth 3 -type f \
             -name '*_stagetwo.model' -print 2>/dev/null | sort
@@ -54,7 +58,7 @@ for member in 000 001 002 003; do
     fi
 done
 
-export_arg="ALL,SEPARATION_CAMPAIGN_ROOT=$CAMP,INTERFACEFORGE_ROOT=$REPO_ROOT"
+export_arg="ALL,SEPARATION_CAMPAIGN_ROOT=$CAMP,INTERFACEFORGE_ROOT=$REPO_ROOT,MACE_COMMITTEE_ROOT=$MACE_COMMITTEE_ROOT"
 submit_job() {
     local label="$1"
     local output

@@ -40,6 +40,22 @@ class SeparationEnergyLauncherTests(unittest.TestCase):
         self.assertIn("model.ckpt.pt", deepmd)
         self.assertIn('if [[ -s "$frozen" ]]', deepmd)
 
+    def test_mace_committee_root_matches_the_project_convention(self) -> None:
+        # `iface mlip-progress` / `iface package campaign` both default the MACE
+        # committee root to models/mace_committee_520eV -- the committee is
+        # *not* directly under models/mace_committee/. Both scripts that look
+        # for a seed's trained model must agree, and honour an override.
+        submitter = (LAUNCHERS / "submit_separation_energy.sh").read_text(encoding="utf-8")
+        mace = (LAUNCHERS / "separation_energy_mace.sbatch").read_text(encoding="utf-8")
+        for text in (submitter, mace):
+            self.assertIn(
+                'MACE_COMMITTEE_ROOT="${MACE_COMMITTEE_ROOT:-$CAMP/models/mace_committee_520eV}"',
+                text,
+            )
+            self.assertIn('seed_dir="$MACE_COMMITTEE_ROOT/mace_committee/seed_${seed}"', text)
+            self.assertNotIn('seed_dir="$CAMP/models/mace_committee/seed_${seed}"', text)
+        self.assertIn("MACE_COMMITTEE_ROOT=$MACE_COMMITTEE_ROOT", submitter)
+
     def test_submitter_attaches_merge_with_afterok(self) -> None:
         submitter = (LAUNCHERS / "submit_separation_energy.sh").read_text(encoding="utf-8")
         merge = (LAUNCHERS / "separation_energy_merge.sbatch").read_text(encoding="utf-8")
@@ -72,7 +88,14 @@ class SeparationEnergyLauncherTests(unittest.TestCase):
                 directory.mkdir(parents=True)
                 (directory / "manifest.json").write_text("{}\n", encoding="utf-8")
             for seed in (11, 23, 37, 53):
-                directory = campaign / "models" / "mace_committee" / f"seed_{seed}" / "mace_model"
+                directory = (
+                    campaign
+                    / "models"
+                    / "mace_committee_520eV"
+                    / "mace_committee"
+                    / f"seed_{seed}"
+                    / "mace_model"
+                )
                 directory.mkdir(parents=True)
                 (directory / "final.model").write_bytes(b"model")
             for member in range(4):

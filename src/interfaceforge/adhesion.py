@@ -23,6 +23,7 @@ import csv
 import json
 import math
 import os
+import re
 import shutil
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -240,6 +241,62 @@ def _incar_tag(line: str) -> str | None:
     return tag if tag.replace("_", "").isalnum() else None
 
 
+_BANNER_RULE_LINE = re.compile(r"^#\s*-{5,}\s*$")
+
+
+def _drop_orphaned_section_banners(lines: list[str]) -> list[str]:
+    """Drop a ``# ---`` / ``# Title`` / ``# ---`` banner left with no tag under
+    it (every tag in that section was removed), so a heading doesn't survive
+    over nothing. Only this specific three-line framed pattern is touched;
+    any other comment is left exactly as written.
+    """
+
+    out: list[str] = []
+    index = 0
+    total = len(lines)
+    while index < total:
+        is_banner = (
+            index + 2 < total
+            and _BANNER_RULE_LINE.match(lines[index].strip())
+            and lines[index + 1].lstrip().startswith("#")
+            and not _BANNER_RULE_LINE.match(lines[index + 1].strip())
+            and _BANNER_RULE_LINE.match(lines[index + 2].strip())
+        )
+        if is_banner:
+            probe = index + 3
+            has_tag_before_next_banner = False
+            while probe < total:
+                stripped = lines[probe].strip()
+                if not stripped:
+                    probe += 1
+                    continue
+                if _BANNER_RULE_LINE.match(stripped):
+                    break
+                if _incar_tag(lines[probe]) is not None:
+                    has_tag_before_next_banner = True
+                    break
+                probe += 1
+            if not has_tag_before_next_banner:
+                index += 3
+                while index < total and not lines[index].strip():
+                    index += 1
+                continue
+        out.append(lines[index])
+        index += 1
+    return out
+
+
+def _collapse_blank_runs(lines: list[str]) -> list[str]:
+    """Squash two-or-more consecutive blank lines down to one."""
+
+    out: list[str] = []
+    for line in lines:
+        if not line.strip() and out and not out[-1].strip():
+            continue
+        out.append(line)
+    return out
+
+
 def _adapt_incar(
     base: str,
     overrides: list[tuple[str, str]],
@@ -257,11 +314,22 @@ def _adapt_incar(
         if tag is not None and any(tag.startswith(prefix.upper()) for prefix in remove_prefixes):
             continue
         kept.append(line)
+    kept = _collapse_blank_runs(_drop_orphaned_section_banners(kept))
     while kept and not kept[-1].strip():
         kept.pop()
     kept.extend(["", "# Automatically set for the InterfaceForge adhesion workflow"])
     kept.extend(f"{tag:<15} = {value}" for tag, value in overrides)
     return "\n".join(kept) + "\n"
+
+
+# None of the adhesion-workflow INCARs run ionic MD (IBRION is 2, or -1 for a
+# single point) even though the reference is typically an AIMD run, so these
+# thermostat/dynamics tags -- only meaningful under IBRION=0 -- are vestigial
+# and removed rather than left inert and confusing to read.
+_MD_ONLY_TAGS = {
+    "TEBEG", "TEEND", "SMASS", "MDALGO",
+    "LANGEVIN_GAMMA", "LANGEVIN_GAMMA_L", "PMASS", "ANDERSEN_PROB",
+}
 
 
 def _mlff_relax_incar(base: str) -> str:
@@ -274,6 +342,7 @@ def _mlff_relax_incar(base: str) -> str:
             ("ML_OUTPUT_MODE", "1"), ("ML_OUTBLOCK", "1"),
             ("LWAVE", ".FALSE."), ("LCHARG", ".FALSE."), ("LVHAR", ".FALSE."),
         ],
+        remove=_MD_ONLY_TAGS,
     )
 
 
@@ -287,7 +356,7 @@ def _mlff_static_slab_incar(base: str, name: str) -> str:
             ("ML_OUTPUT_MODE", "1"), ("ML_OUTBLOCK", "1"),
             ("LWAVE", ".FALSE."), ("LCHARG", ".FALSE."), ("LVHAR", ".FALSE."),
         ],
-        remove={"EDIFFG", "POTIM"},
+        remove={"EDIFFG", "POTIM", *_MD_ONLY_TAGS},
     )
 
 
@@ -300,7 +369,7 @@ def _dft_static_slab_incar(base: str, name: str) -> str:
             ("EDIFF", "1E-6"), ("ISIF", "2"), ("ISYM", "0"),
             ("LWAVE", ".FALSE."), ("LCHARG", ".FALSE."), ("LVHAR", ".FALSE."),
         ],
-        remove={"EDIFFG", "POTIM"},
+        remove={"EDIFFG", "POTIM", *_MD_ONLY_TAGS},
         remove_prefixes=("ML_",),
     )
 
@@ -315,7 +384,7 @@ def _static_incar(base: str, distance: float) -> str:
             ("ML_OUTPUT_MODE", "1"), ("ML_OUTBLOCK", "1"),
             ("LWAVE", ".FALSE."), ("LCHARG", ".FALSE."), ("LVHAR", ".FALSE."),
         ],
-        remove={"EDIFFG", "POTIM"},
+        remove={"EDIFFG", "POTIM", *_MD_ONLY_TAGS},
     )
 
 
@@ -328,6 +397,7 @@ def _dft_relax_incar(base: str) -> str:
             ("ISIF", "2"), ("ISYM", "0"),
             ("LWAVE", ".FALSE."), ("LCHARG", ".FALSE."), ("LVHAR", ".FALSE."),
         ],
+        remove=_MD_ONLY_TAGS,
         remove_prefixes=("ML_",),
     )
 
@@ -341,18 +411,20 @@ def _dft_static_incar(base: str, distance: float) -> str:
             ("EDIFF", "1E-6"), ("ISIF", "2"), ("ISYM", "0"),
             ("LWAVE", ".FALSE."), ("LCHARG", ".FALSE."), ("LVHAR", ".FALSE."),
         ],
-        remove={"EDIFFG", "POTIM"},
+        remove={"EDIFFG", "POTIM", *_MD_ONLY_TAGS},
         remove_prefixes=("ML_",),
     )
 
 
-def _resolve_file(source: Path, requested: str | None, default: str) -> Path:
+def _resolve_file(
+    source: Path, requested: str | None, default: str, *, label: str | None = None
+) -> Path:
     path = Path(requested) if requested else source / default
     if requested and not path.is_absolute():
         path = source / path
     path = path.resolve()
     if not path.is_file():
-        raise FileNotFoundError(path)
+        raise FileNotFoundError(f"{label or default} not found: {path}")
     return path
 
 
@@ -368,7 +440,7 @@ def _find_launcher(source: Path, requested: str | None) -> Path | None:
     if requested:
         path = (source / requested).resolve()
         if not path.is_file():
-            raise FileNotFoundError(path)
+            raise FileNotFoundError(f"--launcher not found: {path}")
         return path
     for name in ("runvasp.sh", "run.slurm"):
         path = source / name
@@ -460,13 +532,13 @@ def prepare_adhesion(
         raise ValueError("Fragment names must differ")
 
     if structure:
-        structure_path = _resolve_file(source, structure, "CONTCAR")
+        structure_path = _resolve_file(source, structure, "CONTCAR", label="--structure")
     else:
         structure_path = (source / ("CONTCAR" if (source / "CONTCAR").is_file() else "POSCAR")).resolve()
         if not structure_path.is_file():
-            raise FileNotFoundError("Neither CONTCAR nor POSCAR exists")
+            raise FileNotFoundError(f"Neither CONTCAR nor POSCAR exists in {source}")
     if incar:
-        incar_path = _resolve_file(source, incar, "INCAR_MLFF_RELAX")
+        incar_path = _resolve_file(source, incar, "INCAR_MLFF_RELAX", label="--incar")
     else:
         preferred_incar = (
             "INCAR_MLFF_RELAX"
@@ -475,10 +547,12 @@ def prepare_adhesion(
         )
         incar_path = _resolve_file(source, None, preferred_incar)
     base_incar = incar_path.read_text(encoding="utf-8")
-    kpoints_path = _resolve_file(source, kpoints, "KPOINTS")
-    potcar_path = _resolve_file(source, potcar, "POTCAR")
+    kpoints_path = _resolve_file(source, kpoints, "KPOINTS", label="--kpoints")
+    potcar_path = _resolve_file(source, potcar, "POTCAR", label="--potcar")
     model = _resolve_file(source, None, "ML_FF") if method == "mlff" else None
-    curve_incar_path = _resolve_file(source, curve_incar, "INCAR") if curve_incar else None
+    curve_incar_path = (
+        _resolve_file(source, curve_incar, "INCAR", label="--curve-incar") if curve_incar else None
+    )
     curve_incar_text = curve_incar_path.read_text(encoding="utf-8") if curve_incar_path else None
     launcher_path = _find_launcher(source, launcher) if propagate_launcher else None
 
