@@ -143,8 +143,16 @@ iface committee collect models/deepmd/dpa2 stored_models/tin_sin_dpa2_v1 \
 iface committee verify stored_models/tin_sin_mace_v1
 ```
 
-Dataset backup archives and Hugging Face repository generation are covered in
-[Packaging](packaging.md).
+Or collect + package every committee the campaign has, plus the dataset
+archive, in one call:
+
+```bash
+iface package campaign -c campaign.yaml --repo-prefix myorg/tinsin --tag v1
+```
+
+Dataset backup archives (mirror, or single-copy `--dedupe` with
+`iface package materialize` to regenerate extxyz) and Hugging Face repository
+generation are covered in [Packaging](packaging.md).
 
 ## Safety model
 

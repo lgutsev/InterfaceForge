@@ -9,11 +9,15 @@ from pathlib import Path
 
 import numpy as np
 from test_committee import write_committee
+from test_config_scheduler import write_campaign
 
 from interfaceforge.cli import build_parser
 from interfaceforge.committee import collect_committee, verify_committee_bundle
+from interfaceforge.config import load_campaign
 from interfaceforge.errors import ConfigurationError, SafetyError
 from interfaceforge.packaging import (
+    materialize_dataset,
+    pack_campaign,
     pack_dataset_archive,
     pack_huggingface,
     verify_package,
@@ -57,6 +61,70 @@ def write_canonical_dataset(root: Path) -> Path:
     (dataset / "manifest.csv").write_text("run_id,frames_retained\nrun_a,10\n", encoding="utf-8")
     (dataset / "frames.csv").write_text("split,run_id,energy_ev\ntrain,run_a,-1.0\n", encoding="utf-8")
     return dataset
+
+
+def write_materializable_dataset(root: Path, *, seed: int = 0) -> tuple[Path, dict[str, dict[str, np.ndarray]]]:
+    """A DeePMD-only dataset with high-precision floats and full
+    move_mask.npy / system_meta.json / frame_map.csv sidecars, i.e. exactly
+    what `iface collect` (post-sidecar) writes -- the dedupe/materialize
+    round-trip fixture. Returns the dataset root and the exact source arrays
+    per split for independent comparison against materialized extxyz."""
+
+    dataset = root / "datasets" / "canonical"
+    deepmd_root = dataset / "deepmd"
+    rng = np.random.default_rng(seed)
+    type_map = ["Si", "N", "Ti"]
+    expected: dict[str, dict[str, np.ndarray]] = {}
+    for split in ("train", "valid", "test"):
+        system = deepmd_root / split / "sys1"
+        set_dir = system / "set.000"
+        set_dir.mkdir(parents=True)
+        natoms, nframes = 4, 2
+        symbols = [type_map[i % 3] for i in range(natoms)]
+        atom_types = [type_map.index(symbol) for symbol in symbols]
+        (system / "type.raw").write_text("\n".join(map(str, atom_types)) + "\n", encoding="utf-8")
+        (system / "type_map.raw").write_text("\n".join(type_map) + "\n", encoding="utf-8")
+
+        coord = rng.standard_normal((nframes, natoms, 3)) * np.pi
+        box = np.tile((np.eye(3) * 11.987654321).reshape(1, 3, 3), (nframes, 1, 1))
+        energy = rng.standard_normal((nframes, 1)) * np.e * 100
+        force = rng.standard_normal((nframes, natoms, 3)) * 1e-6
+        move_mask = np.ones((nframes, natoms), dtype=np.int8)
+        move_mask[:, 0] = 0  # first atom frozen
+
+        np.save(set_dir / "coord.npy", coord.reshape(nframes, -1))
+        np.save(set_dir / "box.npy", box.reshape(nframes, -1))
+        np.save(set_dir / "energy.npy", energy)
+        np.save(set_dir / "force.npy", force.reshape(nframes, -1))
+        np.save(system / "move_mask.npy", move_mask)
+        (system / "system_meta.json").write_text(
+            json.dumps({"kind": "bulk", "tebeg_k": 450.0, "high_temperature": True}), encoding="utf-8"
+        )
+        with (system / "frame_map.csv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                ["local_frame", "source_frame", "source_path", "min_coordination_number", "mean_coordination_number"]
+            )
+            for index in range(nframes):
+                writer.writerow([index, index, f"/vasp/sys1/{split}", 4, 4.5])
+        expected[split] = {"coord": coord, "box": box, "energy": energy, "force": force, "move_mask": move_mask}
+
+    (dataset / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "strategy": "grouped",
+                "ratios": [0.8, 0.1, 0.1],
+                "stride": 5,
+                "type_map": type_map,
+                "frame_counts": {"train": 2, "valid": 2, "test": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (dataset / "manifest.csv").write_text("run_id\nsys1\n", encoding="utf-8")
+    (dataset / "frames.csv").write_text("run_id\nsys1\n", encoding="utf-8")
+    return dataset, expected
 
 
 def write_deepmd_committee(
@@ -158,6 +226,146 @@ class DatasetArchiveTests(unittest.TestCase):
             (root / "not-a-dataset").mkdir()
             with self.assertRaisesRegex(ConfigurationError, "no manifest.json"):
                 pack_dataset_archive(root / "not-a-dataset", root / "x.zip")
+
+
+# --------------------------------------------------------------------------- #
+# dedupe archive + materialize (single-copy storage, regenerated extxyz)
+# --------------------------------------------------------------------------- #
+class DedupeMaterializeTests(unittest.TestCase):
+    def test_dedupe_excludes_extxyz_and_materialize_round_trips_exact_precision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset, expected = write_materializable_dataset(root)
+
+            result = pack_dataset_archive(dataset, root / "backup" / "dedupe.zip", dedupe=True)
+            self.assertTrue(result["dedupe"])
+            self.assertFalse(result["include_extxyz"])
+            with zipfile.ZipFile(Path(result["archive"])) as handle:
+                names = handle.namelist()
+            self.assertFalse(any(name.endswith(".extxyz") for name in names))
+            self.assertTrue(any(name.endswith("move_mask.npy") for name in names))
+            self.assertTrue(verify_package(Path(result["archive"]))["valid"])
+
+            extracted = root / "restored"
+            with zipfile.ZipFile(Path(result["archive"])) as handle:
+                handle.extractall(extracted)
+            data_dir = extracted / "dedupe" / "data"
+
+            payload = materialize_dataset(data_dir)
+            self.assertEqual(payload["warnings"], [])
+            self.assertEqual({"train", "valid", "test"}, set(payload["materialized"]))
+
+            from ase.io import read
+
+            for split, arrays in expected.items():
+                frames = read(str(data_dir / f"{split}.extxyz"), index=":")
+                self.assertEqual(len(frames), 2)
+                for index, atoms in enumerate(frames):
+                    self.assertTrue(np.array_equal(atoms.positions, arrays["coord"][index]))
+                    self.assertTrue(np.array_equal(atoms.cell.array, arrays["box"][index]))
+                    self.assertTrue(np.array_equal(atoms.arrays["REF_forces"], arrays["force"][index]))
+                    self.assertEqual(atoms.info["REF_energy"], arrays["energy"][index][0])
+                    reconstructed = np.ones(len(atoms), dtype=np.int8)
+                    for constraint in atoms.constraints:
+                        reconstructed[np.asarray(constraint.get_indices(), dtype=int)] = 0
+                    self.assertTrue(np.array_equal(reconstructed, arrays["move_mask"][index]))
+                    self.assertEqual(atoms.info.get("IF_kind"), "bulk")
+                    self.assertTrue(atoms.info.get("IF_high_temperature"))
+
+    def test_dedupe_rejects_dataset_missing_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = write_canonical_dataset(root)  # no move_mask.npy / system_meta.json
+            with self.assertRaisesRegex(SafetyError, "move_mask.npy and system_meta.json"):
+                pack_dataset_archive(dataset, root / "x.zip", dedupe=True)
+
+    def test_materialize_degrades_gracefully_without_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = write_canonical_dataset(root)
+            payload = materialize_dataset(dataset, root / "materialized")
+            self.assertTrue(any("move_mask.npy" in w for w in payload["warnings"]))
+            self.assertTrue(any("system_meta.json" in w for w in payload["warnings"]))
+            self.assertTrue((root / "materialized" / "train.extxyz").is_file())
+
+    def test_materialize_refuses_overwrite_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset, _ = write_materializable_dataset(root)
+            materialize_dataset(dataset)
+            with self.assertRaisesRegex(SafetyError, "Refusing to overwrite"):
+                materialize_dataset(dataset)
+            materialize_dataset(dataset, force=True)
+
+
+def write_mapped_leaf_dataset(root: Path) -> Path:
+    """The `iface-mapped-collect` / leaf-heritage layout: leaf_manifest.json
+    at the MACE-side root, a second one under deepmd/, and no move_mask.npy /
+    system_meta.json sidecars (those are `iface collect`-only)."""
+
+    dataset = root / "datasets" / "canonical"
+    dataset.mkdir(parents=True)
+    for split in ("train", "valid", "test"):
+        (dataset / f"{split}.extxyz").write_text(
+            "1\nProperties=species:S:1:pos:R:3 REF_energy=-1.0\nSi 0.0 0.0 0.0\n", encoding="utf-8"
+        )
+    (dataset / "leaf_manifest.csv").write_text("outcar,status\n/a/OUTCAR,OK\n", encoding="utf-8")
+    (dataset / "leaf_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "method": "leaf-heritage-collector",
+                "engine": "mace",
+                "frame_counts": {"train": 8, "valid": 1, "test": 1},
+                "ratios": [0.8, 0.1, 0.1],
+                "stride": 5,
+                "split_mode": "heritage",
+            }
+        ),
+        encoding="utf-8",
+    )
+    deepmd = dataset / "deepmd"
+    system = deepmd / "train" / "interface" / "300K" / "sys1"
+    set_dir = system / "set.000"
+    set_dir.mkdir(parents=True)
+    (system / "type.raw").write_text("0\n", encoding="utf-8")
+    (system / "type_map.raw").write_text("Si\n", encoding="utf-8")
+    for name in ("coord", "box", "energy", "force"):
+        np.save(set_dir / f"{name}.npy", np.zeros((1, 3)))
+    (system / "heritage.json").write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+    (deepmd / "leaf_manifest.csv").write_text("outcar,status\n/a/OUTCAR,OK\n", encoding="utf-8")
+    (deepmd / "leaf_manifest.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "method": "leaf-heritage-collector", "engine": "deepmd", "type_map": ["Si"]}
+        ),
+        encoding="utf-8",
+    )
+    return dataset
+
+
+class MappedLeafDatasetArchiveTests(unittest.TestCase):
+    def test_mirrors_leaf_heritage_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = write_mapped_leaf_dataset(root)
+            result = pack_dataset_archive(dataset, root / "backup" / "periodic.zip")
+            self.assertEqual(result["dedupe"], False)
+            self.assertTrue(verify_package(Path(result["archive"]))["valid"])
+            with zipfile.ZipFile(Path(result["archive"])) as handle:
+                names = handle.namelist()
+            self.assertIn("periodic/data/leaf_manifest.json", names)
+            self.assertIn("periodic/data/deepmd/leaf_manifest.json", names)
+            self.assertIn(
+                "periodic/data/deepmd/train/interface/300K/sys1/set.000/coord.npy", names
+            )
+            self.assertIn("periodic/data/train.extxyz", names)
+
+    def test_dedupe_refuses_leaf_heritage_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = write_mapped_leaf_dataset(root)
+            with self.assertRaisesRegex(ConfigurationError, "written by 'iface collect'"):
+                pack_dataset_archive(dataset, root / "x.zip", dedupe=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -342,8 +550,15 @@ class PackagingGuardrailTests(unittest.TestCase):
         self.assertEqual(args.package_command, "huggingface")
         self.assertTrue(args.zip)
 
-        args = parser.parse_args(["package", "dataset-archive", "datasets/canonical", "out.zip"])
+        args = parser.parse_args(
+            ["package", "dataset-archive", "datasets/canonical", "out.zip", "--dedupe"]
+        )
         self.assertEqual(args.package_command, "dataset-archive")
+        self.assertTrue(args.dedupe)
+
+        args = parser.parse_args(["package", "materialize", "datasets/canonical"])
+        self.assertEqual(args.package_command, "materialize")
+        self.assertIsNone(args.output)
 
         args = parser.parse_args(["package", "verify", "some.zip"])
         self.assertEqual(args.package_command, "verify")
@@ -352,6 +567,119 @@ class PackagingGuardrailTests(unittest.TestCase):
             ["committee", "collect", "models/deepmd/dpa2", "out", "--engine", "deepmd"]
         )
         self.assertEqual(args.engine, "deepmd")
+
+        args = parser.parse_args(
+            ["package", "campaign", "--repo-prefix", "myorg/sintin", "--tag", "v1", "--dedupe"]
+        )
+        self.assertEqual(args.package_command, "campaign")
+        self.assertEqual(args.repo_prefix, "myorg/sintin")
+        self.assertTrue(args.dedupe)
+
+
+# --------------------------------------------------------------------------- #
+# iface package campaign: everything a campaign has, in one call
+# --------------------------------------------------------------------------- #
+def _write_full_campaign_tree(root: Path) -> Path:
+    """A campaign.yaml plus the mace_committee_520eV/{base,ft} and
+    models/deepmd/<arch> trees `iface mlip-progress`/`iface train` already use,
+    and a plain 'iface collect'-flavored canonical dataset."""
+
+    campaign_path = write_campaign(
+        root,
+        mace={"enabled": True},
+        deepmd={"enabled": True, "backend": "pytorch", "architectures": ["dpa2"]},
+    )
+
+    mace_root = root / "models" / "mace_committee_520eV"
+    for base in ("mace_committee", "mace_finetune_committee"):
+        for seed in (0, 211, 307, 419):
+            model_dir = mace_root / base / f"seed_{seed}" / "mace_model"
+            model_dir.mkdir(parents=True)
+            (model_dir / "sintin_mace_stagetwo.model").write_bytes(f"model-{base}-{seed}".encode())
+
+    dpa2 = root / "models" / "deepmd" / "dpa2"
+    for index in range(4):
+        model_dir = dpa2 / f"model_{index:03d}"
+        model_dir.mkdir(parents=True)
+        (model_dir / "frozen_model.pth").write_bytes(f"frozen-{index}".encode())
+        (model_dir / "input.json").write_text(
+            json.dumps({"model": {"type_map": ["Si", "N"]}, "training": {"numb_steps": 100}}),
+            encoding="utf-8",
+        )
+    (root / "models" / "deepmd" / "ensemble_manifest.json").write_text(
+        json.dumps(
+            {
+                "engine": "deepmd",
+                "backend": "pytorch",
+                "architectures": ["dpa2"],
+                "models": [{"architecture": "dpa2", "index": i, "seed": 11 + 12 * i} for i in range(4)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    write_canonical_dataset(root)
+    return campaign_path
+
+
+class PackageCampaignTests(unittest.TestCase):
+    def test_collects_and_packages_every_committee_plus_dataset(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = load_campaign(_write_full_campaign_tree(root))
+
+            payload = pack_campaign(campaign, repo_prefix="myorg/sintin", tag="v1")
+
+            self.assertEqual(payload["errors"], [])
+            self.assertEqual(payload["skipped"], [])
+            self.assertIsNotNone(payload["dataset_archive"])
+            components = {entry["component"] for entry in payload["committees"]}
+            self.assertEqual(components, {"mace", "mace-ft", "dpa2"})
+            for entry in payload["committees"]:
+                self.assertTrue(verify_committee_bundle(Path(entry["bundle"]["bundle"]))["valid"])
+                self.assertEqual(entry["huggingface"]["repo_id"], f"myorg/sintin-{entry['component']}")
+                self.assertTrue(Path(entry["huggingface"]["output"], "README.md").is_file())
+            self.assertTrue(verify_package(Path(payload["dataset_archive"]["archive"]))["valid"])
+
+    def test_missing_pieces_are_skipped_not_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = load_campaign(write_campaign(root, mace={"enabled": True}))
+            # No mace_committee_520eV/, no datasets/canonical/, deepmd disabled.
+            payload = pack_campaign(campaign)
+            self.assertEqual(payload["committees"], [])
+            self.assertEqual(payload["errors"], [])
+            steps = {row["step"] for row in payload["skipped"]}
+            self.assertIn("dataset_archive", steps)
+            self.assertIn("mace_committee", steps)
+            self.assertIn("mace_finetune_committee", steps)
+
+    def test_rerun_with_same_tag_reports_immutability_errors_not_corruption(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = load_campaign(_write_full_campaign_tree(root))
+            first = pack_campaign(campaign, tag="v1", include_huggingface=False)
+            self.assertEqual(first["errors"], [])
+
+            second = pack_campaign(campaign, tag="v1", include_huggingface=False)
+            self.assertEqual(len(second["errors"]), 4)  # dataset + 2 mace + 1 deepmd
+            for row in second["errors"]:
+                self.assertRegex(row["detail"], "already exists")
+            # the original bundles must be untouched
+            self.assertTrue(verify_package(Path(first["dataset_archive"]["archive"]))["valid"])
+
+    def test_via_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_full_campaign_tree(root)
+            parser = build_parser()
+            args = parser.parse_args(["package", "campaign", "-c", str(root / "campaign.yaml")])
+            from interfaceforge.cli import cmd_package
+
+            exit_code = cmd_package(args)
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((root / "packaged" / "backups").is_dir())
+            self.assertTrue((root / "packaged" / "hf").is_dir())
 
 
 if __name__ == "__main__":

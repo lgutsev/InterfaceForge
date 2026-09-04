@@ -19,6 +19,47 @@ portable, checksummed artifact:
 huggingface` stops at a ready-to-push directory; you run `hf upload` yourself.
 `huggingface_hub` is not a dependency.
 
+## Everything a campaign has, in one command
+
+`iface package campaign` runs collect + package for every committee the
+campaign has, plus the dataset archive, instead of one `committee collect` /
+`package huggingface` pair per committee:
+
+```bash
+iface package campaign -c campaign.yaml --repo-prefix myorg/sintin --tag v1
+```
+
+It looks in the same places the rest of InterfaceForge already writes to or
+reads from, and reports (never fails on) whatever isn't there:
+
+- the canonical dataset at `<campaign>/datasets/canonical` (`--dataset-root`
+  to override) — works for both an `iface collect` dataset and an
+  `iface-mapped-collect` / leaf-heritage one (see below);
+- a MACE base and/or fine-tune committee at
+  `<campaign>/models/mace_committee_520eV/{mace_committee,mace_finetune_committee}`
+  (`--mace-committee-root` to override — the same default `iface mlip-progress`
+  uses);
+- a DeePMD committee per architecture in `models.deepmd.architectures`, at
+  `<campaign>/models/deepmd/<arch>`, when `models.deepmd.enabled`.
+
+Everything lands under `<campaign>/packaged/` (`--output-root` to move it):
+`packaged/backups/<name>_dataset<tag>.zip`,
+`packaged/stored_models/<name>_<component><tag>/` (+ `.zip`), and
+`packaged/hf/<name>_<component><tag>/`. `--repo-prefix myorg/sintin` names the
+Hub repo ids `myorg/sintin-mace`, `myorg/sintin-mace-ft`,
+`myorg/sintin-<deepmd-arch>`; omit it to leave them unset in the cards.
+`--tag v1` distinguishes re-runs, since committee bundles are immutable —
+re-running with the same tag reports "already exists" per step in `errors`
+rather than silently skipping or overwriting (the dataset archive and HF
+packages accept `--force`; collected committee bundles never do). One
+component failing doesn't stop the rest: check `skipped` (nothing there) and
+`errors` (something there) in the JSON output, and the command's exit code is
+1 if `errors` is non-empty.
+
+Other flags: `--dedupe` (dataset archive only, see below), `--no-huggingface`
+(collect committees but skip the Hugging Face step), `--no-dataset-archive`,
+`--expected-members` (default 4), `--license`.
+
 ## Dataset archive (cold storage / reuse)
 
 ```bash
@@ -50,6 +91,61 @@ and DeePMD `dataset_root` at the restored `data/` and run `iface train`.
 Options: `--no-extxyz` keeps only the DeePMD NPY tree; `--compression stored`
 skips compression for very large datasets; `--force` overwrites an existing
 archive. POTCAR and OUTCAR files are never included.
+
+Both `iface collect` datasets (a single `manifest.json`) and
+`iface-mapped-collect` / leaf-heritage datasets (`leaf_manifest.json` at the
+root plus a second one under `deepmd/` — e.g. the periodic SiN/TiN/TiO
+example) are recognized and mirror-archived the same way; the archive's
+`interfaceforge_manifest.json` records which (`dataset_flavor`). `--dedupe`
+currently requires the `iface collect` flavor (see below).
+
+### Storing the frames once (`--dedupe`)
+
+By default the archive **mirrors** `iface collect`'s output exactly: it
+contains both `*.extxyz` and the DeePMD NPY tree, i.e. the same
+positions/forces/energies twice, once per format -- that's what `iface
+collect` already writes to disk, and mirroring it keeps "restore = unzip"
+exact. `--dedupe` stores the numeric frame data **once**:
+
+```bash
+iface package dataset-archive datasets/canonical backups/sintin_dataset_v1.zip --dedupe
+```
+
+Only the DeePMD NPY tree (full float64) goes in the archive; `*.extxyz` is
+dropped. The two formats are not actually redundant -- ASE's extxyz writer
+rounds positions/forces to about 8 decimal places, so extxyz can't losslessly
+regenerate the DeePMD side, and prior to this feature the DeePMD side didn't
+record which atoms were frozen or which classification a frame belonged to.
+`iface collect` therefore also writes `move_mask.npy` and `system_meta.json`
+next to each system's `set.000/` (siblings of `type.raw`, outside the
+directory DeePMD itself reads), so the DeePMD tree alone is now a complete
+record. `--dedupe` **requires** those sidecars in every system and refuses
+with a clear error if an older dataset is missing them.
+
+Restore a deduped archive, then regenerate the extxyz side before MACE
+training (DeePMD training can use `data/deepmd/` as-is, no materialization
+needed):
+
+```bash
+unzip backups/sintin_dataset_v1.zip -d restored
+iface package materialize restored/sintin_dataset_v1/data
+```
+
+`materialize` reads the NPY arrays plus `move_mask.npy` / `system_meta.json` /
+`frame_map.csv`, and writes `{train,valid,test}.extxyz` with a float formatter
+that round-trips exactly (Python's `repr`, not ASE's ~8-decimal default writer).
+Every regenerated frame is then read back with ASE and checked against the
+source arrays -- position, force, cell, energy, and the reconstructed
+constraint mask -- before anything is published; a mismatch raises rather than
+writing a silently wrong file. Pointed at an older DeePMD-only export that
+predates the sidecars, it still works: missing `move_mask.npy` degrades to
+"every atom mobile" and missing `system_meta.json` to "unclassified", each
+noted in the returned `warnings`, matching `iface collect`'s own fallback
+behavior for unrecoverable constraints.
+
+`materialize` also works standalone (not only on a restored `--dedupe`
+archive) against any canonical dataset directory that has a `deepmd/` tree,
+e.g. to backfill extxyz for a DeePMD-only export.
 
 ## Collecting a DeePMD committee
 

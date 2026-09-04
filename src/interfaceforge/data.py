@@ -421,7 +421,23 @@ def _write_deepmd_system(
     source: SourceTrajectory,
     frames: Sequence[Frame],
     type_map: Sequence[str],
+    *,
+    kind: str = "unclassified",
+    tebeg_k: float | None = None,
+    high_temperature: bool = False,
+    frame_metadata: Sequence[dict[str, Any]] | None = None,
 ) -> Path:
+    """Write one DeePMD system directory.
+
+    Alongside the ``set.000`` arrays DeePMD itself reads, this also writes
+    ``move_mask.npy`` and ``system_meta.json`` at the system root (siblings of
+    ``type.raw`` / ``type_map.raw``, outside ``set.000`` so ``dp train`` never
+    sees them). They carry exactly the constraint-mask and classification
+    metadata that would otherwise exist only in the synchronized extxyz files,
+    so a DeePMD-only export is a complete, lossless record of the same frames
+    and ``iface package materialize`` can regenerate the extxyz side from it.
+    """
+
     system = root / source.run_id
     set_dir = system / "set.000"
     set_dir.mkdir(parents=True, exist_ok=False)
@@ -438,11 +454,39 @@ def _write_deepmd_system(
     np.save(set_dir / "force.npy", np.asarray([frame.forces.reshape(-1) for frame in frames]))
     if any(frame.virial is not None for frame in frames):
         np.save(set_dir / "virial.npy", np.asarray([frame.virial.reshape(-1) for frame in frames]))
+    np.save(system / "move_mask.npy", np.asarray([frame.move_mask for frame in frames], dtype=np.int8))
+    (system / "system_meta.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": source.run_id,
+                "category": source.category,
+                "group": source.group,
+                "kind": kind,
+                "tebeg_k": tebeg_k,
+                "high_temperature": high_temperature,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    meta = frame_metadata if frame_metadata is not None else [{} for _ in frames]
     with (system / "frame_map.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["local_frame", "source_frame", "source_path"])
-        for index, frame in enumerate(frames):
-            writer.writerow([index, frame.source_index, str(source.path)])
+        writer.writerow(
+            ["local_frame", "source_frame", "source_path", "min_coordination_number", "mean_coordination_number"]
+        )
+        for index, (frame, extra) in enumerate(zip(frames, meta, strict=True)):
+            writer.writerow(
+                [
+                    index,
+                    frame.source_index,
+                    str(source.path),
+                    extra.get("min_coordination_number"),
+                    extra.get("mean_coordination_number"),
+                ]
+            )
     return system
 
 
@@ -545,8 +589,12 @@ def collect_dataset(
             if not split_frames:
                 continue
             record.split_counts[split] = len(split_frames)
+            frame_metadata: list[dict[str, Any]] = []
             for frame in split_frames:
                 min_cn, mean_cn = _coordination_stats(frame.atoms)
+                frame_metadata.append(
+                    {"min_coordination_number": min_cn, "mean_coordination_number": mean_cn}
+                )
                 _write_extxyz_frame(
                     extxyz[split],
                     frame,
@@ -575,7 +623,16 @@ def collect_dataset(
                         "mean_coordination_number": mean_cn,
                     }
                 )
-            _write_deepmd_system(deepmd[split], source_trajectory, split_frames, type_map)
+            _write_deepmd_system(
+                deepmd[split],
+                source_trajectory,
+                split_frames,
+                type_map,
+                kind=kind,
+                tebeg_k=tebeg_k,
+                high_temperature=high_temperature,
+                frame_metadata=frame_metadata,
+            )
         records.append(record)
 
     if not global_frame_rows:

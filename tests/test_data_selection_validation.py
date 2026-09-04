@@ -151,6 +151,46 @@ class ConstraintSourceTests(unittest.TestCase):
             self.assertEqual(frame_rows[0]["high_temperature"], "False")
             self.assertEqual(frame_rows[0]["min_coordination_number"], "")
 
+    def test_collect_dataset_writes_deepmd_sidecars(self) -> None:
+        """The DeePMD tree gets move_mask.npy / system_meta.json / an extended
+        frame_map.csv alongside the set.000 arrays, so it is a complete,
+        lossless record of the same frames the extxyz side carries -- the
+        prerequisite for `iface package dataset-archive --dedupe`."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = load_campaign(write_campaign(root))
+            source_root = root / "vasp_runs" / "run_a"
+            source_root.mkdir(parents=True)
+            (source_root / "OUTCAR").write_text("", encoding="utf-8")
+            (source_root / "POSCAR").write_text("", encoding="utf-8")
+
+            with patch.object(data_module, "_ase_io", side_effect=_fake_ase_io):
+                payload = collect_dataset(
+                    campaign,
+                    source_root=root / "vasp_runs",
+                    output_root=root / "canonical",
+                )
+
+            deepmd_root = Path(payload["output_root"]) / "deepmd"
+            systems = sorted({p.parent for p in deepmd_root.rglob("type.raw")})
+            self.assertEqual(len(systems), 1)
+            system = systems[0]
+
+            move_mask = np.load(system / "move_mask.npy")
+            self.assertEqual(move_mask.shape, (1, 1))
+            self.assertTrue(bool(move_mask[0, 0]))  # no constraints on the fake atom -> mobile
+
+            meta = json.loads((system / "system_meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["kind"], "unclassified")
+            self.assertIsNone(meta["tebeg_k"])
+            self.assertFalse(meta["high_temperature"])
+
+            with (system / "frame_map.csv").open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["min_coordination_number"], "")
+            self.assertEqual(rows[0]["mean_coordination_number"], "")
+
 
 class RunIdCollisionTests(unittest.TestCase):
     def test_colliding_sanitized_names_get_unique_run_ids(self) -> None:
