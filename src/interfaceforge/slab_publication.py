@@ -338,6 +338,10 @@ def _run_sumo(
     if not executable:
         raise DependencyError("sumo-dosplot was not found on PATH")
     data_dir = case.path / "publication_dos_data"
+    if data_dir.is_symlink():
+        raise SafetyError(
+            f"{case.name}: refusing to use symlinked SUMO output directory {data_dir.name}"
+        )
     data_dir.mkdir(exist_ok=True)
     # These files are generated exclusively by this workflow. Remove earlier
     # malformed or differently selected SUMO output before regenerating it so
@@ -351,9 +355,9 @@ def _run_sumo(
     )
     command = [
         executable,
+        "--filename",
+        str((case.path / "vasprun.xml").resolve()),
         "--no-shift",
-        "--directory",
-        str(data_dir),
         "--format",
         "pdf",
         "--elements",
@@ -367,7 +371,10 @@ def _run_sumo(
     with log_path.open("w", encoding="utf-8") as log:
         result = subprocess.run(
             command,
-            cwd=case.path,
+            # The VASP calculation directory is input-only.  Keeping SUMO's
+            # cwd inside this owned directory prevents dos.pdf or raw data
+            # from landing beside restart files.
+            cwd=data_dir,
             stdout=log,
             stderr=subprocess.STDOUT,
             check=False,
@@ -378,12 +385,6 @@ def _run_sumo(
             f"sumo-dosplot failed for {case.name} with exit code {result.returncode}; "
             f"see {log_path.name}\n--- log tail ---\n{log_tail}"
         )
-    # Some sumo versions write the *_dos.dat / dos.pdf next to the vasprun.xml
-    # (cwd) instead of into --directory; consolidate them into data_dir.
-    for produced in list(case.path.glob("*_dos.dat")) + list(case.path.glob("dos.*")):
-        target = data_dir / produced.name
-        if not target.exists():
-            shutil.move(str(produced), str(target))
     if not any(data_dir.glob("*_dos.dat")):
         raise SafetyError(
             f"sumo-dosplot produced no *_dos.dat files for {case.name} in {data_dir.name}; "

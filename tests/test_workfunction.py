@@ -5,7 +5,28 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from interfaceforge.errors import SafetyError
+from interfaceforge.workfunction import _safe_output_path
+
 _HAS_ASE = importlib.util.find_spec("ase") is not None
+
+
+class WorkFunctionSafetyTests(unittest.TestCase):
+    def test_refuses_vasp_output_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(SafetyError, "protected VASP file"):
+                _safe_output_path(root / "WAVECAR", inputs=())
+
+    def test_refuses_symlinked_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target.dat"
+            target.write_text("sentinel", encoding="utf-8")
+            link = root / "locpot.dat"
+            link.symlink_to(target)
+            with self.assertRaisesRegex(SafetyError, "symlinked output"):
+                _safe_output_path(link, inputs=())
 
 
 def _write_locpot(path: Path, *, cell: list[list[float]], value: float) -> None:

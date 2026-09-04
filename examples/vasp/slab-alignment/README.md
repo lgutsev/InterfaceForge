@@ -31,7 +31,14 @@ electronic-structure file no longer prevents the LOCPOT flatness decision.
   the root;
 - `locpot.dat`, an annotated `vacuum_profile.png`, and a simpler
   work-function-style `Workfunction.png` in every analyzed child;
-- `sumo_dosplot.log` when `--run-sumo` is requested.
+- `sumo_dosplot.log` and a dedicated `sumo_dos_data/` directory when
+  `--run-sumo` is requested.
+
+This is a post-processing command: it never runs VASP and never writes
+`INCAR`, `POSCAR`, `CONTCAR`, `KPOINTS`, `POTCAR`, `WAVECAR`, `CHGCAR`,
+`LOCPOT`, `OUTCAR`, `DOSCAR`, or `vasprun.xml`. SUMO receives the source
+`vasprun.xml` with `--filename` and is executed from `sumo_dos_data/`, so its
+generated files cannot land beside VASP restart files.
 
 The audit recognizes the expected sawtooth discontinuity introduced by
 VASP's dipole correction. Each plot highlights only the configured physical
@@ -49,6 +56,21 @@ ever overwritten:
   `RELAUNCH_REVIEW_REQUIRED` and a proposed `INCAR.dipole_fix`;
 - `FAILED_ANALYSIS` writes `LOCPOT_AUDIT_FAILED` because a safe proposal could
   not be generated.
+
+The proposed `INCAR.dipole_fix` is a fresh static calculation (`NSW=0`,
+`IBRION=-1`, `ISTART=0`, `ICHARG=2`) and therefore ignores potentially stale
+`WAVECAR` and `CHGCAR` files. It also sets `PREC=Accurate`, `AMIN=0.01`, `NELM=200`, and
+`EDIFF=1E-6` for the slower charge redistribution that can accompany
+`LDIPOL`; enables `LVHAR` and VASP 6.4.3+'s `LVACPOTAV` field-free vacuum
+analysis; and requests projected DOS with `LORBIT=11`. The original `INCAR`
+is never replaced automatically.
+
+When `LVACPOTAV` output is present, the audit records VASP's upper and lower
+vacuum levels and cross-checks the selected value against the independently
+fitted LOCPOT plateau. VASP warnings about a missing field-free region or
+excess vacuum charge trigger manual review. If no field-free region exists,
+the workflow recommends increasing the vacuum and deliberately does not write
+an `INCAR.dipole_fix`; changing `DIPOL` alone cannot repair that geometry.
 
 Use `--no-write-dipole-fixes` to run the same audit and marker generation
 without creating proposed INCAR files.
@@ -170,6 +192,11 @@ pristine and passivated Pb/I/BPDCA PDOS plus the vacuum-aligned VBM/CBM diagram
 for each termination. It also writes `publication_band_edges.tsv` and a JSON
 manifest recording the exact folders, atom selections, and interpretation
 guard. Positive band-edge deltas mean movement upward, toward vacuum.
+
+The publication launcher is post-processing only as well. SUMO runs from
+each calculation's `publication_dos_data/` directory with `vasprun.xml` as an
+explicit absolute input. Existing VASP files are never moved, renamed,
+deleted, or replaced.
 
 To remake figures from existing `publication_dos_data` without rerunning SUMO:
 

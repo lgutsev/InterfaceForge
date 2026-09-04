@@ -5,10 +5,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
 from interfaceforge.slab_alignment import (
+    _run_sumo,
     add_alignment_deltas,
     analyze_profile,
     analyze_slab_alignment,
@@ -16,6 +18,8 @@ from interfaceforge.slab_alignment import (
     ionic_center_fraction,
     parse_poscar_lines,
     read_locpot,
+    vacuum_potentials_from_outcar,
+    vacuum_warning_from_outcar,
     write_dipole_preview,
 )
 
@@ -76,6 +80,25 @@ class SlabAlignmentTests(unittest.TestCase):
         self.assertGreater(center, 0.25)
         self.assertLess(center, 0.65)
         self.assertGreater(compactness, 0.0)
+        self.assertEqual(missing, [])
+
+    def test_dipole_center_is_mass_mean_of_unwrapped_slab(self) -> None:
+        structure = parse_poscar_lines(
+            """Spread slab
+1.0
+10 0 0
+0 10 0
+0 0 40
+H
+3
+Direct
+0.5 0.5 0.05
+0.5 0.5 0.15
+0.5 0.5 0.45
+""".splitlines()
+        )
+        center, _compactness, missing = ionic_center_fraction(structure)
+        self.assertAlmostEqual(center, (0.05 + 0.15 + 0.45) / 3.0)
         self.assertEqual(missing, [])
 
     def test_raw_locpot_has_no_volume_scaling(self) -> None:
@@ -199,6 +222,29 @@ Direct
             result = band_edges_from_vasprun(path)
         self.assertEqual(result, (0.2, -1.0, 1.5, 2.5))
 
+    def test_vasp_builtin_vacuum_parser(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            outcar = Path(temporary) / "OUTCAR"
+            outcar.write_text(
+                "vacuum level on the upper side and lower side of the slab"
+                "     5.408000     4.759000\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(vacuum_potentials_from_outcar(outcar), (5.408, 4.759))
+
+    def test_vasp_builtin_vacuum_warning_parser(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            outcar = Path(temporary) / "OUTCAR"
+            outcar.write_text(
+                "Did not find any points to average over\n"
+                "The minimum charge density times volume of the cell along the axis\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                vacuum_warning_from_outcar(outcar),
+                "NO_FIELD_FREE_REGION;VACUUM_CHARGE_DENSITY_TOO_LARGE",
+            )
+
     def test_alignment_sign(self) -> None:
         rows = [
             {
@@ -232,6 +278,39 @@ Direct
             self.assertIn("LDIPOL = .TRUE.", generated)
             self.assertIn("IDIPOL = 3", generated)
             self.assertIn("DIPOL  = 0.250000 0.750000 0.625000", generated)
+            self.assertIn("ISTART = 0", generated)
+            self.assertIn("ICHARG = 2", generated)
+            self.assertIn("AMIN   = 0.01", generated)
+            self.assertIn("PREC   = Accurate", generated)
+            self.assertIn("LVACPOTAV = .TRUE.", generated)
+            self.assertIn("NSW    = 0", generated)
+
+    def test_alignment_sumo_isolated_from_vasp_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            calc = root / "calc"
+            calc.mkdir()
+            protected = {
+                name: f"sentinel-{name}\n"
+                for name in ("INCAR", "POSCAR", "WAVECAR", "CHGCAR", "LOCPOT", "OUTCAR", "vasprun.xml")
+            }
+            for name, contents in protected.items():
+                (calc / name).write_text(contents, encoding="utf-8")
+            fake = root / "sumo-dosplot"
+            fake.write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > invocation.txt\nprintf '0 1\\n1 2\\n' > total_dos.dat\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            with mock.patch("interfaceforge.slab_alignment.shutil.which", return_value=str(fake)):
+                self.assertEqual(_run_sumo(calc), "OK")
+            for name, contents in protected.items():
+                self.assertEqual((calc / name).read_text(encoding="utf-8"), contents)
+            self.assertFalse((calc / "total_dos.dat").exists())
+            self.assertTrue((calc / "sumo_dos_data" / "total_dos.dat").is_file())
+            invocation = (calc / "sumo_dos_data" / "invocation.txt").read_text(encoding="utf-8")
+            self.assertIn("--filename", invocation)
+            self.assertIn(str((calc / "vasprun.xml").resolve()), invocation)
 
     def test_two_folder_campaign(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -292,6 +371,38 @@ Direct
             self.assertTrue((case / "INCAR.dipole_fix").is_file())
             self.assertFalse((case / "LOCPOT_FLATNESS_OK").exists())
             self.assertIn("MAPI_MAI_Surf_BPDCA", (root / "relaunch_review_queue.txt").read_text())
+
+    def test_missing_field_free_region_requires_vacuum_not_dipole_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            case = root / "MAPI_MAI_Surf_BPDCA"
+            _write_calculation(case, 5.2, -0.9, 1.1)
+            (case / "OUTCAR").write_text(
+                " E-fermi : 0.000000 eV\n"
+                "Did not find any points to average over, which means that no vacuum\n"
+                "field-free region was found.\n",
+                encoding="utf-8",
+            )
+            config_path = root / "slab_alignment.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "side": "high-z",
+                        "references": [
+                            {"prefix": "MAPI_MAI_Surf", "reference": "MAPI_MAI_Surf"}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = analyze_slab_alignment(root, config=config_path)
+            row = payload["rows"][0]
+            self.assertEqual(row["flatness_status"], "SUSPECT_VASP_VACUUM")
+            self.assertEqual(row["audit_action"], "REVIEW_INCREASE_VACUUM")
+            self.assertTrue((case / "RELAUNCH_REVIEW_REQUIRED").is_file())
+            self.assertFalse((case / "INCAR.dipole_fix").exists())
+            marker = (case / "RELAUNCH_REVIEW_REQUIRED").read_text(encoding="utf-8")
+            self.assertIn("changing DIPOL alone is not a valid fix", marker)
 
     def test_flatness_audit_survives_missing_band_edge_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

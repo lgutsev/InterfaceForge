@@ -17,19 +17,37 @@ environment), prefer ``iface vasp workfunction LOCPOT OUTCAR``
 tested and additionally writes a JSON summary. This script exists for the
 case where that environment is not present on the compute node.
 """
-from argparse import ArgumentParser
-import os
 import logging
+import os
 import re
 import sys
-import numpy as np
+from argparse import ArgumentParser
+
 import matplotlib
+import numpy as np
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from ase.calculators.vasp import VaspChargeDensity
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+VASP_PROTECTED_NAMES = {
+    "CHG", "CHGCAR", "CONTCAR", "DOSCAR", "EIGENVAL", "IBZKPT", "INCAR",
+    "KPOINTS", "LOCPOT", "OSZICAR", "OUTCAR", "PCDAT", "POSCAR", "POTCAR",
+    "PROCAR", "VASPRUN.XML", "WAVECAR", "WAVEDER", "XDATCAR",
+}
+
+
+def safe_output(path):
+    """Reject output names that could damage a VASP calculation or restart."""
+
+    if os.path.islink(path):
+        raise ValueError(f"Refusing to overwrite symlinked output: {path}")
+    if os.path.basename(path).upper() in VASP_PROTECTED_NAMES:
+        raise ValueError(f"Refusing to overwrite protected VASP file: {path}")
+    return os.path.realpath(path)
 
 
 def check_lvhar(incar="INCAR"):
@@ -68,10 +86,10 @@ def locpot_mean(fname="LOCPOT", axis="z", savefile="locpot.dat", outcar="OUTCAR"
             logger.warning("No E-fermi line found in OUTCAR. E-fermi set to 0.0eV")
             return None
         efermi = matches[-1]
-        logger.info("Found E-fermi = {}".format(efermi))
+        logger.info(f"Found E-fermi = {efermi}")
         return float(efermi)
 
-    logger.info("Loading LOCPOT file {}".format(fname))
+    logger.info(f"Loading LOCPOT file {fname}")
     locd = VaspChargeDensity(fname)
     cell = locd.atoms[0].cell
     latlens = np.linalg.norm(cell, axis=1)
@@ -85,13 +103,13 @@ def locpot_mean(fname="LOCPOT", axis="z", savefile="locpot.dat", outcar="OUTCAR"
     axes = tuple(index for index in (0, 1, 2) if index != iaxis)
 
     locpot = locd.chg[0]
-    logger.info("Calculating workfunction along {} axis".format(axis))
+    logger.info(f"Calculating workfunction along {axis} axis")
     mean = np.mean(locpot, axis=axes) * vol
 
     xvals = np.linspace(0, latlens[iaxis], locpot.shape[iaxis], endpoint=False)
 
     efermi = get_efermi(outcar)
-    logger.info("Saving raw data to {}".format(savefile))
+    logger.info(f"Saving raw data to {savefile}")
     if efermi is None:
         np.savetxt(
             savefile,
@@ -158,6 +176,13 @@ def parse_cml_arguments(argv=None):
 def main(argv=None):
     args = parse_cml_arguments(argv)
 
+    try:
+        args.write = safe_output(args.write)
+        args.output = safe_output(args.output)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return 2
+
     lvhar = check_lvhar(args.incar)
     if lvhar is False and not args.allow_missing_lvhar:
         logger.error(
@@ -183,7 +208,7 @@ def main(argv=None):
     if args.title:
         plt.title(args.title)
 
-    logger.info("Saving to {}".format(args.output))
+    logger.info(f"Saving to {args.output}")
     plt.savefig(args.output, dpi=args.dpi)
     return 0
 

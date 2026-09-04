@@ -88,6 +88,11 @@ OUTPUT_FIELDS = [
     "selected_correction_step_A",
     "selected_correction_step_eV",
     "selected_correction_step_width_A",
+    "vasp_vacuum_crosscheck",
+    "vasp_upper_vacuum_eV",
+    "vasp_lower_vacuum_eV",
+    "selected_minus_vasp_vacuum_eV",
+    "vasp_vacuum_warning",
     "low_vacuum_eV",
     "high_vacuum_eV",
     "high_minus_low_vacuum_eV",
@@ -113,6 +118,11 @@ AUDIT_FIELDS = [
     "selected_correction_step_A",
     "selected_correction_step_eV",
     "selected_correction_step_width_A",
+    "vasp_vacuum_crosscheck",
+    "vasp_upper_vacuum_eV",
+    "vasp_lower_vacuum_eV",
+    "selected_minus_vasp_vacuum_eV",
+    "vasp_vacuum_warning",
     "suggested_DIPOL_z",
     "compactness_R",
     "current_LDIPOL",
@@ -283,6 +293,39 @@ def efermi_from_outcar(path: str | Path) -> float:
     if not matches:
         raise SafetyError(f"E-fermi not found in {path}")
     return float(matches[-1])
+
+
+def vacuum_potentials_from_outcar(path: str | Path) -> tuple[float, float] | None:
+    """Return VASP's ``(upper, lower)`` field-free vacuum potentials.
+
+    VASP >= 6.4.3 writes this line when ``LVACPOTAV = .TRUE.``.  Older runs or
+    runs without that tag legitimately return ``None``.
+    """
+
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
+    number = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?)"
+    matches = re.findall(
+        rf"vacuum\s+level\s+on\s+the\s+upper\s+side\s+and\s+lower\s+side"
+        rf"\s+of\s+the\s+slab\s+{number}\s+{number}",
+        text,
+        flags=re.I,
+    )
+    if not matches:
+        return None
+    upper, lower = matches[-1]
+    return float(upper), float(lower)
+
+
+def vacuum_warning_from_outcar(path: str | Path) -> str:
+    """Return a compact LVACPOTAV warning classification, if present."""
+
+    text = Path(path).read_text(encoding="utf-8", errors="replace").lower()
+    warnings: list[str] = []
+    if "did not find any points to average over" in text:
+        warnings.append("NO_FIELD_FREE_REGION")
+    if "minimum charge density times volume" in text:
+        warnings.append("VACUUM_CHARGE_DENSITY_TOO_LARGE")
+    return ";".join(warnings)
 
 
 def band_edges_from_vasprun(path: str | Path) -> tuple[float, float, float, float]:
@@ -521,7 +564,13 @@ def analyze_profile(
 
 
 def ionic_center_fraction(structure: Structure) -> tuple[float, float, list[str]]:
-    """Return a periodic mass-weighted center suitable for VASP's DIPOL tag."""
+    """Return the unwrapped mass center suitable for VASP's ``DIPOL`` tag.
+
+    A circular mean is not an exact center of mass for a slab occupying a
+    substantial fraction of the cell.  Cut at the middle of the largest
+    atom-free gap, unwrap the contiguous slab, and then take the ordinary
+    mass-weighted mean before mapping it back into fractional coordinates.
+    """
 
     z_fraction = np.mod(structure.fractional[:, 2], 1.0)
     masses: list[float] = []
@@ -536,8 +585,14 @@ def ionic_center_fraction(structure: Structure) -> tuple[float, float, list[str]
     angles = 2 * np.pi * z_fraction
     cosine = np.sum(weights * np.cos(angles)) / np.sum(weights)
     sine = np.sum(weights * np.sin(angles)) / np.sum(weights)
-    center = float((np.arctan2(sine, cosine) % (2 * np.pi)) / (2 * np.pi))
     compactness = float(np.hypot(cosine, sine))
+    gap_start, _gap_end, gap_width = largest_periodic_gap(
+        structure.z_angstrom, structure.c_length
+    )
+    cut = (gap_start + 0.5 * gap_width) % structure.c_length
+    unwrapped = np.mod(structure.z_angstrom - cut, structure.c_length)
+    center_angstrom = (cut + float(np.average(unwrapped, weights=weights))) % structure.c_length
+    center = center_angstrom / structure.c_length
     return center, compactness, sorted(set(missing))
 
 
@@ -562,7 +617,12 @@ def parse_incar(path: str | Path) -> dict[str, Any]:
 
 
 def write_dipole_preview(calc_dir: str | Path, suggested_z: float) -> Path:
-    """Write INCAR.dipole_fix without modifying the calculation's INCAR."""
+    """Write a conservative static ``INCAR.dipole_fix`` without touching INCAR.
+
+    The preview starts from atomic charge densities so an obsolete WAVECAR or
+    CHGCAR cannot poison the restart.  The additional convergence settings
+    follow VASP's guidance for charge sloshing under ``LDIPOL``.
+    """
 
     directory = Path(calc_dir)
     source = directory / "INCAR"
@@ -571,14 +631,34 @@ def write_dipole_preview(calc_dir: str | Path, suggested_z: float) -> Path:
     x_value = current[0] if current and len(current) >= 3 else 0.5
     y_value = current[1] if current and len(current) >= 3 else 0.5
     replacements = {
+        "NSW": "NSW    = 0",
+        "IBRION": "IBRION = -1",
+        "ISTART": "ISTART = 0",
+        "ICHARG": "ICHARG = 2",
+        "ISYM": "ISYM   = 0",
+        "ALGO": "ALGO   = Normal",
+        "PREC": "PREC   = Accurate",
+        "EDIFF": "EDIFF  = 1E-6",
+        "NELM": "NELM   = 200",
+        "AMIN": "AMIN   = 0.01",
         "LDIPOL": "LDIPOL = .TRUE.",
         "IDIPOL": "IDIPOL = 3",
         "DIPOL": f"DIPOL  = {x_value:.6f} {y_value:.6f} {suggested_z:.6f}",
+        "LVHAR": "LVHAR  = .TRUE.",
+        "LVACPOTAV": "LVACPOTAV = .TRUE.",
+        "VACPOTFLAT": "VACPOTFLAT = 0.01",
+        "LORBIT": "LORBIT = 11",
+        "LWAVE": "LWAVE  = .FALSE.",
     }
     seen: set[str] = set()
     output: list[str] = []
     for line in lines:
-        match = re.match(r"^\s*(LDIPOL|IDIPOL|DIPOL)\s*=", line, flags=re.I)
+        match = re.match(
+            r"^\s*(NSW|IBRION|ISTART|ICHARG|ISYM|ALGO|PREC|EDIFF|NELM|AMIN|"
+            r"LDIPOL|IDIPOL|DIPOL|LVHAR|LVACPOTAV|VACPOTFLAT|LORBIT|LWAVE)\s*=",
+            line,
+            flags=re.I,
+        )
         if match:
             key = match.group(1).upper()
             output.append(replacements[key])
@@ -586,8 +666,14 @@ def write_dipole_preview(calc_dir: str | Path, suggested_z: float) -> Path:
         else:
             output.append(line)
     if seen != set(replacements):
-        output.extend(["", "# Dipole correction preview generated by InterfaceForge"])
-        for key in ("LDIPOL", "IDIPOL", "DIPOL"):
+        output.extend(
+            [
+                "",
+                "# Static dipole-recovery preview generated by InterfaceForge",
+                "# Fresh electronic start: ignores potentially stale WAVECAR/CHGCAR.",
+            ]
+        )
+        for key in replacements:
             if key not in seen:
                 output.append(replacements[key])
     destination = directory / "INCAR.dipole_fix"
@@ -608,6 +694,7 @@ def load_alignment_config(path: str | Path) -> dict[str, Any]:
         "swing_fail_eV": 0.10,
         "std_warn_eV": 0.02,
         "std_fail_eV": 0.05,
+        "vasp_vacuum_tolerance_eV": 0.05,
         "references": [
             {"prefix": "MAPI_MAI_Surf", "reference": "MAPI_MAI_Surf"},
             {"prefix": "MAPI_PbI2_Surf", "reference": "MAPI_PbI2_Surf"},
@@ -806,21 +893,47 @@ def _write_audit_markers(
         row["review_flag_path"] = str(marker)
         return
 
-    fix_path = write_dipole_preview(calc_dir, float(row["suggested_DIPOL_z"])) if write_fix else None
+    vasp_warning = str(row.get("vasp_vacuum_warning", ""))
+    no_field_free_region = "NO_FIELD_FREE_REGION" in vasp_warning
+    fix_path = (
+        write_dipole_preview(calc_dir, float(row["suggested_DIPOL_z"]))
+        if write_fix and not no_field_free_region
+        else None
+    )
     marker = calc_dir / REVIEW_MARKER
+    if no_field_free_region:
+        recommendation = (
+            "VASP found no field-free vacuum region. Increase the cell along the "
+            "surface normal before rerunning; changing DIPOL alone is not a valid fix."
+        )
+        action = "REVIEW_INCREASE_VACUUM"
+    elif "VACUUM_CHARGE_DENSITY_TOO_LARGE" in vasp_warning:
+        recommendation = (
+            "VASP detected appreciable vacuum charge density. Review vacuum thickness "
+            "and precision; the proposed static INCAR uses tighter electronic settings."
+        )
+        action = "REVIEW_VACUUM_OR_PRECISION"
+    else:
+        recommendation = (
+            "Review the proposed fresh static INCAR and the selected plateau before relaunch."
+        )
+        action = "REVIEW_PROPOSED_INCAR"
     marker.write_text(
-        "LOCPOT vacuum is not flat enough for automatic acceptance.\n"
+        "The selected vacuum reference requires review.\n"
         f"flatness_status: {flatness}\n"
         f"selected_side: {row.get('selected_side', '')}\n"
         f"selected_swing_eV: {row.get('selected_swing_eV', '')}\n"
         f"selected_std_eV: {row.get('selected_std_eV', '')}\n"
+        f"vasp_vacuum_crosscheck: {row.get('vasp_vacuum_crosscheck', '')}\n"
+        f"vasp_vacuum_warning: {vasp_warning}\n"
         f"suggested_DIPOL_z: {row.get('suggested_DIPOL_z', '')}\n"
         f"compactness_R: {row.get('compactness_R', '')}\n"
         f"proposed_incar: {fix_path or 'disabled'}\n"
+        f"recommendation: {recommendation}\n"
         "No calculation was submitted and INCAR was not modified.\n",
         encoding="utf-8",
     )
-    row["audit_action"] = "REVIEW_PROPOSED_INCAR"
+    row["audit_action"] = action
     row["relaunch_review_required"] = True
     row["dipole_fix_path"] = str(fix_path) if fix_path else ""
     row["review_flag_path"] = str(marker)
@@ -830,10 +943,19 @@ def _run_sumo(calc_dir: Path) -> str:
     executable = shutil.which("sumo-dosplot")
     if not executable:
         return "NOT_FOUND"
+    data_dir = calc_dir / "sumo_dos_data"
+    if data_dir.is_symlink():
+        return "UNSAFE_OUTPUT_DIRECTORY"
+    data_dir.mkdir(exist_ok=True)
     with (calc_dir / "sumo_dosplot.log").open("w", encoding="utf-8") as log:
         result = subprocess.run(
-            [executable],
-            cwd=calc_dir,
+            [
+                executable,
+                "--filename",
+                str((calc_dir / "vasprun.xml").resolve()),
+            ],
+            # Keep SUMO-generated files away from VASP inputs and restart data.
+            cwd=data_dir,
             stdout=log,
             stderr=subprocess.STDOUT,
             check=False,
@@ -861,6 +983,8 @@ def _analyze_folder(
         "review_flag_path": "",
         "band_edge_status": "NOT_ANALYZED",
         "selected_side": config["side"],
+        "vasp_vacuum_crosscheck": "NOT_AVAILABLE",
+        "vasp_vacuum_warning": "",
         "pdos_review_required": True,
         "sumo_status": "NOT_REQUESTED",
     }
@@ -907,6 +1031,39 @@ def _analyze_folder(
                 "current_DIPOL": incar["DIPOL"],
             }
         )
+        outcar_path = calc_dir / "OUTCAR"
+        if outcar_path.is_file():
+            builtin_vacuum = vacuum_potentials_from_outcar(outcar_path)
+            builtin_warning = vacuum_warning_from_outcar(outcar_path)
+            if builtin_warning:
+                row["vasp_vacuum_warning"] = builtin_warning
+                if selected_status == "OK":
+                    selected_status = "SUSPECT_VASP_VACUUM"
+            if builtin_vacuum is not None:
+                upper, lower = builtin_vacuum
+                builtin_selected = upper if config["side"] == "high-z" else lower
+                difference = selected.plateau_eV - builtin_selected
+                row.update(
+                    {
+                        "vasp_upper_vacuum_eV": upper,
+                        "vasp_lower_vacuum_eV": lower,
+                        "selected_minus_vasp_vacuum_eV": difference,
+                        "vasp_vacuum_crosscheck": (
+                            "AGREE"
+                            if abs(difference) <= float(config["vasp_vacuum_tolerance_eV"])
+                            else "DISAGREE"
+                        ),
+                    }
+                )
+                if row["vasp_vacuum_crosscheck"] == "DISAGREE" and selected_status == "OK":
+                    selected_status = "SUSPECT_VASP_CROSSCHECK"
+            row.update(
+                {
+                    "status": selected_status,
+                    "flatness_status": selected_status,
+                    "flat_enough": selected_status == "OK",
+                }
+            )
         if missing_mass:
             row["error"] = "Missing masses: " + ",".join(missing_mass)
         try:
@@ -1139,7 +1296,7 @@ def analyze_slab_alignment(
     add_alignment_deltas(rows)
     outputs = _write_outputs(root_path, rows, details)
     failures = sum(row["status"].startswith("FAILED") for row in rows)
-    suspects = sum(row["status"] == "SUSPECT_FLATNESS" for row in rows)
+    suspects = sum(str(row["status"]).startswith("SUSPECT") for row in rows)
     flat_enough = sum(row.get("flatness_status") == "OK" for row in rows)
     review_required = sum(bool(row.get("relaunch_review_required")) for row in rows)
     return {

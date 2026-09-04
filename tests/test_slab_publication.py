@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 
@@ -14,6 +15,7 @@ from interfaceforge.errors import SafetyError
 from interfaceforge.slab_alignment import largest_periodic_gap, parse_poscar_lines
 from interfaceforge.slab_publication import (
     _optional_sumo_curve,
+    _run_sumo,
     _selected_side_plot_window,
     _sumo_atom_selection,
     _sumo_energy_to_vacuum,
@@ -160,6 +162,44 @@ class SlabPublicationTests(unittest.TestCase):
             energy, density = read_sumo_curve(path)
         self.assertTrue(np.allclose(energy, [0, 1]))
         self.assertTrue(np.allclose(density, [3, 7]))
+
+    def test_publication_sumo_isolated_from_vasp_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            calc = root / "calc"
+            calc.mkdir()
+            protected = {
+                name: f"sentinel-{name}\n"
+                for name in ("INCAR", "POSCAR", "WAVECAR", "CHGCAR", "LOCPOT", "OUTCAR", "vasprun.xml")
+            }
+            for name, contents in protected.items():
+                (calc / name).write_text(contents, encoding="utf-8")
+            fake = root / "sumo-dosplot"
+            fake.write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > invocation.txt\nprintf '0 1\\n1 2\\n' > total_dos.dat\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            case = SimpleNamespace(
+                name="calc",
+                path=calc,
+                structure=parse_poscar_lines(PASSIVATED_POSCAR.splitlines()),
+            )
+            with mock.patch("interfaceforge.slab_publication.shutil.which", return_value=str(fake)):
+                data_dir = _run_sumo(
+                    case,
+                    framework_elements=["Pb", "I"],
+                    passivant_elements=["C", "N", "O", "Br", "H"],
+                    excess={"C": [2], "N": [2], "O": [1, 2], "Br": [1], "H": [2]},
+                    gaussian_eV=0.05,
+                )
+            for name, contents in protected.items():
+                self.assertEqual((calc / name).read_text(encoding="utf-8"), contents)
+            self.assertFalse((calc / "total_dos.dat").exists())
+            self.assertTrue((data_dir / "total_dos.dat").is_file())
+            invocation = (data_dir / "invocation.txt").read_text(encoding="utf-8")
+            self.assertIn("--filename", invocation)
+            self.assertIn(str((calc / "vasprun.xml").resolve()), invocation)
 
     def test_sumo_atom_selection_expands_framework_indices(self) -> None:
         structure = parse_poscar_lines(PASSIVATED_POSCAR.splitlines())

@@ -11,6 +11,40 @@ import numpy as np
 
 from .errors import DependencyError, SafetyError
 
+_VASP_PROTECTED_NAMES = {
+    "CHG",
+    "CHGCAR",
+    "CONTCAR",
+    "DOSCAR",
+    "EIGENVAL",
+    "IBZKPT",
+    "INCAR",
+    "KPOINTS",
+    "LOCPOT",
+    "OSZICAR",
+    "OUTCAR",
+    "PCDAT",
+    "POSCAR",
+    "POTCAR",
+    "PROCAR",
+    "VASPRUN.XML",
+    "WAVECAR",
+    "WAVEDER",
+    "XDATCAR",
+}
+
+
+def _safe_output_path(path: str | Path, *, inputs: tuple[Path, ...]) -> Path:
+    """Resolve an output path while protecting VASP inputs and restart files."""
+
+    candidate = Path(path)
+    if candidate.is_symlink():
+        raise SafetyError(f"Refusing to overwrite symlinked output: {candidate}")
+    output = candidate.resolve()
+    if output.name.upper() in _VASP_PROTECTED_NAMES or output in inputs:
+        raise SafetyError(f"Refusing to overwrite protected VASP file: {output}")
+    return output
+
 
 def _fermi_energy(outcar: Path) -> float:
     text = outcar.read_text(encoding="utf-8", errors="ignore")
@@ -39,6 +73,7 @@ def analyze_workfunction(
         ) from exc
     input_path = Path(locpot).resolve()
     outcar_path = Path(outcar).resolve()
+    protected_inputs = (input_path, outcar_path)
     axis_index = {"x": 0, "y": 1, "z": 2}[axis.lower()]
     density = VaspChargeDensity(str(input_path))
     cell = density.atoms[0].cell
@@ -57,7 +92,7 @@ def analyze_workfunction(
     work_function = vacuum - fermi
     maximum_index = int(np.argmax(potential))
 
-    data_path = Path(data_output).resolve()
+    data_path = _safe_output_path(data_output, inputs=protected_inputs)
     data_path.parent.mkdir(parents=True, exist_ok=True)
     np.savetxt(
         data_path,
@@ -70,6 +105,7 @@ def analyze_workfunction(
             import matplotlib.pyplot as plt
         except ModuleNotFoundError as exc:
             raise DependencyError("matplotlib is required for --plot-output") from exc
+        plot_path = _safe_output_path(plot_output, inputs=protected_inputs)
         figure, axes = plt.subplots(figsize=(8, 4.5))
         axes.plot(distance, shifted, color="#145c66", linewidth=1.5)
         axes.axhline(work_function, color="#b23a48", linestyle="--", label=f"vacuum − EF = {work_function:.3f} eV")
@@ -77,7 +113,7 @@ def analyze_workfunction(
         axes.grid(alpha=0.25)
         axes.legend()
         figure.tight_layout()
-        figure.savefig(Path(plot_output).resolve(), dpi=300)
+        figure.savefig(plot_path, dpi=300)
         plt.close(figure)
 
     summary = {
@@ -89,17 +125,18 @@ def analyze_workfunction(
         "work_function_ev": work_function,
         "vacuum_position_a": float(distance[maximum_index]),
         "data": str(data_path),
-        "plot": str(Path(plot_output).resolve()) if plot_output else None,
+        "plot": str(plot_path) if plot_output else None,
         "caution": (
             "The maximum planar potential is an estimator. Inspect the curve for a "
             "flat vacuum plateau and use dipole corrections where appropriate."
         ),
     }
     summary_path = (
-        Path(summary_output).resolve()
+        _safe_output_path(summary_output, inputs=protected_inputs)
         if summary_output
         else data_path.with_name("workfunction_summary.json")
     )
+    summary_path = _safe_output_path(summary_path, inputs=protected_inputs)
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     summary["summary"] = str(summary_path)
     return summary
