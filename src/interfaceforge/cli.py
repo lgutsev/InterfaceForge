@@ -56,6 +56,7 @@ from .mlff_interfaces import (
 from .mlip_compare import comparison_status, finalize_comparison, prepare_comparison
 from .packaging import (
     materialize_dataset,
+    pack_campaign,
     pack_dataset_archive,
     pack_huggingface,
     verify_package,
@@ -277,6 +278,23 @@ def cmd_package(args: argparse.Namespace) -> int:
         payload = materialize_dataset(
             args.dataset_root, args.output, force=args.force
         )
+    elif args.package_command == "campaign":
+        payload = pack_campaign(
+            _campaign(args),
+            output_root=args.output_root,
+            mace_committee_root=args.mace_committee_root,
+            dataset_root=args.dataset_root,
+            repo_prefix=args.repo_prefix,
+            license_id=args.license,
+            expected_members=args.expected_members,
+            dedupe=args.dedupe,
+            include_huggingface=not args.no_huggingface,
+            include_dataset_archive=not args.no_dataset_archive,
+            tag=args.tag,
+            force=args.force,
+        )
+        _json(payload)
+        return 0 if not payload["errors"] else 1
     else:
         payload = verify_package(args.path)
     _json(payload)
@@ -1447,6 +1465,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     package_materialize.add_argument("--force", action="store_true")
     package_materialize.set_defaults(func=cmd_package)
+
+    package_campaign = package_commands.add_parser(
+        "campaign",
+        help="Collect + package every committee a campaign has, plus the dataset archive, in one call",
+    )
+    add_campaign_option(package_campaign)
+    package_campaign.add_argument(
+        "--output-root", help="Default: <campaign>/packaged/{stored_models,hf,backups}/"
+    )
+    package_campaign.add_argument(
+        "--mace-committee-root",
+        help="Directory holding mace_committee/ and mace_finetune_committee/ "
+        "(default <campaign>/models/mace_committee_520eV, same default as 'iface mlip-progress')",
+    )
+    package_campaign.add_argument(
+        "--dataset-root", help="Default: <campaign>/datasets/canonical"
+    )
+    package_campaign.add_argument(
+        "--repo-prefix",
+        help="Hub repo id prefix, e.g. myorg/sintin -- becomes myorg/sintin-mace, "
+        "myorg/sintin-mace-ft, myorg/sintin-dpa2, ... Omit to leave repo ids unset.",
+    )
+    package_campaign.add_argument("--license", default="mit")
+    package_campaign.add_argument("--expected-members", type=int, default=4)
+    package_campaign.add_argument(
+        "--dedupe", action="store_true", help="Dataset archive: store the DeePMD NPY tree only"
+    )
+    package_campaign.add_argument(
+        "--no-huggingface", action="store_true", help="Collect committees but skip Hugging Face packaging"
+    )
+    package_campaign.add_argument(
+        "--no-dataset-archive", action="store_true", help="Skip the dataset archive"
+    )
+    package_campaign.add_argument(
+        "--tag", help="Suffix for bundle/repo directory names, e.g. v1 (for re-runs; bundles are immutable)"
+    )
+    package_campaign.add_argument("--force", action="store_true", help="Dataset archive and HF packages only")
+    package_campaign.set_defaults(func=cmd_package)
 
     package_verify = package_commands.add_parser(
         "verify", help="Verify a dataset archive, Hugging Face package, or committee bundle"

@@ -1,15 +1,19 @@
 """Archive trained committees and canonical datasets for reuse and Hugging Face upload.
 
-Two artifacts are produced here:
+Three artifacts are produced here:
 
-* ``pack_dataset_archive`` writes one checksummed ``.zip`` of an ``iface collect``
-  canonical dataset (extxyz + DeePMD NPY + manifests) for cold storage. ``data/``
-  inside the archive is a byte-for-byte dataset directory, so restore is ``unzip``.
+* ``pack_dataset_archive`` writes one checksummed ``.zip`` of a canonical dataset
+  (extxyz + DeePMD NPY + manifests, from ``iface collect`` or ``iface-mapped-collect``)
+  for cold storage. ``data/`` inside the archive is a byte-for-byte dataset
+  directory, so restore is ``unzip``.
 * ``pack_huggingface`` turns a verified committee bundle (from
   ``iface committee collect``, MACE or DeePMD) into an upload-ready Hugging Face
   model repository: a generated model card with YAML frontmatter, ``.gitattributes``
   for Git LFS, a provenance manifest, checksums, and the exact ``hf upload``
   command.
+* ``pack_campaign`` runs collect + package for every committee a campaign has
+  (by the same directory conventions ``iface mlip-progress`` / ``iface train``
+  use) plus the dataset archive, in one call.
 
 InterfaceForge never contacts the Hugging Face Hub. It stops at a ready-to-push
 directory; the user runs ``hf upload`` themselves.
@@ -26,18 +30,22 @@ import tempfile
 import zipfile
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from . import __version__
-from .committee import verify_committee_bundle
+from .committee import collect_committee, verify_committee_bundle
 from .errors import ConfigurationError, DependencyError, SafetyError
 from .state import sha256_file, utc_now
+
+if TYPE_CHECKING:
+    from .config import Campaign
 
 _COMPRESSION = {"deflated": zipfile.ZIP_DEFLATED, "stored": zipfile.ZIP_STORED}
 _LFS_PATTERNS = ("*.model", "*.pth", "*.pt", "*.pt2", "*.pb", "*.npy", "*.extxyz", "*.xyz")
 _DATASET_TOP_FILES = ("manifest.json", "manifest.csv", "frames.csv")
+_LEAF_DATASET_TOP_FILES = ("leaf_manifest.json", "leaf_manifest.csv")
 _DATASET_EXTXYZ = ("train.extxyz", "valid.extxyz", "test.extxyz")
 
 _MACE_TAGS = ("mace",)
@@ -119,6 +127,53 @@ def _write_dir_zip(source_dir: Path, archive: Path, top_level: str) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def _detect_dataset_flavor(source: Path) -> tuple[str, dict[str, Any]]:
+    """Identify which InterfaceForge dataset collector wrote ``source``.
+
+    ``iface_collect``: the unified ``manifest.json`` written by ``iface collect``.
+    ``mapped_leaf``: the ``iface-mapped-collect`` / leaf-heritage layout, which
+    writes ``leaf_manifest.json`` at the MACE-side root and a second one under
+    ``deepmd/`` -- e.g. the periodic SiN/TiN/TiO example. Only ``iface_collect``
+    datasets carry the ``move_mask.npy`` / ``system_meta.json`` sidecars
+    ``dedupe`` needs; ``mapped_leaf`` datasets can still be mirror-archived.
+    """
+
+    manifest_path = source / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ConfigurationError(f"Invalid dataset manifest JSON: {manifest_path}") from exc
+        if "frame_counts" not in manifest and "deepmd" not in manifest:
+            raise ConfigurationError(f"{manifest_path} does not look like an 'iface collect' manifest")
+        return "iface_collect", manifest
+
+    leaf_manifest_path = source / "leaf_manifest.json"
+    if leaf_manifest_path.is_file():
+        try:
+            manifest = json.loads(leaf_manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ConfigurationError(f"Invalid leaf manifest JSON: {leaf_manifest_path}") from exc
+        if manifest.get("method") != "leaf-heritage-collector":
+            raise ConfigurationError(f"{leaf_manifest_path} is not an InterfaceForge leaf manifest")
+        deepmd_manifest_path = source / "deepmd" / "leaf_manifest.json"
+        if deepmd_manifest_path.is_file():
+            try:
+                deepmd_manifest = json.loads(deepmd_manifest_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                deepmd_manifest = {}
+            manifest = {
+                **manifest,
+                "type_map": deepmd_manifest.get("type_map"),
+                "deepmd_leaf_manifest": deepmd_manifest,
+            }
+        return "mapped_leaf", manifest
+
+    raise ConfigurationError(
+        f"Not an InterfaceForge canonical dataset (no manifest.json or leaf_manifest.json): {source}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # dataset archive (task: back up training data for reuse)
 # --------------------------------------------------------------------------- #
@@ -148,19 +203,7 @@ def pack_dataset_archive(
     source = _resolved(dataset_root)
     if not source.is_dir():
         raise FileNotFoundError(f"Dataset directory not found: {source}")
-    manifest_path = source / "manifest.json"
-    if not manifest_path.is_file():
-        raise ConfigurationError(
-            f"Not an 'iface collect' dataset (no manifest.json): {source}"
-        )
-    try:
-        dataset_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ConfigurationError(f"Invalid dataset manifest JSON: {manifest_path}") from exc
-    if "frame_counts" not in dataset_manifest and "deepmd" not in dataset_manifest:
-        raise ConfigurationError(
-            f"{manifest_path} does not look like an 'iface collect' manifest"
-        )
+    flavor, dataset_manifest = _detect_dataset_flavor(source)
 
     compression_type = _COMPRESSION.get(compression)
     if compression_type is None:
@@ -176,11 +219,18 @@ def pack_dataset_archive(
 
     deepmd_root = source / "deepmd"
     if dedupe:
+        if flavor != "iface_collect":
+            raise ConfigurationError(
+                "dedupe currently requires a dataset written by 'iface collect' -- this "
+                f"one was written by {flavor!r} (no move_mask.npy/system_meta.json sidecars "
+                "to regenerate extxyz from). Archive it without dedupe instead."
+            )
         include_extxyz = False
         _require_materializable(deepmd_root)
 
+    top_file_names = _DATASET_TOP_FILES if flavor == "iface_collect" else _LEAF_DATASET_TOP_FILES
     payload_files: list[tuple[str, Path]] = []
-    for name in _DATASET_TOP_FILES:
+    for name in top_file_names:
         candidate = source / name
         if candidate.is_file():
             payload_files.append((name, candidate))
@@ -219,6 +269,7 @@ def pack_dataset_archive(
         "created_at": utc_now(),
         "interfaceforge_version": __version__,
         "source_root": str(source),
+        "dataset_flavor": flavor,
         "include_extxyz": include_extxyz,
         "dedupe": dedupe,
         "materializable_formats": ["extxyz"] if dedupe else [],
@@ -286,7 +337,7 @@ def _dataset_archive_readme(manifest: dict[str, Any]) -> str:
     dataset = manifest["dataset_manifest"]
     counts = dataset.get("frame_counts", {})
     type_map = ", ".join(dataset.get("type_map", []) or []) or "not recorded"
-    strategy = dataset.get("strategy", "?")
+    strategy = dataset.get("strategy") or dataset.get("split_mode", "?")
     ratios = dataset.get("ratios", "?")
     stride = dataset.get("stride", "?")
     frames = (
@@ -1342,3 +1393,148 @@ def _load_snippet(engine: str, manifest: dict[str, Any]) -> str:
         f"dp model-devi -m {model_args} -s <deepmd-system> -o model_devi.out\n"
         "```"
     )
+
+
+# --------------------------------------------------------------------------- #
+# campaign-wide: everything a campaign has, in one call
+# --------------------------------------------------------------------------- #
+def pack_campaign(
+    campaign: Campaign,
+    *,
+    output_root: str | Path | None = None,
+    mace_committee_root: str | Path | None = None,
+    dataset_root: str | Path | None = None,
+    repo_prefix: str | None = None,
+    license_id: str = "mit",
+    expected_members: int = 4,
+    dedupe: bool = False,
+    include_huggingface: bool = True,
+    include_dataset_archive: bool = True,
+    tag: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Collect + package everything a campaign has, in the layout the rest of
+    InterfaceForge already writes to -- one call instead of one
+    ``committee collect`` / ``package huggingface`` pair per committee plus a
+    separate ``dataset-archive``.
+
+    Looks for (each optional; missing pieces are reported in ``skipped``, not
+    treated as failures):
+
+    * the canonical dataset at ``dataset_root`` (default
+      ``<campaign>/datasets/canonical``, the ``iface collect`` /
+      ``iface-mapped-collect`` default);
+    * a MACE base and/or fine-tune committee under ``mace_committee_root``
+      (default ``<campaign>/models/mace_committee_520eV``, the same default
+      ``iface mlip-progress`` uses) as ``mace_committee`` /
+      ``mace_finetune_committee``;
+    * a DeePMD committee per architecture in ``models.deepmd.architectures``
+      under ``<campaign>/models/deepmd/<arch>`` (the ``iface train deepmd``
+      layout), when ``models.deepmd.enabled``.
+
+    One committee failing (a wrong ``--expected-members``, or a bundle name
+    that already exists -- committee bundles are immutable, so re-running with
+    the same ``--tag`` does not silently skip) is recorded in ``errors`` and
+    does not stop the rest: the point of one call is not losing everything
+    else to one mistake. Returns a payload with
+    ``dataset_archive``, ``committees`` (each with its collected bundle and,
+    unless ``include_huggingface=False``, its packaged Hugging Face repo),
+    ``skipped``, and ``errors``.
+    """
+
+    out_root = _resolved(output_root) if output_root is not None else campaign.root / "packaged"
+    mace_root = (
+        _resolved(mace_committee_root)
+        if mace_committee_root is not None
+        else campaign.root / "models" / "mace_committee_520eV"
+    )
+    dataset_dir = (
+        _resolved(dataset_root) if dataset_root is not None else campaign.root / "datasets" / "canonical"
+    )
+    suffix = f"_{tag}" if tag else ""
+
+    result: dict[str, Any] = {
+        "campaign": campaign.name,
+        "output_root": str(out_root),
+        "dataset_archive": None,
+        "committees": [],
+        "skipped": [],
+        "errors": [],
+    }
+
+    def _skip(step: str, reason: str) -> None:
+        result["skipped"].append({"step": step, "reason": reason})
+
+    def _fail(step: str, exc: Exception) -> None:
+        result["errors"].append({"step": step, "detail": str(exc)})
+
+    def _repo_id(component: str) -> str | None:
+        return f"{repo_prefix}-{component}" if repo_prefix else None
+
+    def _collect_and_package(step: str, source: Path, *, engine: str, component: str) -> None:
+        if not source.is_dir():
+            _skip(step, f"not found: {source}")
+            return
+        bundle_out = out_root / "stored_models" / f"{campaign.name}_{component}{suffix}"
+        try:
+            # collect_committee has no force= -- bundles are deliberately immutable;
+            # an existing bundle name surfaces as an error here, not a silent skip.
+            collected = collect_committee(
+                source,
+                bundle_out,
+                engine=engine,
+                expected_members=expected_members,
+                label=f"{campaign.name} {component}",
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad committee must not abort the sweep
+            _fail(step, exc)
+            return
+        entry: dict[str, Any] = {"engine": engine, "component": component, "bundle": collected}
+        if include_huggingface:
+            try:
+                entry["huggingface"] = pack_huggingface(
+                    collected["bundle"],
+                    out_root / "hf" / f"{campaign.name}_{component}{suffix}",
+                    repo_id=_repo_id(component),
+                    license_id=license_id,
+                    force=force,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _fail(f"{step}_huggingface", exc)
+        result["committees"].append(entry)
+
+    if include_dataset_archive:
+        if dataset_dir.is_dir():
+            try:
+                result["dataset_archive"] = pack_dataset_archive(
+                    dataset_dir,
+                    out_root / "backups" / f"{campaign.name}_dataset{suffix}.zip",
+                    dedupe=dedupe,
+                    force=force,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _fail("dataset_archive", exc)
+        else:
+            _skip("dataset_archive", f"no dataset at {dataset_dir}")
+
+    _collect_and_package("mace_committee", mace_root / "mace_committee", engine="mace", component="mace")
+    _collect_and_package(
+        "mace_finetune_committee",
+        mace_root / "mace_finetune_committee",
+        engine="mace",
+        component="mace-ft",
+    )
+
+    deepmd_settings = dict(campaign.models.get("deepmd", {}))
+    if deepmd_settings.get("enabled", False):
+        for architecture in deepmd_settings.get("architectures", []):
+            _collect_and_package(
+                f"deepmd_{architecture}",
+                campaign.root / "models" / "deepmd" / str(architecture),
+                engine="deepmd",
+                component=str(architecture),
+            )
+    elif not deepmd_settings:
+        _skip("deepmd", "models.deepmd is not configured in this campaign")
+
+    return result

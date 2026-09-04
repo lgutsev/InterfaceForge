@@ -9,12 +9,15 @@ from pathlib import Path
 
 import numpy as np
 from test_committee import write_committee
+from test_config_scheduler import write_campaign
 
 from interfaceforge.cli import build_parser
 from interfaceforge.committee import collect_committee, verify_committee_bundle
+from interfaceforge.config import load_campaign
 from interfaceforge.errors import ConfigurationError, SafetyError
 from interfaceforge.packaging import (
     materialize_dataset,
+    pack_campaign,
     pack_dataset_archive,
     pack_huggingface,
     verify_package,
@@ -295,6 +298,76 @@ class DedupeMaterializeTests(unittest.TestCase):
             materialize_dataset(dataset, force=True)
 
 
+def write_mapped_leaf_dataset(root: Path) -> Path:
+    """The `iface-mapped-collect` / leaf-heritage layout: leaf_manifest.json
+    at the MACE-side root, a second one under deepmd/, and no move_mask.npy /
+    system_meta.json sidecars (those are `iface collect`-only)."""
+
+    dataset = root / "datasets" / "canonical"
+    dataset.mkdir(parents=True)
+    for split in ("train", "valid", "test"):
+        (dataset / f"{split}.extxyz").write_text(
+            "1\nProperties=species:S:1:pos:R:3 REF_energy=-1.0\nSi 0.0 0.0 0.0\n", encoding="utf-8"
+        )
+    (dataset / "leaf_manifest.csv").write_text("outcar,status\n/a/OUTCAR,OK\n", encoding="utf-8")
+    (dataset / "leaf_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "method": "leaf-heritage-collector",
+                "engine": "mace",
+                "frame_counts": {"train": 8, "valid": 1, "test": 1},
+                "ratios": [0.8, 0.1, 0.1],
+                "stride": 5,
+                "split_mode": "heritage",
+            }
+        ),
+        encoding="utf-8",
+    )
+    deepmd = dataset / "deepmd"
+    system = deepmd / "train" / "interface" / "300K" / "sys1"
+    set_dir = system / "set.000"
+    set_dir.mkdir(parents=True)
+    (system / "type.raw").write_text("0\n", encoding="utf-8")
+    (system / "type_map.raw").write_text("Si\n", encoding="utf-8")
+    for name in ("coord", "box", "energy", "force"):
+        np.save(set_dir / f"{name}.npy", np.zeros((1, 3)))
+    (system / "heritage.json").write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+    (deepmd / "leaf_manifest.csv").write_text("outcar,status\n/a/OUTCAR,OK\n", encoding="utf-8")
+    (deepmd / "leaf_manifest.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "method": "leaf-heritage-collector", "engine": "deepmd", "type_map": ["Si"]}
+        ),
+        encoding="utf-8",
+    )
+    return dataset
+
+
+class MappedLeafDatasetArchiveTests(unittest.TestCase):
+    def test_mirrors_leaf_heritage_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = write_mapped_leaf_dataset(root)
+            result = pack_dataset_archive(dataset, root / "backup" / "periodic.zip")
+            self.assertEqual(result["dedupe"], False)
+            self.assertTrue(verify_package(Path(result["archive"]))["valid"])
+            with zipfile.ZipFile(Path(result["archive"])) as handle:
+                names = handle.namelist()
+            self.assertIn("periodic/data/leaf_manifest.json", names)
+            self.assertIn("periodic/data/deepmd/leaf_manifest.json", names)
+            self.assertIn(
+                "periodic/data/deepmd/train/interface/300K/sys1/set.000/coord.npy", names
+            )
+            self.assertIn("periodic/data/train.extxyz", names)
+
+    def test_dedupe_refuses_leaf_heritage_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = write_mapped_leaf_dataset(root)
+            with self.assertRaisesRegex(ConfigurationError, "written by 'iface collect'"):
+                pack_dataset_archive(dataset, root / "x.zip", dedupe=True)
+
+
 # --------------------------------------------------------------------------- #
 # DeePMD committee collection
 # --------------------------------------------------------------------------- #
@@ -494,6 +567,119 @@ class PackagingGuardrailTests(unittest.TestCase):
             ["committee", "collect", "models/deepmd/dpa2", "out", "--engine", "deepmd"]
         )
         self.assertEqual(args.engine, "deepmd")
+
+        args = parser.parse_args(
+            ["package", "campaign", "--repo-prefix", "myorg/sintin", "--tag", "v1", "--dedupe"]
+        )
+        self.assertEqual(args.package_command, "campaign")
+        self.assertEqual(args.repo_prefix, "myorg/sintin")
+        self.assertTrue(args.dedupe)
+
+
+# --------------------------------------------------------------------------- #
+# iface package campaign: everything a campaign has, in one call
+# --------------------------------------------------------------------------- #
+def _write_full_campaign_tree(root: Path) -> Path:
+    """A campaign.yaml plus the mace_committee_520eV/{base,ft} and
+    models/deepmd/<arch> trees `iface mlip-progress`/`iface train` already use,
+    and a plain 'iface collect'-flavored canonical dataset."""
+
+    campaign_path = write_campaign(
+        root,
+        mace={"enabled": True},
+        deepmd={"enabled": True, "backend": "pytorch", "architectures": ["dpa2"]},
+    )
+
+    mace_root = root / "models" / "mace_committee_520eV"
+    for base in ("mace_committee", "mace_finetune_committee"):
+        for seed in (0, 211, 307, 419):
+            model_dir = mace_root / base / f"seed_{seed}" / "mace_model"
+            model_dir.mkdir(parents=True)
+            (model_dir / "sintin_mace_stagetwo.model").write_bytes(f"model-{base}-{seed}".encode())
+
+    dpa2 = root / "models" / "deepmd" / "dpa2"
+    for index in range(4):
+        model_dir = dpa2 / f"model_{index:03d}"
+        model_dir.mkdir(parents=True)
+        (model_dir / "frozen_model.pth").write_bytes(f"frozen-{index}".encode())
+        (model_dir / "input.json").write_text(
+            json.dumps({"model": {"type_map": ["Si", "N"]}, "training": {"numb_steps": 100}}),
+            encoding="utf-8",
+        )
+    (root / "models" / "deepmd" / "ensemble_manifest.json").write_text(
+        json.dumps(
+            {
+                "engine": "deepmd",
+                "backend": "pytorch",
+                "architectures": ["dpa2"],
+                "models": [{"architecture": "dpa2", "index": i, "seed": 11 + 12 * i} for i in range(4)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    write_canonical_dataset(root)
+    return campaign_path
+
+
+class PackageCampaignTests(unittest.TestCase):
+    def test_collects_and_packages_every_committee_plus_dataset(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = load_campaign(_write_full_campaign_tree(root))
+
+            payload = pack_campaign(campaign, repo_prefix="myorg/sintin", tag="v1")
+
+            self.assertEqual(payload["errors"], [])
+            self.assertEqual(payload["skipped"], [])
+            self.assertIsNotNone(payload["dataset_archive"])
+            components = {entry["component"] for entry in payload["committees"]}
+            self.assertEqual(components, {"mace", "mace-ft", "dpa2"})
+            for entry in payload["committees"]:
+                self.assertTrue(verify_committee_bundle(Path(entry["bundle"]["bundle"]))["valid"])
+                self.assertEqual(entry["huggingface"]["repo_id"], f"myorg/sintin-{entry['component']}")
+                self.assertTrue(Path(entry["huggingface"]["output"], "README.md").is_file())
+            self.assertTrue(verify_package(Path(payload["dataset_archive"]["archive"]))["valid"])
+
+    def test_missing_pieces_are_skipped_not_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = load_campaign(write_campaign(root, mace={"enabled": True}))
+            # No mace_committee_520eV/, no datasets/canonical/, deepmd disabled.
+            payload = pack_campaign(campaign)
+            self.assertEqual(payload["committees"], [])
+            self.assertEqual(payload["errors"], [])
+            steps = {row["step"] for row in payload["skipped"]}
+            self.assertIn("dataset_archive", steps)
+            self.assertIn("mace_committee", steps)
+            self.assertIn("mace_finetune_committee", steps)
+
+    def test_rerun_with_same_tag_reports_immutability_errors_not_corruption(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = load_campaign(_write_full_campaign_tree(root))
+            first = pack_campaign(campaign, tag="v1", include_huggingface=False)
+            self.assertEqual(first["errors"], [])
+
+            second = pack_campaign(campaign, tag="v1", include_huggingface=False)
+            self.assertEqual(len(second["errors"]), 4)  # dataset + 2 mace + 1 deepmd
+            for row in second["errors"]:
+                self.assertRegex(row["detail"], "already exists")
+            # the original bundles must be untouched
+            self.assertTrue(verify_package(Path(first["dataset_archive"]["archive"]))["valid"])
+
+    def test_via_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_full_campaign_tree(root)
+            parser = build_parser()
+            args = parser.parse_args(["package", "campaign", "-c", str(root / "campaign.yaml")])
+            from interfaceforge.cli import cmd_package
+
+            exit_code = cmd_package(args)
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((root / "packaged" / "backups").is_dir())
+            self.assertTrue((root / "packaged" / "hf").is_dir())
 
 
 if __name__ == "__main__":

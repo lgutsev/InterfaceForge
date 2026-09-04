@@ -66,6 +66,10 @@ not used as package-generated templates.
   per system so that tree is a complete record, and
   `iface package materialize` regenerates `*.extxyz` from it with an
   exact-round-trip writer, self-verified frame by frame before publishing.
+  Dataset archiving also recognizes `iface-mapped-collect` / leaf-heritage
+  datasets (the periodic SiN/TiN/TiO layout), and `iface package campaign`
+  runs collect + package for every committee a campaign has plus the dataset
+  archive in one call.
 
 ## Verification status
 
@@ -101,7 +105,7 @@ known gaps, and the minimum checks needed to promote a feature's status.
 | VASP-MLFF | train → refit → stability scaffolding, continuation/capacity recovery, mode-aware audits | **Human-tested on real campaigns.** This is the most mature part of the repository, but each new VASP version, cluster profile, and recovery condition still requires inspection. |
 | Dataset | streaming OUTCAR collection, leakage-resistant splits, synchronized extxyz and DeePMD NPY layouts | **Human-tested for data generation.** Real VASP data have been exported for MACE and DeePMD. This does not validate downstream training or model quality. |
 | MACE | two-stage energy/force job generation; committee training/evaluation; optional interface-local force weighting and thermodynamic-cycle loss | **Human-tested for standard committee training and evaluation.** A real four-seed committee completed on the periodic SiN/TiN/TiO campaign and produced held-out energy/force metrics. Foundation-model fine-tuning, MACE-ROI, deployment and transferability remain unverified separately. |
-| MLIP archiving | immutable collection of completed MACE **and DeePMD** committees into a checksummed directory and ZIP; final models only by default, with optional training data written to a separate ZIP; canonical-dataset backup archives (`iface collect --archive` / `iface package dataset-archive`); upload-ready Hugging Face model repositories (`iface package huggingface`, no push) | **Automated-test verified.** Collection, duplicate/missing-member rejection, archive safety, checksums, verification, dataset archives, and Hugging Face model-card generation are tested; long-term storage, restore, and a real Hub upload have not yet been human-tested. |
+| MLIP archiving | immutable collection of completed MACE **and DeePMD** committees into a checksummed directory and ZIP; final models only by default, with optional training data written to a separate ZIP; canonical-dataset backup archives, mirror or single-copy `--dedupe` (`iface collect --archive` / `iface package dataset-archive`), for both `iface collect` and `iface-mapped-collect` layouts; `iface package materialize` regenerating `*.extxyz` from a deduped archive with exact-precision, self-verified round-trip; upload-ready Hugging Face model repositories (`iface package huggingface`, no push); `iface package campaign` running all of the above for every committee a campaign has in one call | **Automated-test verified.** Collection, duplicate/missing-member rejection, archive safety, checksums, verification, dataset archives (both layouts), the dedupe/materialize precision round-trip, Hugging Face model-card generation, and the campaign-wide sweep are tested; long-term storage, restore, and a real Hub upload have not yet been human-tested. |
 | DeePMD | DPA-1, DPA-2, DPA-3, experimental DPA-4 and DPA-2 foundation-checkpoint fine-tuning; TensorFlow/PyTorch backends; preflight → smoke → full → evaluation | **Human-tested for PyTorch DPA-2 committee training and evaluation.** Real LONI runs exercised checkpoint continuation, model freezing and per-system `dp test` reporting. Other architectures, fine-tuning and LAMMPS deployment remain separate unverified gates. |
 | Allegro | training/job-generation and LAMMPS-oriented adapter code | **Code-only.** No human-tested training or LAMMPS deployment. |
 | Active learning | thermodynamic exploration matrix and uncertainty-plus-diversity labeling queue; AI2-Kit TESLA MACE/OpenMM/VASP with oh-my-batch; legacy config-driven DeepMD/LAMMPS/VASP | **Code-only.** No completed external-engine loop. |
@@ -334,7 +338,19 @@ iface package materialize restored/tin_sin_dataset_v1/data                      
 iface package verify hf/tin_sin_dpa2_v1
 ```
 
-See [the archiving and Hugging Face packaging guide](docs/packaging.md).
+Or run all of the above -- every committee the campaign has (MACE base/
+fine-tune, every configured DeePMD architecture) plus the dataset archive --
+in one call:
+
+```bash
+iface package campaign -c campaign.yaml --repo-prefix myorg/tinsin --tag v1
+```
+
+It looks in the same directories `iface mlip-progress` / `iface train` already
+use, skips (never fails on) whatever committee or dataset isn't there, and
+reports one component's failure (e.g. an existing bundle name on a re-run)
+without losing the rest of the sweep. See
+[the archiving and Hugging Face packaging guide](docs/packaging.md).
 
 For interface-local and thermodynamic-cycle-aware MACE training, configure
 `models.mace.roi`, then prepare the immutable derived data before generating
