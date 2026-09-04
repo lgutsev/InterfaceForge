@@ -84,7 +84,7 @@ iface vasp step1-prepare OPT --protocol training
 iface vasp step1-launch Step1                     # dry-run
 iface vasp step1-launch Step1 --execute
 
-iface vasp step2-prepare Step1 --temperatures 300 450 600 --protocol training
+iface vasp step2-prepare Step1 --temperatures 300 450 600 --protocol training --inherit-wavecar
 iface vasp step2-launch Step2_300K Step2_450K Step2_600K
 iface vasp step2-launch Step2_300K Step2_450K Step2_600K --execute
 ```

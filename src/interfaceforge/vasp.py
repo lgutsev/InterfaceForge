@@ -68,8 +68,9 @@ def _step2_dense_frames(protocol: str) -> int:
 # Active spin/electronic tags copied verbatim from each Step1 INCAR (like the
 # LDAU* set) so a fixed-temperature Step2 MD keeps the same magnetic ground
 # state. MAGMOM is per-atom and Step2's POSCAR is Step1's CONTCAR, so the
-# atom order matches; ISTART is not set because Step2 does not inherit a
-# WAVECAR, so the moments must still be initialised from MAGMOM.
+# atom order matches. An optional run-local WAVECAR restart can preserve the
+# converged Step1 orbitals; MAGMOM remains inherited as restart hygiene and as
+# a safe fallback if VASP rejects the binary file.
 STEP2_INHERITED_ELECTRONIC_TAGS = ("ISPIN", "MAGMOM", "LASPH", "LNONCOLLINEAR")
 
 # training protocol only: trim per-step OUTCAR bloat that is useless for
@@ -218,7 +219,12 @@ def _preflight_step2_reprotocol(plans: list[dict[str, Any]], output_roots: list[
         destination: Path = plan["destination"]
         if not (destination / "INCAR").is_file():
             raise SafetyError(f"{destination} has no INCAR to re-protocol; run step2-prepare first")
-        present = [name for name in runtime_markers if (destination / name).exists()]
+        expected_inherited = set(plan["inputs"])
+        present = [
+            name
+            for name in runtime_markers
+            if (destination / name).exists() and name not in expected_inherited
+        ]
         if present:
             raise SafetyError(
                 f"{destination} already has runtime output ({', '.join(present)}); "
@@ -252,6 +258,7 @@ def _render_step2_incar(
     temperature: float,
     *,
     protocol: str = "academic",
+    inherit_wavecar: bool = False,
 ) -> dict[str, Any]:
     """Render a Step2 INCAR with a deliberately narrow precedence rule.
 
@@ -305,6 +312,8 @@ def _render_step2_incar(
         "NSW": str(_step2_nsw(protocol)),
         "NBLOCK": str(STEP2_NBLOCK),
     }
+    if inherit_wavecar:
+        replacements["ISTART"] = "1"
     if training:
         replacements.update(STEP2_TRAINING_FORCED_TAGS)
 
@@ -443,6 +452,7 @@ def prepare_step2_series(
     audit_only: bool = False,
     reprotocol: bool = False,
     keep_velocities: bool = False,
+    inherit_wavecar: bool = False,
 ) -> dict[str, Any]:
     """Promote a recursive Step1 tree into fixed-temperature Step2 DFT-MD runs.
 
@@ -463,6 +473,11 @@ def prepare_step2_series(
     matters when a Step2 temperature differs from the Step1 preheat, and when
     Step1 used ``SMASS=-1`` (its end velocities are a post-rescale snapshot).
     Pass ``keep_velocities=True`` to copy the CONTCAR byte-for-byte instead.
+
+    Pass ``inherit_wavecar=True`` to require and copy the nonempty WAVECAR
+    directly beside every source INCAR, and render ``ISTART=1``. A WAVECAR is
+    deliberately never resolved from a shared ancestor because it must match
+    the individual run's final CONTCAR and electronic setup.
     """
 
     from .aimd import resolve_protocol
@@ -547,13 +562,25 @@ def prepare_step2_series(
             )
         if not ({"runvasp.sh", "run.slurm"} & resolved_inputs.keys()):
             raise SafetyError(f"No runvasp.sh or run.slurm found for Step1 run {run}")
+        if inherit_wavecar:
+            wavecar = run / "WAVECAR"
+            if not wavecar.is_file() or not wavecar.stat().st_size:
+                raise SafetyError(
+                    "--inherit-wavecar requires a nonempty run-local WAVECAR for "
+                    f"every Step1 run; missing or empty: {wavecar}"
+                )
+            resolved_inputs["WAVECAR"] = wavecar
         source_text = source_incar.read_text(encoding="utf-8", errors="ignore")
         ion_count = _poscar_ion_count(structure)
         for temperature, label, output in zip(
             normalized_temperatures, labels, output_roots, strict=True
         ):
             rendered = _render_step2_incar(
-                source_text, template_text, temperature, protocol=protocol
+                source_text,
+                template_text,
+                temperature,
+                protocol=protocol,
+                inherit_wavecar=inherit_wavecar,
             )
             for tag in ("LDAUL", "LDAUU", "LDAUJ"):
                 value = rendered["hubbard_tags"].get(tag)
@@ -640,6 +667,7 @@ def prepare_step2_series(
                     "format": "interfaceforge-step2-series",
                     "schema_version": 1,
                     "source_root": str(source_root),
+                    "inherit_wavecar": bool(inherit_wavecar),
                     "template": template_label,
                     "template_sha256": hashlib.sha256(template_text.encode()).hexdigest(),
                     "precedence": {
@@ -648,7 +676,12 @@ def prepare_step2_series(
                         "electronic_tags": (
                             "exact active "
                             + ", ".join(STEP2_INHERITED_ELECTRONIC_TAGS)
-                            + " lines from each Step1 INCAR (no MAGMOM re-init, no ISTART)"
+                            + " lines from each Step1 INCAR; "
+                            + (
+                                "run-local WAVECAR copied and ISTART=1"
+                                if inherit_wavecar
+                                else "no WAVECAR restart and no forced ISTART"
+                            )
                         ),
                         "temperature_tags": "requested temperature overrides SYSTEM, TEBEG, and TEEND",
                         "sampling_tags": (
@@ -720,6 +753,7 @@ def prepare_step2_series(
         "warnings": warnings,
         "source_structure": source_structure,
         "keep_velocities": bool(keep_velocities),
+        "inherit_wavecar": bool(inherit_wavecar),
         "hubbard_rule": "preserve exact active LDAU* and LMAXMIX assignments per source run",
         "protocol": protocol,
         "sampling": _step2_sampling_block(protocol),
@@ -806,7 +840,7 @@ def _load_step2_launch_root(
         forbidden = [
             name
             for name in ("OUTCAR", "OSZICAR", "WAVECAR", "CHGCAR", "vasprun.xml")
-            if (run / name).exists()
+            if (run / name).exists() and name not in inherited_hashes
         ]
         if forbidden:
             raise SafetyError(
@@ -1712,6 +1746,10 @@ def _audit_step2_plans(
         ):
             if parsed.get(tag) != expected:
                 issues.append(f"{tag}={parsed.get(tag)!r}, expected {expected!r}")
+        if "WAVECAR" in plan["inputs"] and parsed.get("ISTART") != "1":
+            issues.append(
+                f"inherited WAVECAR requires ISTART='1', found {parsed.get('ISTART')!r}"
+            )
         for tag, expected in {**plan["hubbard_tags"], **plan["electronic_tags"]}.items():
             if parsed.get(tag) != expected:
                 issues.append(f"{tag} changed from Step1")
@@ -1762,7 +1800,12 @@ def _audit_step2_plans(
                 issues.append(f"inherited {name} differs from source")
             if name in {"runvasp.sh", "run.slurm"} and not os.access(target, os.X_OK):
                 issues.append(f"inherited launcher {name} is not executable")
-        unexpected_runtime = [name for name in forbidden_runtime_files if (destination / name).exists()]
+        expected_inherited = set(plan["inputs"])
+        unexpected_runtime = [
+            name
+            for name in forbidden_runtime_files
+            if (destination / name).exists() and name not in expected_inherited
+        ]
         if unexpected_runtime:
             issues.append("runtime outputs present: " + ", ".join(unexpected_runtime))
         rows.append(
@@ -1807,6 +1850,9 @@ def _audit_step2_plans(
             "status": status,
             "source_root": str(source_root),
             "output_root": str(output),
+            "inherit_wavecar": any(
+                "WAVECAR" in row["inherited_files"] for row in output_rows
+            ),
             "template": template_label,
             "template_sha256": hashlib.sha256(template_text.encode()).hexdigest(),
             "protocol": protocol,

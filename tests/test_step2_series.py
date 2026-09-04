@@ -136,6 +136,75 @@ class Step2SeriesTests(unittest.TestCase):
             )
             self.assertIn("-0.001 0.002 0.000", kept)
 
+    def test_inherit_wavecar_is_strict_audited_electronic_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            step1 = self._fixture(root)
+            source_payloads = {}
+            for index, source in enumerate(sorted(step1.rglob("CONTCAR")), start=1):
+                wavecar = source.parent / "WAVECAR"
+                payload = f"run-local-wavecar-{index}\n".encode()
+                wavecar.write_bytes(payload)
+                source_payloads[source.parent.relative_to(step1).as_posix()] = payload
+
+            result = prepare_step2_series(
+                step1,
+                temperatures=[300],
+                protocol="training",
+                inherit_wavecar=True,
+            )
+
+            self.assertTrue(result["inherit_wavecar"])
+            self.assertEqual(result["audit"]["status"], "PASS")
+            output = root / "Step2_300K"
+            manifest = json.loads(
+                (output / "step2_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(manifest["inherit_wavecar"])
+            for row in manifest["runs"]:
+                relative = row["relative_path"]
+                run = output / relative
+                self.assertEqual(parse_incar(run / "INCAR")["ISTART"], "1")
+                self.assertEqual((run / "WAVECAR").read_bytes(), source_payloads[relative])
+                self.assertIn("WAVECAR", row["inherited_files"])
+
+            # An audited input WAVECAR is allowed through launch preflight.
+            preview = launch_step2_runs([output])
+            self.assertEqual(preview["preflight"], "PASS")
+
+    def test_inherit_wavecar_requires_nonempty_file_in_every_leaf(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            step1 = self._fixture(root)
+            # An ancestor WAVECAR must never be applied to unrelated leaf geometries.
+            (step1 / "WAVECAR").write_bytes(b"wrong shared restart\n")
+            first_run = step1 / "Real/N_Term/x0.25"
+            (first_run / "WAVECAR").write_bytes(b"")
+
+            with self.assertRaisesRegex(SafetyError, "nonempty run-local WAVECAR"):
+                prepare_step2_series(
+                    step1,
+                    temperatures=[300],
+                    inherit_wavecar=True,
+                )
+
+            self.assertFalse((root / "Step2_300K").exists())
+
+    def test_launch_rejects_changed_inherited_wavecar(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            step1 = self._fixture(root)
+            for source in step1.rglob("CONTCAR"):
+                (source.parent / "WAVECAR").write_bytes(b"wavecar fixture\n")
+            prepare_step2_series(
+                step1, temperatures=[300], inherit_wavecar=True
+            )
+            step2 = root / "Step2_300K"
+            (step2 / "Real/N_Term/x0.25/WAVECAR").write_bytes(b"changed\n")
+
+            with self.assertRaisesRegex(SafetyError, "changed after audit"):
+                launch_step2_runs([step2])
+
     def test_launcher_is_found_in_the_invocation_directory(self) -> None:
         import os
 
@@ -265,9 +334,12 @@ class Step2SeriesTests(unittest.TestCase):
 
     def test_cli_exposes_default_temperature_series(self) -> None:
         parser = build_parser()
-        args = parser.parse_args(["vasp", "step2-series", "Step1", "--dry-run"])
+        args = parser.parse_args(
+            ["vasp", "step2-series", "Step1", "--dry-run", "--inherit-wavecar"]
+        )
         self.assertEqual(args.temperatures, [300.0, 450.0, 600.0])
         self.assertTrue(args.dry_run)
+        self.assertTrue(args.inherit_wavecar)
 
     def test_source_root_can_itself_be_one_calculation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

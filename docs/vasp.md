@@ -234,8 +234,8 @@ The precedence rule is intentionally narrow and deterministic:
 3. Every active `ISPIN`, `MAGMOM`, `LASPH`, and `LNONCOLLINEAR` line is
    likewise copied verbatim from that Step1 run, so a fixed-temperature
    Step2 MD keeps Step1's magnetic ground state instead of silently running
-   non-spin-polarised. `ISTART` is *not* set (Step2 does not inherit a
-   WAVECAR, so the moments still initialise from the inherited `MAGMOM`).
+   non-spin-polarised. By default `ISTART` is not forced and no `WAVECAR` is
+   inherited; `--inherit-wavecar` enables an audited `ISTART=1` continuation.
 4. The requested temperature overrides `SYSTEM`, `TEBEG`, and `TEEND`.
 5. `NSW` and the frame policy come from `--protocol` (see
    [AIMD protocols](#aimd-protocols-academic-vs-training) below): the default
@@ -249,8 +249,25 @@ that an inherited `MAGMOM` has one value per ion. This is what makes mixed
 atom-type orders safe: InterfaceForge never reconstructs or reorders a
 Hubbard or moment array. `CONTCAR` becomes the new `POSCAR`; the nearest
 run-specific or shared ancestor `KPOINTS`, `POTCAR`, `runvasp.sh`, and
-`run.slurm` files are copied. Runtime outputs such as `OUTCAR`, `WAVECAR`, and
-`CHGCAR` are not inherited.
+`run.slurm` files are copied. By default, runtime outputs such as `OUTCAR`,
+`WAVECAR`, and `CHGCAR` are not inherited.
+
+For an electronic continuation from each finished Step1 run, opt in with:
+
+```bash
+iface vasp step2-prepare Step1 --temperatures 300 450 600 \
+  --protocol training --inherit-wavecar
+```
+
+This strictly requires a nonempty `WAVECAR` directly inside every discovered
+Step1 leaf, copies it into each corresponding temperature branch, sets
+`ISTART=1`, and records its SHA-256 hash in the manifest and audit. A shared
+ancestor `WAVECAR` is never used because it may belong to another geometry.
+`LWAVE=.FALSE.` may remain in the Step2 template: it controls writing the final
+Step2 wavefunctions, not reading the inherited starting orbitals. `CHGCAR` is
+not copied because it is redundant for this orbital restart and the packaged
+Step1 template does not write one. Repeat `--inherit-wavecar` when using
+`--audit-only` or `--set-protocol` on such a prepared tree.
 
 `KPOINTS` and a launcher are required. `POTCAR` is **optional** — if a Step1
 run has none, Step2 is prepared without one (with a warning) for workflows

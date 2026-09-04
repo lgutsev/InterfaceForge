@@ -529,6 +529,7 @@ def cmd_vasp_step2_series(args: argparse.Namespace) -> int:
             audit_only=args.audit_only,
             reprotocol=args.set_protocol,
             keep_velocities=args.keep_velocities,
+            inherit_wavecar=args.inherit_wavecar,
         )
     )
     return 0
@@ -2076,6 +2077,14 @@ def build_parser() -> argparse.ArgumentParser:
             "Copy the Step1 CONTCAR verbatim instead of stripping its trailing "
             "velocity block (default: strip, so Step2 draws fresh Maxwell-"
             "Boltzmann velocities at its own TEBEG)"
+        ),
+    )
+    step2.add_argument(
+        "--inherit-wavecar",
+        action="store_true",
+        help=(
+            "Require and copy each run-local Step1 WAVECAR, set ISTART=1, and "
+            "include the restart file in manifest/audit hashes"
         ),
     )
     step2.add_argument("--dry-run", action="store_true", help="Validate and print the exact plan only")
