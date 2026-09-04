@@ -64,7 +64,8 @@ class SeparationEnergyLauncherTests(unittest.TestCase):
         self.assertIn("INTERFACEFORGE_ROOT=$REPO_ROOT", submitter)
         self.assertIn("final standalone job-id line", submitter)
         self.assertIn("model.ckpt.pt", submitter)
-        self.assertIn("expected one usable MACE model", submitter)
+        self.assertIn("no usable MACE model found", submitter)
+        self.assertIn("using the newest", submitter)
         self.assertIn("--merge-json", merge)
         self.assertNotIn("#SBATCH --gres=gpu", merge)
 
@@ -191,6 +192,78 @@ class SeparationEnergyLauncherTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("found 2", result.stderr)
             self.assertNotIn("found 4", result.stderr)
+
+    def test_submitter_picks_the_newest_model_on_genuine_ambiguity(self) -> None:
+        # If two distinct (differently-named) *_stagetwo.model files legitimately
+        # survive the name filters -- e.g. a leftover from an earlier attempt --
+        # the workflow should warn and proceed with the newest one rather than
+        # failing outright.
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            campaign = Path(tmp) / "campaign"
+            campaign.mkdir()
+            (campaign / "campaign.yaml").write_text("name: test\n", encoding="utf-8")
+            for termination in ("N_term_dft", "Ti_term_dft"):
+                directory = campaign / "adhesion" / termination
+                directory.mkdir(parents=True)
+                (directory / "manifest.json").write_text("{}\n", encoding="utf-8")
+            for seed in (11, 23, 37, 53):
+                model_dir = (
+                    campaign
+                    / "models"
+                    / "mace_committee_520eV"
+                    / "mace_committee"
+                    / f"seed_{seed}"
+                    / "mace_model"
+                )
+                model_dir.mkdir(parents=True)
+                newest = model_dir / f"SiN_TiN_TiO_periodic_mace_seed{seed}_stagetwo.model"
+                newest.write_bytes(b"newest")
+            # Give seed 23 a second, older candidate under a different name.
+            stale = (
+                campaign
+                / "models"
+                / "mace_committee_520eV"
+                / "mace_committee"
+                / "seed_23"
+                / "mace_model"
+                / "old_attempt_stagetwo.model"
+            )
+            stale.write_bytes(b"stale")
+            old = time.time() - 3600
+            os.utime(stale, (old, old))
+            for member in range(4):
+                directory = campaign / "models" / "deepmd" / "dpa2" / f"model_{member:03d}"
+                directory.mkdir(parents=True)
+                (directory / "model.ckpt.pt").write_bytes(b"checkpoint")
+
+            fake_bin = Path(tmp) / "bin"
+            fake_bin.mkdir()
+            sbatch = fake_bin / "sbatch"
+            sbatch.write_text("#!/usr/bin/env bash\necho 42\n", encoding="utf-8")
+            sbatch.chmod(0o755)
+            env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+            result = subprocess.run(
+                [str(LAUNCHERS / "submit_separation_energy.sh")],
+                cwd=campaign,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("seed 23 has 2 usable MACE models; using the newest", result.stderr)
+            newest_path = str(
+                campaign
+                / "models/mace_committee_520eV/mace_committee/seed_23/mace_model"
+                / "SiN_TiN_TiO_periodic_mace_seed23_stagetwo.model"
+            )
+            # The newest file is listed first (that's the one used); no crash,
+            # no hard failure, workflow still submits.
+            self.assertIn("Submitted separation-energy workflow", result.stdout)
+            self.assertIn(newest_path.replace("\\", "/"), result.stderr.replace("\\", "/"))
 
 
 if __name__ == "__main__":

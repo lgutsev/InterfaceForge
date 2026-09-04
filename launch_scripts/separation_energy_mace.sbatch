@@ -58,25 +58,31 @@ for seed in 11 23 37 53; do
     # always exclude checkpoints/ so the two are never ambiguous.
     search_dir="$seed_dir/mace_model"
     [[ -d "$search_dir" ]] || search_dir="$seed_dir"
+    # Newest-first (by mtime): if more than one candidate survives the name
+    # filters, prefer the most recently written one rather than failing.
     mapfile -t matches < <(
         find "$search_dir" -maxdepth 3 -type f \
             -name '*_stagetwo.model' ! -name '*_compiled.model' \
-            ! -path '*/checkpoints/*' -print 2>/dev/null | sort
+            ! -path '*/checkpoints/*' -printf '%T@\t%p\n' 2>/dev/null | sort -rn | cut -f2-
     )
     if [[ "${#matches[@]}" -eq 0 ]]; then
         mapfile -t matches < <(
             find "$search_dir" -maxdepth 3 -type f -name '*.model' \
-                ! -name '*_compiled.model' ! -path '*/checkpoints/*' -print 2>/dev/null | sort
+                ! -name '*_compiled.model' ! -path '*/checkpoints/*' \
+                -printf '%T@\t%p\n' 2>/dev/null | sort -rn | cut -f2-
         )
-        if [[ "${#matches[@]}" -eq 1 ]]; then
+        if [[ "${#matches[@]}" -ge 1 ]]; then
             echo "WARNING: seed $seed has no stage-two-named model; using ${matches[0]}" >&2
         fi
     fi
-    if [[ "${#matches[@]}" -ne 1 ]]; then
-        echo "ERROR: expected one usable MACE model for seed $seed; found ${#matches[@]}" >&2
+    if [[ "${#matches[@]}" -eq 0 ]]; then
+        echo "ERROR: no usable MACE model found for seed $seed" >&2
         echo "  searched: $search_dir" >&2
-        printf '  %s\n' "${matches[@]}" >&2
         exit 2
+    fi
+    if [[ "${#matches[@]}" -gt 1 ]]; then
+        echo "WARNING: seed $seed has ${#matches[@]} usable MACE models; using the newest:" >&2
+        printf '  %s\n' "${matches[@]}" >&2
     fi
     MODEL_ARGS+=(--mace-model "${matches[0]}")
 done
