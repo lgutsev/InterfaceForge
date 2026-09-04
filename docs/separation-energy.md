@@ -118,6 +118,19 @@ python -m interfaceforge.separation_energy audit/separation/stages/deepmd \
   --json-only -c campaign.yaml
 ```
 
+For a PyTorch member whose export failed, `model.ckpt.pt` can be supplied in
+place of `frozen_model.pth`; DeePMD's inference backend loads both formats. The
+LONI launcher prefers the frozen artifact and falls back to the checkpoint with
+a warning. This is appropriate for the ASE comparison, but a checkpoint is not
+a substitute for validating a frozen model in a downstream deployment engine.
+
+To retry the four DPA-2 exports as an idempotent Slurm array (without
+overwriting exports that already exist), run from the campaign root:
+
+```bash
+sbatch /path/to/InterfaceForge/launch_scripts/freeze_missing_deepmd_dpa2.sbatch
+```
+
 Use `python -m interfaceforge.separation_energy` in the DeePMD job so the
 interpreter supplied by the module imports the small evaluator directly. The
 explicit repository `src/` path exposes InterfaceForge without exposing a

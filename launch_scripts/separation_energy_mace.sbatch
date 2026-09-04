@@ -47,12 +47,23 @@ nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,nohea
 
 MODEL_ARGS=()
 for seed in 11 23 37 53; do
+    seed_dir="$CAMP/models/mace_committee/seed_${seed}"
     mapfile -t matches < <(
-        find "$CAMP/models/mace_committee/seed_${seed}" -maxdepth 3 -type f \
+        find "$seed_dir" -maxdepth 3 -type f \
             -name '*_stagetwo.model' -print 2>/dev/null | sort
     )
+    if [[ "${#matches[@]}" -eq 0 ]]; then
+        mapfile -t matches < <(
+            find "$seed_dir" -maxdepth 3 -type f -name '*.model' \
+                ! -name '*_compiled.model' -print 2>/dev/null | sort
+        )
+        if [[ "${#matches[@]}" -eq 1 ]]; then
+            echo "WARNING: seed $seed has no stage-two-named model; using ${matches[0]}" >&2
+        fi
+    fi
     if [[ "${#matches[@]}" -ne 1 ]]; then
-        echo "ERROR: expected one stage-two MACE model for seed $seed; found ${#matches[@]}" >&2
+        echo "ERROR: expected one usable MACE model for seed $seed; found ${#matches[@]}" >&2
+        echo "  searched: $seed_dir" >&2
         printf '  %s\n' "${matches[@]}" >&2
         exit 2
     fi

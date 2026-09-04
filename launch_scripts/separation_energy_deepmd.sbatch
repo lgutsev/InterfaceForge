@@ -29,8 +29,18 @@ done
 
 MODEL_ARGS=()
 for member in 000 001 002 003; do
-    model="$CAMP/models/deepmd/dpa2/model_${member}/frozen_model.pth"
-    [[ -s "$model" ]] || { echo "ERROR: missing or empty DeePMD model: $model" >&2; exit 2; }
+    model_dir="$CAMP/models/deepmd/dpa2/model_${member}"
+    frozen="$model_dir/frozen_model.pth"
+    checkpoint="$model_dir/model.ckpt.pt"
+    if [[ -s "$frozen" ]]; then
+        model="$frozen"
+    elif [[ -s "$checkpoint" ]]; then
+        model="$checkpoint"
+        echo "WARNING: member $member has no frozen_model.pth; using its training checkpoint for analysis: $checkpoint" >&2
+    else
+        echo "ERROR: DeePMD member $member has neither a frozen model nor a training checkpoint" >&2
+        exit 2
+    fi
     MODEL_ARGS+=(--deepmd-model "$model")
 done
 

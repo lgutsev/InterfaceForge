@@ -47,7 +47,12 @@ environment paths, wall time, job name, executable, and resource counts before r
   systems while physically retaining the source directory hierarchy.
 - `separation_energy_mace.sbatch` and `separation_energy_deepmd.sbatch`:
   evaluate the N- and Ti-terminated adhesion trees in isolated GPU environments
-  and write backend-neutral JSON partials.
+  and write backend-neutral JSON partials. The DeePMD job prefers each member's
+  frozen export but can evaluate a valid PyTorch `model.ckpt.pt` directly when
+  export has not completed.
+- `freeze_missing_deepmd_dpa2.sbatch`: idempotent four-member array job that
+  exports missing DPA-2 `frozen_model.pth` files and validates each through
+  DeePMD's inference API; existing exports are not overwritten.
 - `separation_energy_merge.sbatch`: merges those partials on `single` and renders
   the combined DFT/MACE/DeePMD reports.
 - `submit_separation_energy.sh`: submits both GPU jobs concurrently and attaches
@@ -65,12 +70,24 @@ finish, run this from the `Periodic_MLIPs` campaign root:
 The wrapper submits the MACE and DeePMD jobs independently on `gpu2`; neither
 process loads the other's compiled stack. The final `single` job runs only if
 both GPU jobs exit successfully and writes the combined report under
-`audit/separation/`. Override the campaign location when submitting from
-elsewhere:
+`audit/separation/`. Before submitting anything, it verifies all four MACE
+members and requires either `frozen_model.pth` or `model.ckpt.pt` for each
+DeePMD member. For MACE, it prefers a uniquely named `*_stagetwo.model` and
+accepts one unambiguous, uncompiled `.model` fallback for MACE versions that
+use a different final-model name. Override the campaign location when
+submitting from elsewhere:
 
 ```bash
 SEPARATION_CAMPAIGN_ROOT=/ddnB/work/lgutsev/LATech_PROJS/Cer_Interface/MD_Period/Periodic_MLIPs \
   /path/to/InterfaceForge/launch_scripts/submit_separation_energy.sh
+```
+
+Missing DeePMD exports do not block the comparison because DeePMD's PyTorch
+inference path supports the training checkpoint. To restore the frozen
+deployment artifacts separately, submit this from `Periodic_MLIPs`:
+
+```bash
+sbatch /path/to/InterfaceForge/launch_scripts/freeze_missing_deepmd_dpa2.sbatch
 ```
 
 Submit four independent committee members from the directory containing
