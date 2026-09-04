@@ -60,7 +60,12 @@ not used as package-generated templates.
   `iface package huggingface` turns a verified committee bundle into an
   upload-ready Hugging Face model repository — generated model card,
   `.gitattributes`, provenance manifest and the exact `hf upload` command.
-  InterfaceForge never contacts the Hub.
+  InterfaceForge never contacts the Hub. `--dedupe` stores the training data
+  once (the DeePMD NPY tree, full float64) instead of duplicating it into
+  extxyz too; `iface collect` now writes `move_mask.npy`/`system_meta.json`
+  per system so that tree is a complete record, and
+  `iface package materialize` regenerates `*.extxyz` from it with an
+  exact-round-trip writer, self-verified frame by frame before publishing.
 
 ## Verification status
 
@@ -324,6 +329,8 @@ drive:
 iface package huggingface stored_models/tin_sin_dpa2_v1 hf/tin_sin_dpa2_v1 \
   --repo-id myorg/tinsin-dpa2 --zip
 iface collect --archive backups/tin_sin_dataset_v1.zip     # or: iface package dataset-archive datasets/canonical backups/tin_sin_dataset_v1.zip
+iface package dataset-archive datasets/canonical backups/tin_sin_dataset_v1.zip --dedupe  # store the frames once
+iface package materialize restored/tin_sin_dataset_v1/data                                # regenerate *.extxyz from a deduped archive
 iface package verify hf/tin_sin_dpa2_v1
 ```
 

@@ -54,7 +54,12 @@ from .mlff_interfaces import (
     write_throttled_array_launcher,
 )
 from .mlip_compare import comparison_status, finalize_comparison, prepare_comparison
-from .packaging import pack_dataset_archive, pack_huggingface, verify_package
+from .packaging import (
+    materialize_dataset,
+    pack_dataset_archive,
+    pack_huggingface,
+    verify_package,
+)
 from .progress import mlip_progress
 from .progress import render as render_progress
 from .reference_import import (
@@ -263,9 +268,14 @@ def cmd_package(args: argparse.Namespace) -> int:
             args.dataset_root,
             args.output,
             include_extxyz=not args.no_extxyz,
+            dedupe=args.dedupe,
             compression=args.compression,
             label=args.label,
             force=args.force,
+        )
+    elif args.package_command == "materialize":
+        payload = materialize_dataset(
+            args.dataset_root, args.output, force=args.force
         )
     else:
         payload = verify_package(args.path)
@@ -1414,11 +1424,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-extxyz", action="store_true", help="Exclude the *.extxyz files (keep only DeePMD NPY)"
     )
     package_dataset.add_argument(
+        "--dedupe",
+        action="store_true",
+        help="Store the DeePMD NPY tree only (full precision); regenerate extxyz later "
+        "with 'iface package materialize'. Implies --no-extxyz; requires move_mask.npy "
+        "and system_meta.json in every system (written by this InterfaceForge version).",
+    )
+    package_dataset.add_argument(
         "--compression", choices=("deflated", "stored"), default="deflated"
     )
     package_dataset.add_argument("--label")
     package_dataset.add_argument("--force", action="store_true")
     package_dataset.set_defaults(func=cmd_package)
+
+    package_materialize = package_commands.add_parser(
+        "materialize",
+        help="Regenerate MACE *.extxyz from a DeePMD-only canonical dataset (exact precision, self-verified)",
+    )
+    package_materialize.add_argument("dataset_root", help="A canonical dataset directory with a deepmd/ tree")
+    package_materialize.add_argument(
+        "output", nargs="?", help="Where to write *.extxyz (default: dataset_root itself)"
+    )
+    package_materialize.add_argument("--force", action="store_true")
+    package_materialize.set_defaults(func=cmd_package)
 
     package_verify = package_commands.add_parser(
         "verify", help="Verify a dataset archive, Hugging Face package, or committee bundle"

@@ -14,6 +14,7 @@ from interfaceforge.cli import build_parser
 from interfaceforge.committee import collect_committee, verify_committee_bundle
 from interfaceforge.errors import ConfigurationError, SafetyError
 from interfaceforge.packaging import (
+    materialize_dataset,
     pack_dataset_archive,
     pack_huggingface,
     verify_package,
@@ -57,6 +58,70 @@ def write_canonical_dataset(root: Path) -> Path:
     (dataset / "manifest.csv").write_text("run_id,frames_retained\nrun_a,10\n", encoding="utf-8")
     (dataset / "frames.csv").write_text("split,run_id,energy_ev\ntrain,run_a,-1.0\n", encoding="utf-8")
     return dataset
+
+
+def write_materializable_dataset(root: Path, *, seed: int = 0) -> tuple[Path, dict[str, dict[str, np.ndarray]]]:
+    """A DeePMD-only dataset with high-precision floats and full
+    move_mask.npy / system_meta.json / frame_map.csv sidecars, i.e. exactly
+    what `iface collect` (post-sidecar) writes -- the dedupe/materialize
+    round-trip fixture. Returns the dataset root and the exact source arrays
+    per split for independent comparison against materialized extxyz."""
+
+    dataset = root / "datasets" / "canonical"
+    deepmd_root = dataset / "deepmd"
+    rng = np.random.default_rng(seed)
+    type_map = ["Si", "N", "Ti"]
+    expected: dict[str, dict[str, np.ndarray]] = {}
+    for split in ("train", "valid", "test"):
+        system = deepmd_root / split / "sys1"
+        set_dir = system / "set.000"
+        set_dir.mkdir(parents=True)
+        natoms, nframes = 4, 2
+        symbols = [type_map[i % 3] for i in range(natoms)]
+        atom_types = [type_map.index(symbol) for symbol in symbols]
+        (system / "type.raw").write_text("\n".join(map(str, atom_types)) + "\n", encoding="utf-8")
+        (system / "type_map.raw").write_text("\n".join(type_map) + "\n", encoding="utf-8")
+
+        coord = rng.standard_normal((nframes, natoms, 3)) * np.pi
+        box = np.tile((np.eye(3) * 11.987654321).reshape(1, 3, 3), (nframes, 1, 1))
+        energy = rng.standard_normal((nframes, 1)) * np.e * 100
+        force = rng.standard_normal((nframes, natoms, 3)) * 1e-6
+        move_mask = np.ones((nframes, natoms), dtype=np.int8)
+        move_mask[:, 0] = 0  # first atom frozen
+
+        np.save(set_dir / "coord.npy", coord.reshape(nframes, -1))
+        np.save(set_dir / "box.npy", box.reshape(nframes, -1))
+        np.save(set_dir / "energy.npy", energy)
+        np.save(set_dir / "force.npy", force.reshape(nframes, -1))
+        np.save(system / "move_mask.npy", move_mask)
+        (system / "system_meta.json").write_text(
+            json.dumps({"kind": "bulk", "tebeg_k": 450.0, "high_temperature": True}), encoding="utf-8"
+        )
+        with (system / "frame_map.csv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                ["local_frame", "source_frame", "source_path", "min_coordination_number", "mean_coordination_number"]
+            )
+            for index in range(nframes):
+                writer.writerow([index, index, f"/vasp/sys1/{split}", 4, 4.5])
+        expected[split] = {"coord": coord, "box": box, "energy": energy, "force": force, "move_mask": move_mask}
+
+    (dataset / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "strategy": "grouped",
+                "ratios": [0.8, 0.1, 0.1],
+                "stride": 5,
+                "type_map": type_map,
+                "frame_counts": {"train": 2, "valid": 2, "test": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (dataset / "manifest.csv").write_text("run_id\nsys1\n", encoding="utf-8")
+    (dataset / "frames.csv").write_text("run_id\nsys1\n", encoding="utf-8")
+    return dataset, expected
 
 
 def write_deepmd_committee(
@@ -158,6 +223,76 @@ class DatasetArchiveTests(unittest.TestCase):
             (root / "not-a-dataset").mkdir()
             with self.assertRaisesRegex(ConfigurationError, "no manifest.json"):
                 pack_dataset_archive(root / "not-a-dataset", root / "x.zip")
+
+
+# --------------------------------------------------------------------------- #
+# dedupe archive + materialize (single-copy storage, regenerated extxyz)
+# --------------------------------------------------------------------------- #
+class DedupeMaterializeTests(unittest.TestCase):
+    def test_dedupe_excludes_extxyz_and_materialize_round_trips_exact_precision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset, expected = write_materializable_dataset(root)
+
+            result = pack_dataset_archive(dataset, root / "backup" / "dedupe.zip", dedupe=True)
+            self.assertTrue(result["dedupe"])
+            self.assertFalse(result["include_extxyz"])
+            with zipfile.ZipFile(Path(result["archive"])) as handle:
+                names = handle.namelist()
+            self.assertFalse(any(name.endswith(".extxyz") for name in names))
+            self.assertTrue(any(name.endswith("move_mask.npy") for name in names))
+            self.assertTrue(verify_package(Path(result["archive"]))["valid"])
+
+            extracted = root / "restored"
+            with zipfile.ZipFile(Path(result["archive"])) as handle:
+                handle.extractall(extracted)
+            data_dir = extracted / "dedupe" / "data"
+
+            payload = materialize_dataset(data_dir)
+            self.assertEqual(payload["warnings"], [])
+            self.assertEqual({"train", "valid", "test"}, set(payload["materialized"]))
+
+            from ase.io import read
+
+            for split, arrays in expected.items():
+                frames = read(str(data_dir / f"{split}.extxyz"), index=":")
+                self.assertEqual(len(frames), 2)
+                for index, atoms in enumerate(frames):
+                    self.assertTrue(np.array_equal(atoms.positions, arrays["coord"][index]))
+                    self.assertTrue(np.array_equal(atoms.cell.array, arrays["box"][index]))
+                    self.assertTrue(np.array_equal(atoms.arrays["REF_forces"], arrays["force"][index]))
+                    self.assertEqual(atoms.info["REF_energy"], arrays["energy"][index][0])
+                    reconstructed = np.ones(len(atoms), dtype=np.int8)
+                    for constraint in atoms.constraints:
+                        reconstructed[np.asarray(constraint.get_indices(), dtype=int)] = 0
+                    self.assertTrue(np.array_equal(reconstructed, arrays["move_mask"][index]))
+                    self.assertEqual(atoms.info.get("IF_kind"), "bulk")
+                    self.assertTrue(atoms.info.get("IF_high_temperature"))
+
+    def test_dedupe_rejects_dataset_missing_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = write_canonical_dataset(root)  # no move_mask.npy / system_meta.json
+            with self.assertRaisesRegex(SafetyError, "move_mask.npy and system_meta.json"):
+                pack_dataset_archive(dataset, root / "x.zip", dedupe=True)
+
+    def test_materialize_degrades_gracefully_without_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = write_canonical_dataset(root)
+            payload = materialize_dataset(dataset, root / "materialized")
+            self.assertTrue(any("move_mask.npy" in w for w in payload["warnings"]))
+            self.assertTrue(any("system_meta.json" in w for w in payload["warnings"]))
+            self.assertTrue((root / "materialized" / "train.extxyz").is_file())
+
+    def test_materialize_refuses_overwrite_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset, _ = write_materializable_dataset(root)
+            materialize_dataset(dataset)
+            with self.assertRaisesRegex(SafetyError, "Refusing to overwrite"):
+                materialize_dataset(dataset)
+            materialize_dataset(dataset, force=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -342,8 +477,15 @@ class PackagingGuardrailTests(unittest.TestCase):
         self.assertEqual(args.package_command, "huggingface")
         self.assertTrue(args.zip)
 
-        args = parser.parse_args(["package", "dataset-archive", "datasets/canonical", "out.zip"])
+        args = parser.parse_args(
+            ["package", "dataset-archive", "datasets/canonical", "out.zip", "--dedupe"]
+        )
         self.assertEqual(args.package_command, "dataset-archive")
+        self.assertTrue(args.dedupe)
+
+        args = parser.parse_args(["package", "materialize", "datasets/canonical"])
+        self.assertEqual(args.package_command, "materialize")
+        self.assertIsNone(args.output)
 
         args = parser.parse_args(["package", "verify", "some.zip"])
         self.assertEqual(args.package_command, "verify")

@@ -51,6 +51,54 @@ Options: `--no-extxyz` keeps only the DeePMD NPY tree; `--compression stored`
 skips compression for very large datasets; `--force` overwrites an existing
 archive. POTCAR and OUTCAR files are never included.
 
+### Storing the frames once (`--dedupe`)
+
+By default the archive **mirrors** `iface collect`'s output exactly: it
+contains both `*.extxyz` and the DeePMD NPY tree, i.e. the same
+positions/forces/energies twice, once per format -- that's what `iface
+collect` already writes to disk, and mirroring it keeps "restore = unzip"
+exact. `--dedupe` stores the numeric frame data **once**:
+
+```bash
+iface package dataset-archive datasets/canonical backups/sintin_dataset_v1.zip --dedupe
+```
+
+Only the DeePMD NPY tree (full float64) goes in the archive; `*.extxyz` is
+dropped. The two formats are not actually redundant -- ASE's extxyz writer
+rounds positions/forces to about 8 decimal places, so extxyz can't losslessly
+regenerate the DeePMD side, and prior to this feature the DeePMD side didn't
+record which atoms were frozen or which classification a frame belonged to.
+`iface collect` therefore also writes `move_mask.npy` and `system_meta.json`
+next to each system's `set.000/` (siblings of `type.raw`, outside the
+directory DeePMD itself reads), so the DeePMD tree alone is now a complete
+record. `--dedupe` **requires** those sidecars in every system and refuses
+with a clear error if an older dataset is missing them.
+
+Restore a deduped archive, then regenerate the extxyz side before MACE
+training (DeePMD training can use `data/deepmd/` as-is, no materialization
+needed):
+
+```bash
+unzip backups/sintin_dataset_v1.zip -d restored
+iface package materialize restored/sintin_dataset_v1/data
+```
+
+`materialize` reads the NPY arrays plus `move_mask.npy` / `system_meta.json` /
+`frame_map.csv`, and writes `{train,valid,test}.extxyz` with a float formatter
+that round-trips exactly (Python's `repr`, not ASE's ~8-decimal default writer).
+Every regenerated frame is then read back with ASE and checked against the
+source arrays -- position, force, cell, energy, and the reconstructed
+constraint mask -- before anything is published; a mismatch raises rather than
+writing a silently wrong file. Pointed at an older DeePMD-only export that
+predates the sidecars, it still works: missing `move_mask.npy` degrades to
+"every atom mobile" and missing `system_meta.json` to "unclassified", each
+noted in the returned `warnings`, matching `iface collect`'s own fallback
+behavior for unrecoverable constraints.
+
+`materialize` also works standalone (not only on a restored `--dedupe`
+archive) against any canonical dataset directory that has a `deepmd/` tree,
+e.g. to backfill extxyz for a DeePMD-only export.
+
 ## Collecting a DeePMD committee
 
 `iface committee collect` now takes `--engine deepmd`. Point it at a
