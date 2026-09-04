@@ -1403,6 +1403,7 @@ def pack_campaign(
     *,
     output_root: str | Path | None = None,
     mace_committee_root: str | Path | None = None,
+    deepmd_root: str | Path | None = None,
     dataset_root: str | Path | None = None,
     repo_prefix: str | None = None,
     license_id: str = "mit",
@@ -1428,9 +1429,14 @@ def pack_campaign(
       (default ``<campaign>/models/mace_committee_520eV``, the same default
       ``iface mlip-progress`` uses) as ``mace_committee`` /
       ``mace_finetune_committee``;
-    * a DeePMD committee per architecture in ``models.deepmd.architectures``
-      under ``<campaign>/models/deepmd/<arch>`` (the ``iface train deepmd``
-      layout), when ``models.deepmd.enabled``.
+    * a DeePMD committee under every architecture directory that actually has
+      one found directly under ``deepmd_root`` (default
+      ``<campaign>/models/deepmd``, the ``iface train deepmd`` layout) --
+      any subdirectory containing at least one ``model_NNN/`` run. This does
+      not require ``models.deepmd.enabled`` or an ``architectures`` list in
+      ``campaign.yaml``: a trained committee on disk is packaged whether or
+      not the campaign file that generated it is still around or current,
+      the same way the MACE side is found by directory, not by config.
 
     One committee failing (a wrong ``--expected-members``, or a bundle name
     that already exists -- committee bundles are immutable, so re-running with
@@ -1447,6 +1453,9 @@ def pack_campaign(
         _resolved(mace_committee_root)
         if mace_committee_root is not None
         else campaign.root / "models" / "mace_committee_520eV"
+    )
+    deepmd_models_root = (
+        _resolved(deepmd_root) if deepmd_root is not None else campaign.root / "models" / "deepmd"
     )
     dataset_dir = (
         _resolved(dataset_root) if dataset_root is not None else campaign.root / "datasets" / "canonical"
@@ -1525,16 +1534,37 @@ def pack_campaign(
         component="mace-ft",
     )
 
-    deepmd_settings = dict(campaign.models.get("deepmd", {}))
-    if deepmd_settings.get("enabled", False):
-        for architecture in deepmd_settings.get("architectures", []):
-            _collect_and_package(
-                f"deepmd_{architecture}",
-                campaign.root / "models" / "deepmd" / str(architecture),
-                engine="deepmd",
-                component=str(architecture),
-            )
-    elif not deepmd_settings:
-        _skip("deepmd", "models.deepmd is not configured in this campaign")
+    architectures = _discover_deepmd_architectures(deepmd_models_root)
+    if not architectures:
+        _skip(
+            "deepmd",
+            f"no model_NNN/ committees found directly under {deepmd_models_root}",
+        )
+    for architecture in architectures:
+        _collect_and_package(
+            f"deepmd_{architecture}",
+            deepmd_models_root / architecture,
+            engine="deepmd",
+            component=architecture,
+        )
 
     return result
+
+
+def _discover_deepmd_architectures(deepmd_root: Path) -> list[str]:
+    """Every immediate subdirectory of ``deepmd_root`` with a ``model_NNN/``
+    run directly under it -- i.e. a trained committee, found by what is
+    actually on disk rather than ``campaign.yaml``'s ``models.deepmd``
+    config. Excludes ``evaluation/`` and ``smoke/``, which hold per-job
+    subtrees rather than ``model_NNN/`` runs directly.
+    """
+
+    if not deepmd_root.is_dir():
+        return []
+
+    def _has_model_run(directory: Path) -> bool:
+        return any(child.is_dir() and child.name.startswith("model_") for child in directory.iterdir())
+
+    return sorted(
+        child.name for child in deepmd_root.iterdir() if child.is_dir() and _has_model_run(child)
+    )

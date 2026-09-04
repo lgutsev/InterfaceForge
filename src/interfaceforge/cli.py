@@ -283,6 +283,7 @@ def cmd_package(args: argparse.Namespace) -> int:
             _campaign(args),
             output_root=args.output_root,
             mace_committee_root=args.mace_committee_root,
+            deepmd_root=args.deepmd_root,
             dataset_root=args.dataset_root,
             repo_prefix=args.repo_prefix,
             license_id=args.license,
@@ -1479,6 +1480,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--mace-committee-root",
         help="Directory holding mace_committee/ and mace_finetune_committee/ "
         "(default <campaign>/models/mace_committee_520eV, same default as 'iface mlip-progress')",
+    )
+    package_campaign.add_argument(
+        "--deepmd-root",
+        help="Directory to scan for DeePMD architecture committees, one model_NNN/ per "
+        "member, found by what's on disk -- not gated by models.deepmd in campaign.yaml "
+        "(default <campaign>/models/deepmd, the 'iface train deepmd' layout)",
     )
     package_campaign.add_argument(
         "--dataset-root", help="Default: <campaign>/datasets/canonical"

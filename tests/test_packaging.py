@@ -569,11 +569,15 @@ class PackagingGuardrailTests(unittest.TestCase):
         self.assertEqual(args.engine, "deepmd")
 
         args = parser.parse_args(
-            ["package", "campaign", "--repo-prefix", "myorg/sintin", "--tag", "v1", "--dedupe"]
+            [
+                "package", "campaign", "--repo-prefix", "myorg/sintin", "--tag", "v1",
+                "--dedupe", "--deepmd-root", "models/deepmd_custom",
+            ]
         )
         self.assertEqual(args.package_command, "campaign")
         self.assertEqual(args.repo_prefix, "myorg/sintin")
         self.assertTrue(args.dedupe)
+        self.assertEqual(args.deepmd_root, "models/deepmd_custom")
 
 
 # --------------------------------------------------------------------------- #
@@ -653,6 +657,56 @@ class PackageCampaignTests(unittest.TestCase):
             self.assertIn("dataset_archive", steps)
             self.assertIn("mace_committee", steps)
             self.assertIn("mace_finetune_committee", steps)
+
+    def test_deepmd_committee_is_found_by_directory_not_by_campaign_config(self) -> None:
+        """A trained DeePMD committee on disk is packaged even when
+        models.deepmd isn't enabled (or configured at all) in campaign.yaml --
+        the same directory-only discovery already used for MACE, not gated on
+        campaign.yaml staying in sync with what was actually trained."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            # mace enabled, deepmd left entirely unconfigured/disabled.
+            campaign = load_campaign(write_campaign(root, mace={"enabled": True}))
+
+            dpa2 = root / "models" / "deepmd" / "dpa2"
+            for index in range(4):
+                model_dir = dpa2 / f"model_{index:03d}"
+                model_dir.mkdir(parents=True)
+                (model_dir / "frozen_model.pth").write_bytes(f"frozen-{index}".encode())
+
+            payload = pack_campaign(campaign, include_huggingface=False, include_dataset_archive=False)
+
+            self.assertEqual(payload["errors"], [])
+            components = {entry["component"] for entry in payload["committees"]}
+            self.assertIn("dpa2", components)
+            self.assertNotIn("deepmd", {row["step"] for row in payload["skipped"]})
+
+    def test_deepmd_root_override_and_ignores_evaluation_and_smoke_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = load_campaign(write_campaign(root, mace={"enabled": True}))
+
+            custom_root = root / "elsewhere" / "deepmd_models"
+            dpa3 = custom_root / "dpa3"
+            for index in range(4):
+                model_dir = dpa3 / f"model_{index:03d}"
+                model_dir.mkdir(parents=True)
+                (model_dir / "frozen_model.pth").write_bytes(f"frozen-{index}".encode())
+            # These must not be mistaken for architecture directories.
+            (custom_root / "evaluation" / "dpa3" / "job_1").mkdir(parents=True)
+            (custom_root / "smoke" / "job_1" / "dpa3").mkdir(parents=True)
+
+            payload = pack_campaign(
+                campaign,
+                deepmd_root=custom_root,
+                include_huggingface=False,
+                include_dataset_archive=False,
+            )
+
+            self.assertEqual(payload["errors"], [])
+            components = {entry["component"] for entry in payload["committees"]}
+            self.assertEqual(components, {"dpa3"})
 
     def test_rerun_with_same_tag_reports_immutability_errors_not_corruption(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

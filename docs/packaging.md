@@ -39,8 +39,15 @@ reads from, and reports (never fails on) whatever isn't there:
   `<campaign>/models/mace_committee_520eV/{mace_committee,mace_finetune_committee}`
   (`--mace-committee-root` to override — the same default `iface mlip-progress`
   uses);
-- a DeePMD committee per architecture in `models.deepmd.architectures`, at
-  `<campaign>/models/deepmd/<arch>`, when `models.deepmd.enabled`.
+- a DeePMD committee under every architecture directory found directly under
+  `<campaign>/models/deepmd` (`--deepmd-root` to override) that actually has
+  one — any subdirectory containing at least one `model_NNN/` run
+  (`evaluation/` and `smoke/` are recognized and skipped, since their
+  `model_NNN/` runs sit one level deeper). This is found on disk, the same
+  way the MACE side is — it does **not** require `models.deepmd.enabled` or
+  an `architectures` list in `campaign.yaml`, so a trained committee is still
+  packaged even if the campaign file that generated it has since changed or
+  isn't the one you're pointing `-c` at.
 
 Everything lands under `<campaign>/packaged/` (`--output-root` to move it):
 `packaged/backups/<name>_dataset<tag>.zip`,
@@ -56,7 +63,8 @@ component failing doesn't stop the rest: check `skipped` (nothing there) and
 `errors` (something there) in the JSON output, and the command's exit code is
 1 if `errors` is non-empty.
 
-Other flags: `--dedupe` (dataset archive only, see below), `--no-huggingface`
+Other flags: `--deepmd-root` (override where DeePMD architectures are
+discovered), `--dedupe` (dataset archive only, see below), `--no-huggingface`
 (collect committees but skip the Hugging Face step), `--no-dataset-archive`,
 `--expected-members` (default 4), `--license`.
 
