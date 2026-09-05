@@ -1,111 +1,83 @@
 #!/usr/bin/env bash
-
-# Submit isolated MACE and DeePMD evaluations, then merge only after both pass.
-# Run from the Periodic_MLIPs campaign root:
-#   /path/to/InterfaceForge/launch_scripts/submit_separation_energy.sh
-
+# Run with bash from Periodic_MLIPs; --dry-run validates without submitting.
 set -euo pipefail
-
+case "${1:-}" in
+    '') DRY_RUN=0;;
+    --dry-run) DRY_RUN=1;;
+    -h|--help) echo 'Usage: bash submit_separation_energy.sh [--dry-run]'; exit 0;;
+    *) echo "ERROR: unknown argument: $1" >&2; exit 2;;
+esac
+[[ "$#" -le 1 ]] || { echo 'ERROR: too many arguments' >&2; exit 2; }
 CAMP="${SEPARATION_CAMPAIGN_ROOT:-$(pwd -P)}"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-# Same default InterfaceForge itself uses (`iface mlip-progress`, `iface
-# package campaign`): the MACE committee lives under an ENCUT-tagged
-# sub-directory, not directly under models/.
-MACE_COMMITTEE_ROOT="${MACE_COMMITTEE_ROOT:-$CAMP/models/mace_committee_520eV}"
-
-for required in \
-    "$CAMP/campaign.yaml" \
-    "$CAMP/adhesion/N_term_dft/manifest.json" \
-    "$CAMP/adhesion/Ti_term_dft/manifest.json" \
-    "$SCRIPT_DIR/separation_energy_mace.sbatch" \
-    "$SCRIPT_DIR/separation_energy_deepmd.sbatch" \
-    "$SCRIPT_DIR/separation_energy_merge.sbatch"; do
-    [[ -s "$required" ]] || { echo "ERROR: missing or empty file: $required" >&2; exit 2; }
-done
-
-# Validate every model before submitting either backend. This avoids leaving a
-# half-submitted workflow when one committee is incomplete.
-for seed in 11 23 37 53; do
-    seed_dir="$MACE_COMMITTEE_ROOT/mace_committee/seed_${seed}"
-    # mace_train_committee.sh exports the final model into mace_model/; its own
-    # checkpoints/ can independently contain a same-named *_stagetwo.model as
-    # training-time bookkeeping. Prefer the canonical export directory, and
-    # always exclude checkpoints/ so the two are never ambiguous.
-    search_dir="$seed_dir/mace_model"
-    [[ -d "$search_dir" ]] || search_dir="$seed_dir"
-    # Newest-first (by mtime): if more than one candidate survives the name
-    # filters, prefer the most recently written one rather than failing.
-    mapfile -t matches < <(
-        find "$search_dir" -maxdepth 3 -type f \
-            -name '*_stagetwo.model' ! -name '*_compiled.model' \
-            ! -path '*/checkpoints/*' -printf '%T@\t%p\n' 2>/dev/null | sort -rn | cut -f2-
-    )
-    if [[ "${#matches[@]}" -eq 0 ]]; then
-        mapfile -t matches < <(
-            find "$search_dir" -maxdepth 3 -type f -name '*.model' \
-                ! -name '*_compiled.model' ! -path '*/checkpoints/*' \
-                -printf '%T@\t%p\n' 2>/dev/null | sort -rn | cut -f2-
-        )
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+source "$SCRIPT_DIR/separation_energy_common.sh"
+sep_campaign
+for required in "$REPO_ROOT/src/interfaceforge/separation_energy.py" \
+    "$SCRIPT_DIR/separation_energy_mace.sbatch" "$SCRIPT_DIR/separation_energy_deepmd.sbatch" \
+    "$SCRIPT_DIR/separation_energy_merge.sbatch"; do sep_file "$required"; done
+sep_mace
+sep_deepmd
+echo "MACE committee: $MACE_COMMITTEE_ROOT"
+printf '  MACE model: %s\n' "${MACE_MODELS[@]}"
+printf '  DeePMD model: %s\n' "${DEEPMD_MODELS[@]}"
+if (( DRY_RUN )); then
+    echo 'Preflight passed; no jobs submitted. File checks do not verify training completion or runtime model loading.'
+    exit 0
+fi
+command -v sbatch >/dev/null || { echo 'ERROR: sbatch is unavailable' >&2; exit 2; }
+mkdir -p "$CAMP/audit/separation/runs"
+SEPARATION_RUN_DIR="$(mktemp -d "$CAMP/audit/separation/runs/run.XXXXXXXX")"
+printf '%s\n' "${MACE_MODELS[@]}" > "$SEPARATION_RUN_DIR/mace_models.txt"
+printf '%s\n' "${DEEPMD_MODELS[@]}" > "$SEPARATION_RUN_DIR/deepmd_models.txt"
+# Export through the environment rather than a comma-delimited value string,
+# which Slurm cannot parse safely when a path itself contains commas.
+export SEPARATION_CAMPAIGN_ROOT="$CAMP" INTERFACEFORGE_ROOT="$REPO_ROOT"
+export MACE_COMMITTEE_ROOT SEPARATION_RUN_DIR
+JOBS=()
+submission_exit() {
+    local rc=$?
+    if (( rc != 0 )); then
+        echo "ERROR: workflow submission stopped. Inspect $SEPARATION_RUN_DIR before retrying." >&2
+        if (( ${#JOBS[@]} )); then printf 'Already submitted (not cancelled): %s\n' "${JOBS[@]}" >&2; fi
     fi
-    if [[ "${#matches[@]}" -eq 0 ]]; then
-        echo "ERROR: no usable MACE model found for seed $seed" >&2
-        echo "  searched: $search_dir" >&2
-        exit 2
-    fi
-    if [[ "${#matches[@]}" -gt 1 ]]; then
-        echo "WARNING: seed $seed has ${#matches[@]} usable MACE models; using the newest:" >&2
-        printf '  %s\n' "${matches[@]}" >&2
-    fi
-done
-
-for member in 000 001 002 003; do
-    model_dir="$CAMP/models/deepmd/dpa2/model_${member}"
-    frozen="$model_dir/frozen_model.pth"
-    checkpoint="$model_dir/model.ckpt.pt"
-    if [[ ! -s "$frozen" && ! -s "$checkpoint" ]]; then
-        echo "ERROR: DeePMD member $member has neither a frozen model nor a training checkpoint:" >&2
-        echo "  $frozen" >&2
-        echo "  $checkpoint" >&2
-        exit 2
-    fi
-done
-
-export_arg="ALL,SEPARATION_CAMPAIGN_ROOT=$CAMP,INTERFACEFORGE_ROOT=$REPO_ROOT,MACE_COMMITTEE_ROOT=$MACE_COMMITTEE_ROOT"
-submit_job() {
-    local label="$1"
-    local output
-    local job_id
-    shift
-
-    if ! output="$(sbatch --parsable "$@" 2>&1)"; then
-        echo "ERROR: $label sbatch failed:" >&2
-        printf '%s\n' "$output" >&2
-        return 3
-    fi
-    # LONI writes allocation/SU notices to stdout before the parsable result.
-    # Preserve those notices, but extract the final standalone job-id line.
-    printf '%s\n' "$output" >&2
-    job_id="$(printf '%s\n' "$output" | sed -nE \
-        's/^[[:space:]]*([0-9]+)(;[^[:space:]]+)?[[:space:]]*$/\1/p' | tail -n 1)"
-    if [[ ! "$job_id" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: unexpected $label sbatch result" >&2
-        return 3
-    fi
-    printf '%s\n' "$job_id"
 }
-
-mace_id="$(submit_job MACE --chdir="$CAMP" --export="$export_arg" \
-    "$SCRIPT_DIR/separation_energy_mace.sbatch")"
-deepmd_id="$(submit_job DeePMD --chdir="$CAMP" --export="$export_arg" \
-    "$SCRIPT_DIR/separation_energy_deepmd.sbatch")"
-
-merge_id="$(submit_job merge --chdir="$CAMP" --export="$export_arg" \
-    --dependency="afterok:${mace_id}:${deepmd_id}" \
-    "$SCRIPT_DIR/separation_energy_merge.sbatch")"
-
-echo "Submitted separation-energy workflow"
-echo "  MACE:   $mace_id"
-echo "  DeePMD: $deepmd_id"
-echo "  merge:  $merge_id (afterok:$mace_id:$deepmd_id)"
-echo "  output: $CAMP/audit/separation"
+trap submission_exit EXIT
+submit_job() {
+    local label="$1" line parsed id='' output rc=0
+    shift
+    output="$(sbatch --parsable --chdir="$CAMP" --export=ALL "$@" 2>&1)" || rc=$?
+    printf '%s\n' "$output" > "$SEPARATION_RUN_DIR/$label.sbatch.log"
+    printf '%s\n' "$output" >&2
+    if (( rc )); then echo "ERROR: $label sbatch failed (exit $rc)" >&2; return 3; fi
+    # Accept accounting chatter and duplicate confirmation of the same ID;
+    # never silently choose between contradictory job IDs.
+    while IFS= read -r line; do
+        parsed=''
+        if [[ "$line" =~ ^[[:space:]]*([0-9]+)(\;[^[:space:]]+)?[[:space:]]*$ ]]; then
+            parsed="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^(sbatch:[[:space:]]+lua:[[:space:]]+)?Submitted[[:space:]]+(batch[[:space:]]+)?job[[:space:]]+([0-9]+)[[:space:]]*$ ]]; then
+            parsed="${BASH_REMATCH[3]}"
+        fi
+        [[ -n "$parsed" ]] || continue
+        if [[ -n "$id" && "$id" != "$parsed" ]]; then
+            echo "ERROR: conflicting $label job IDs; inspect $SEPARATION_RUN_DIR/$label.sbatch.log and your queue" >&2
+            return 3
+        fi
+        id="$parsed"
+    done <<< "$output"
+    [[ "$id" =~ ^[0-9]+$ && "$id" != 0 ]] || {
+        echo "ERROR: no unambiguous $label job ID; inspect the submission log and your queue" >&2; return 3;
+    }
+    SUBMITTED_ID="$id"
+    JOBS+=("$label=$id")
+    printf '%s\t%s\n' "$label" "$id" >> "$SEPARATION_RUN_DIR/jobs.tsv"
+    echo "Submitted $label: $id"
+}
+submit_job MACE "$SCRIPT_DIR/separation_energy_mace.sbatch"
+mace_id="$SUBMITTED_ID"
+submit_job DeePMD "$SCRIPT_DIR/separation_energy_deepmd.sbatch"
+deepmd_id="$SUBMITTED_ID"
+submit_job merge --dependency="afterok:${mace_id}:${deepmd_id}" "$SCRIPT_DIR/separation_energy_merge.sbatch"
+echo "Submitted separation-energy workflow; output: $SEPARATION_RUN_DIR"
+echo "Submission record: $SEPARATION_RUN_DIR/jobs.tsv"

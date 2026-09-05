@@ -67,28 +67,66 @@ finish, run this from the `Periodic_MLIPs` campaign root:
 /path/to/InterfaceForge/launch_scripts/submit_separation_energy.sh
 ```
 
-The wrapper submits the MACE and DeePMD jobs independently on `gpu2`; neither
-process loads the other's compiled stack. The final `single` job runs only if
-both GPU jobs exit successfully and writes the combined report under
-`audit/separation/`. Before submitting anything, it verifies all four MACE
-members and requires either `frozen_model.pth` or `model.ckpt.pt` for each
-DeePMD member. For MACE, it prefers a uniquely named `*_stagetwo.model` and
-accepts one unambiguous, uncompiled `.model` fallback for MACE versions that
-use a different final-model name. Override the campaign location when
-submitting from elsewhere:
+Preview the exact selected models without submitting jobs:
 
 ```bash
-SEPARATION_CAMPAIGN_ROOT=/ddnB/work/lgutsev/LATech_PROJS/Cer_Interface/MD_Period/Periodic_MLIPs \
-  /path/to/InterfaceForge/launch_scripts/submit_separation_energy.sh
+bash /path/to/InterfaceForge/launch_scripts/submit_separation_energy.sh --dry-run
 ```
 
-Missing DeePMD exports do not block the comparison because DeePMD's PyTorch
-inference path supports the training checkpoint. To restore the frozen
-deployment artifacts separately, submit this from `Periodic_MLIPs`:
+The wrapper validates all model files before submitting either GPU job. MACE
+selection checks `models/mace_committee_520eV/mace_committee` and the legacy
+`models/mace_committee` layout. It selects the one complete committee; if both
+are complete, choose explicitly. `MACE_COMMITTEE_ROOT` accepts the directory
+containing `seed_*` or its parent containing `mace_committee/`. Relative paths
+are resolved against the campaign root:
+
+```bash
+MACE_COMMITTEE_ROOT=models/mace_committee_520eV \
+  bash /path/to/InterfaceForge/launch_scripts/submit_separation_energy.sh --dry-run
+```
+
+Within each seed, selection uses immediate files in `mace_model/`, or the seed
+directory for legacy exports. It excludes compiled models, empty files,
+dangling links, checkpoint directories, and backups. Stage-two exports are
+preferred (including `stage_two`, `stage2`, and `swa` naming); otherwise an
+uncompiled `.model` is used with a warning. Multiple candidates at the same
+priority use the newest modification time with a warning, matching the
+existing launcher policy. Symlinked files are accepted. Review the printed
+paths if several exports exist.
+
+DeePMD prefers a readable nonempty `frozen_model.pth`, falling back to
+`model.ckpt.pt`. File checks do not establish training completion or validate
+model contents. Use finished training artifacts; files and symlink targets
+must remain unchanged while queued jobs run. Model loading occurs inside
+each backend's environment, and a load failure prevents the dependent merge.
+
+Each submission creates a separate `audit/separation/runs/run.XXXXXXXX/`.
+The printed directory contains the selected model lists, raw `sbatch` logs,
+`jobs.tsv`, backend results under `stages/`, and the final
+`separation_energy.{json,csv,md,png,svg,pdf}` reports after both jobs succeed.
+Jobs read the saved lists rather than rediscovering different models later.
+Repeated submissions have separate outputs; this does not suppress duplicate
+compute work. If submission stops partway through, the wrapper reports the
+known job IDs and preserves the scheduler output. Check those jobs before
+retrying; already submitted jobs are not cancelled automatically.
+
+The MACE and DeePMD jobs use separate GPU environments. Override the campaign
+location through `SEPARATION_CAMPAIGN_ROOT` when submitting from elsewhere.
+`MACE_CONDA_SH` and `MACE_ENV` override MACE activation paths; `DEEPMD_MODULE`
+and `INTERFACEFORGE_PYTHON` override the DeePMD module and merge interpreter.
+
+To restore missing DeePMD frozen artifacts separately, submit from
+`Periodic_MLIPs`:
 
 ```bash
 sbatch /path/to/InterfaceForge/launch_scripts/freeze_missing_deepmd_dpa2.sbatch
 ```
+
+Recovery locks each member, exports into a temporary directory, loads the
+export through `DeepPot`, and only then renames it to `frozen_model.pth`.
+Failed exports never replace the final artifact. Existing nonempty exports
+are left untouched; this recovery job does not certify their validity or
+LAMMPS compatibility.
 
 Submit four independent committee members from the directory containing
 `train.extxyz`, `valid.extxyz`, and `test.extxyz`:

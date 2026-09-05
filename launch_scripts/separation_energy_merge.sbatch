@@ -16,10 +16,11 @@ set -euo pipefail
 
 CAMP="${SEPARATION_CAMPAIGN_ROOT:-${SLURM_SUBMIT_DIR:?Submit this script with sbatch}}"
 REPO_ROOT="${INTERFACEFORGE_ROOT:?Set INTERFACEFORGE_ROOT to the InterfaceForge checkout}"
+CAMP="$(cd -- "$CAMP" && pwd -P)"
 IFACE_PYTHON="${INTERFACEFORGE_PYTHON:-/project/lgutsev/env/lgutsev_dev/bin/python}"
-MACE_JSON="$CAMP/audit/separation/stages/mace/separation_energy.json"
-DEEPMD_JSON="$CAMP/audit/separation/stages/deepmd/separation_energy.json"
-OUTPUT="$CAMP/audit/separation"
+OUTPUT="${SEPARATION_RUN_DIR:-$CAMP/audit/separation}"
+MACE_JSON="$OUTPUT/stages/mace/separation_energy.json"
+DEEPMD_JSON="$OUTPUT/stages/deepmd/separation_energy.json"
 
 [[ -x "$IFACE_PYTHON" ]] || { echo "ERROR: Python is not executable: $IFACE_PYTHON" >&2; exit 2; }
 for required in "$CAMP/campaign.yaml" "$MACE_JSON" "$DEEPMD_JSON"; do

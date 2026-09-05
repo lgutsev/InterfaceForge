@@ -18,29 +18,21 @@ set -euo pipefail
 
 CAMP="${SEPARATION_CAMPAIGN_ROOT:-${SLURM_SUBMIT_DIR:?Submit this script with sbatch}}"
 REPO_ROOT="${INTERFACEFORGE_ROOT:?Set INTERFACEFORGE_ROOT to the InterfaceForge checkout}"
-OUTPUT="$CAMP/audit/separation/stages/deepmd"
+source "$REPO_ROOT/launch_scripts/separation_energy_common.sh"
+sep_campaign
+OUTPUT="${SEPARATION_RUN_DIR:-$CAMP/audit/separation}/stages/deepmd"
 N_TERM="$CAMP/adhesion/N_term_dft"
 TI_TERM="$CAMP/adhesion/Ti_term_dft"
 DEEPMD_MODULE="${DEEPMD_MODULE:-deepmd-kit/r9.3-deepmd3.2.0.b.0-gpu}"
 
-for required in "$CAMP/campaign.yaml" "$N_TERM/manifest.json" "$TI_TERM/manifest.json"; do
-    [[ -s "$required" ]] || { echo "ERROR: missing or empty file: $required" >&2; exit 2; }
-done
-
+if [[ -n "${SEPARATION_RUN_DIR:-}" ]]; then
+    sep_read_models "$SEPARATION_RUN_DIR/deepmd_models.txt"
+else
+    sep_deepmd
+    SELECTED_MODELS=("${DEEPMD_MODELS[@]}")
+fi
 MODEL_ARGS=()
-for member in 000 001 002 003; do
-    model_dir="$CAMP/models/deepmd/dpa2/model_${member}"
-    frozen="$model_dir/frozen_model.pth"
-    checkpoint="$model_dir/model.ckpt.pt"
-    if [[ -s "$frozen" ]]; then
-        model="$frozen"
-    elif [[ -s "$checkpoint" ]]; then
-        model="$checkpoint"
-        echo "WARNING: member $member has no frozen_model.pth; using its training checkpoint for analysis: $checkpoint" >&2
-    else
-        echo "ERROR: DeePMD member $member has neither a frozen model nor a training checkpoint" >&2
-        exit 2
-    fi
+for model in "${SELECTED_MODELS[@]}"; do
     MODEL_ARGS+=(--deepmd-model "$model")
 done
 

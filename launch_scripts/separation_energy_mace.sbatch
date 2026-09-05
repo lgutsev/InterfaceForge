@@ -17,22 +17,27 @@ set -eo pipefail
 
 CAMP="${SEPARATION_CAMPAIGN_ROOT:-${SLURM_SUBMIT_DIR:?Submit this script with sbatch}}"
 REPO_ROOT="${INTERFACEFORGE_ROOT:?Set INTERFACEFORGE_ROOT to the InterfaceForge checkout}"
-# Same default InterfaceForge itself uses (`iface mlip-progress`, `iface
-# package campaign`): the MACE committee lives under an ENCUT-tagged
-# sub-directory, not directly under models/.
-MACE_COMMITTEE_ROOT="${MACE_COMMITTEE_ROOT:-$CAMP/models/mace_committee_520eV}"
-OUTPUT="$CAMP/audit/separation/stages/mace"
+source "$REPO_ROOT/launch_scripts/separation_energy_common.sh"
+sep_campaign
+OUTPUT="${SEPARATION_RUN_DIR:-$CAMP/audit/separation}/stages/mace"
 N_TERM="$CAMP/adhesion/N_term_dft"
 TI_TERM="$CAMP/adhesion/Ti_term_dft"
 
-for required in "$CAMP/campaign.yaml" "$N_TERM/manifest.json" "$TI_TERM/manifest.json"; do
-    [[ -s "$required" ]] || { echo "ERROR: missing or empty file: $required" >&2; exit 2; }
+if [[ -n "${SEPARATION_RUN_DIR:-}" ]]; then
+    sep_read_models "$SEPARATION_RUN_DIR/mace_models.txt"
+else
+    sep_mace
+    SELECTED_MODELS=("${MACE_MODELS[@]}")
+fi
+MODEL_ARGS=()
+for model in "${SELECTED_MODELS[@]}"; do
+    MODEL_ARGS+=(--mace-model "$model")
 done
 
 module purge
 set +u
-source /home/lgutsev/miniforge3/etc/profile.d/conda.sh
-conda activate /project/lgutsev/env/mace_env
+source "${MACE_CONDA_SH:-/home/lgutsev/miniforge3/etc/profile.d/conda.sh}"
+conda activate "${MACE_ENV:-/project/lgutsev/env/mace_env}"
 set -u
 
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
@@ -49,43 +54,6 @@ cd "$CAMP"
 python -c "import interfaceforge, mace, ase; print('InterfaceForge:', interfaceforge.__file__); print('MACE:', mace.__file__); print('ASE:', ase.__file__)"
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
 
-MODEL_ARGS=()
-for seed in 11 23 37 53; do
-    seed_dir="$MACE_COMMITTEE_ROOT/mace_committee/seed_${seed}"
-    # mace_train_committee.sh exports the final model into mace_model/; its own
-    # checkpoints/ can independently contain a same-named *_stagetwo.model as
-    # training-time bookkeeping. Prefer the canonical export directory, and
-    # always exclude checkpoints/ so the two are never ambiguous.
-    search_dir="$seed_dir/mace_model"
-    [[ -d "$search_dir" ]] || search_dir="$seed_dir"
-    # Newest-first (by mtime): if more than one candidate survives the name
-    # filters, prefer the most recently written one rather than failing.
-    mapfile -t matches < <(
-        find "$search_dir" -maxdepth 3 -type f \
-            -name '*_stagetwo.model' ! -name '*_compiled.model' \
-            ! -path '*/checkpoints/*' -printf '%T@\t%p\n' 2>/dev/null | sort -rn | cut -f2-
-    )
-    if [[ "${#matches[@]}" -eq 0 ]]; then
-        mapfile -t matches < <(
-            find "$search_dir" -maxdepth 3 -type f -name '*.model' \
-                ! -name '*_compiled.model' ! -path '*/checkpoints/*' \
-                -printf '%T@\t%p\n' 2>/dev/null | sort -rn | cut -f2-
-        )
-        if [[ "${#matches[@]}" -ge 1 ]]; then
-            echo "WARNING: seed $seed has no stage-two-named model; using ${matches[0]}" >&2
-        fi
-    fi
-    if [[ "${#matches[@]}" -eq 0 ]]; then
-        echo "ERROR: no usable MACE model found for seed $seed" >&2
-        echo "  searched: $search_dir" >&2
-        exit 2
-    fi
-    if [[ "${#matches[@]}" -gt 1 ]]; then
-        echo "WARNING: seed $seed has ${#matches[@]} usable MACE models; using the newest:" >&2
-        printf '  %s\n' "${matches[@]}" >&2
-    fi
-    MODEL_ARGS+=(--mace-model "${matches[0]}")
-done
 
 mkdir -p "$OUTPUT"
 srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-8}" \

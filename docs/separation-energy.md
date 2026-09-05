@@ -154,6 +154,30 @@ This writes the usual single `separation_energy.{json,csv,md,png,svg,pdf}` set.
 The two GPU jobs can run concurrently; submit the merge job with Slurm
 `afterok` dependencies if the whole workflow should complete automatically.
 
+### Bundled LONI submitter
+
+From the campaign root, run the preflight and then submit:
+
+```bash
+bash /path/to/InterfaceForge/launch_scripts/submit_separation_energy.sh --dry-run
+bash /path/to/InterfaceForge/launch_scripts/submit_separation_energy.sh
+```
+
+The wrapper discovers the current ENCUT-tagged MACE layout and the legacy
+layout, or accepts `MACE_COMMITTEE_ROOT` as either the seed directory's parent
+or the directory containing `mace_committee/`. Preflight prints the selected
+models and rejects missing files before any submission. It cannot verify
+training completion or runtime loading on the login node.
+
+Each submission writes model lists and scheduler logs to a new
+`audit/separation/runs/run.XXXXXXXX/` and passes that directory to all three
+jobs. Final reports are written there too, so retries cannot mix backend
+partials from different submissions. If a later submission fails, inspect
+`jobs.tsv` and the raw scheduler logs before retrying. See
+[launcher details](../launch_scripts/README.md#sintin-separation-energy-comparison)
+for discovery rules and overrides. Direct CLI calls retain their explicitly
+chosen output directories.
+
 ## Output
 
 `separation_energy.{json,csv,md}` plus a two-panel figure
