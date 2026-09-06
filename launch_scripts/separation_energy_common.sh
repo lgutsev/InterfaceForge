@@ -122,3 +122,24 @@ sep_read_models() {
     }
     for model in "${SELECTED_MODELS[@]}"; do sep_file "$model" || return 2; done
 }
+
+# De-duplicated, comma-joined top-level filesystem roots ("/ddnB", "/project",
+# ...) of the given absolute paths. The DeePMD job binds these into the
+# deepmd-kit Apptainer image so the InterfaceForge checkout, the campaign, and
+# the run directory are visible to the container Python -- the launcher resolves
+# every path with `pwd -P`, and the canonical device mount (e.g. /ddnB) is
+# frequently not what the site binds. Only ever emits first-path-segment names,
+# which cannot contain a comma, so the result is safe in APPTAINER_BIND /
+# SINGULARITY_BIND even when a campaign path itself contains commas or spaces.
+sep_bind_roots() {
+    local path stripped root seen=''
+    for path in "$@"; do
+        [[ "$path" == /* ]] || continue
+        stripped="${path#/}"
+        root="/${stripped%%/*}"
+        [[ "$root" != / ]] || continue
+        case ",$seen," in *",$root,"*) continue;; esac
+        seen="${seen:+$seen,}$root"
+    done
+    printf '%s' "$seen"
+}

@@ -39,7 +39,23 @@ done
 module purge
 module load "$DEEPMD_MODULE"
 
+# The deepmd-kit module provides Python from inside an Apptainer/Singularity
+# image ("Mounting image with FUSE" in the job log). Host environment variables
+# and non-default bind paths do not cross into that container automatically, so
+# the pure-Python InterfaceForge checkout ($REPO_ROOT/src -- stdlib + numpy +
+# PyYAML, all already inside the image) has to be handed across explicitly. The
+# image's own NumPy / PyTorch / CUDA / DeePMD stack is left untouched.
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+export APPTAINERENV_PYTHONPATH="$PYTHONPATH"
+export SINGULARITYENV_PYTHONPATH="$PYTHONPATH"
+export APPTAINERENV_PYTHONUNBUFFERED=1
+export SINGULARITYENV_PYTHONUNBUFFERED=1
+BIND_ROOTS="$(sep_bind_roots "$REPO_ROOT" "$CAMP" "$OUTPUT" "${SELECTED_MODELS[@]}")"
+if [[ -n "$BIND_ROOTS" ]]; then
+    export APPTAINER_BIND="${APPTAINER_BIND:+$APPTAINER_BIND,}$BIND_ROOTS"
+    export SINGULARITY_BIND="${SINGULARITY_BIND:+$SINGULARITY_BIND,}$BIND_ROOTS"
+fi
+
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
@@ -52,7 +68,63 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 cd "$CAMP"
 echo "Python: $(command -v python)"
 module list 2>&1
-python -c "import interfaceforge, deepmd, ase; print('InterfaceForge:', interfaceforge.__file__); print('DeePMD:', deepmd.__file__); print('ASE:', ase.__file__)"
+
+# Optional one-time self-heal: install interfaceforge into the module Python's
+# per-user site (~/.local). Off by default -- ~/.local is shared by every Python
+# of the same version -- so opt in with SEPARATION_DEEPMD_USER_PIP=1. --no-deps
+# keeps it to the pure-Python package; --no-build-isolation uses the image's
+# own build backend (compute nodes have no outbound network).
+if [[ "${SEPARATION_DEEPMD_USER_PIP:-0}" == 1 ]] && ! python -c 'import interfaceforge' 2>/dev/null; then
+    echo "SEPARATION_DEEPMD_USER_PIP=1: pip install --user --no-deps '$REPO_ROOT'" >&2
+    python -m pip install --user --no-deps --no-build-isolation "$REPO_ROOT" >&2 || true
+fi
+
+if ! python - <<'PY'
+import importlib, os, sys
+
+missing = []
+for name in ("interfaceforge", "numpy", "yaml", "ase", "deepmd"):
+    try:
+        module = importlib.import_module(name)
+    except Exception as exc:  # noqa: BLE001 - report every failure, do not raise
+        missing.append(f"{name}: {type(exc).__name__}: {exc}")
+    else:
+        print(f"  {name}: {getattr(module, '__file__', '<built-in>')}")
+if missing:
+    src = os.path.join(os.environ.get("INTERFACEFORGE_ROOT", ""), "src", "interfaceforge")
+    print("\n  cannot import inside the deepmd-kit container:", *missing, sep="\n    ", file=sys.stderr)
+    print(f"\n  sys.executable                = {sys.executable}", file=sys.stderr)
+    print(f"  PYTHONPATH (seen in container) = {os.environ.get('PYTHONPATH')}", file=sys.stderr)
+    print(f"  checkout visible in container  = {os.path.isdir(src)}  ({src})", file=sys.stderr)
+    sys.exit(4)
+PY
+then
+    cat >&2 <<EOF
+
+ERROR: the deepmd-kit container Python is missing modules the DeePMD
+separation-energy evaluation needs (details above).
+
+  * "checkout visible in container = False"
+      The InterfaceForge checkout sits on a filesystem the Apptainer image does
+      not bind. This launcher already binds: $BIND_ROOTS
+      Add whatever else is needed and resubmit, e.g.:
+        APPTAINER_BIND=/ddnB,/project,/work sbatch separation_energy_deepmd.sbatch
+
+  * "PYTHONPATH (seen in container) = None" while it is set on the host
+      The module wraps Python with 'apptainer exec --cleanenv'. This launcher
+      exports APPTAINERENV_PYTHONPATH / SINGULARITYENV_PYTHONPATH already -- make
+      sure the running copy is current.
+
+  * a third-party module (numpy / yaml / ase) missing
+      It is genuinely absent from the image. Install it once into the module
+      Python's user site and resubmit:
+        module load $DEEPMD_MODULE
+        python -m pip install --user --no-deps <module>
+      or run this job once with SEPARATION_DEEPMD_USER_PIP=1.
+EOF
+    exit 4
+fi
+
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
 
 mkdir -p "$OUTPUT"

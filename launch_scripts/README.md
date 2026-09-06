@@ -115,6 +115,19 @@ location through `SEPARATION_CAMPAIGN_ROOT` when submitting from elsewhere.
 `MACE_CONDA_SH` and `MACE_ENV` override MACE activation paths; `DEEPMD_MODULE`
 and `INTERFACEFORGE_PYTHON` override the DeePMD module and merge interpreter.
 
+The `deepmd-kit` module runs Python inside an Apptainer/Singularity image, so
+the DeePMD job exports `APPTAINERENV_PYTHONPATH` / `SINGULARITYENV_PYTHONPATH`
+(the checkout's `src/` only) and adds the top-level filesystem roots of the
+checkout, campaign, and run directory to `APPTAINER_BIND` / `SINGULARITY_BIND`
+so the container Python can see them. Prepend more roots through
+`APPTAINER_BIND` if your site needs them. If the job aborts in its preflight,
+the error names exactly what the container could not import (missing bind, a
+`--cleanenv` wrapper dropping `PYTHONPATH`, or a genuinely absent third-party
+module) and how to fix it. `SEPARATION_DEEPMD_USER_PIP=1` lets the job
+`pip install --user --no-deps` interfaceforge into the module Python's
+`~/.local` site as a one-time self-heal (off by default because `~/.local` is
+shared by every Python of that version).
+
 To restore missing DeePMD frozen artifacts separately, submit from
 `Periodic_MLIPs`:
 

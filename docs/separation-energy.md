@@ -108,6 +108,13 @@ shell):
 # complete site-packages directory to PYTHONPATH.
 export PYTHONPATH=/absolute/path/to/InterfaceForge/src${PYTHONPATH:+:$PYTHONPATH}
 
+# The module's Python runs inside an Apptainer/Singularity image. Host env vars
+# and non-default bind paths do not cross into it automatically, so also:
+export APPTAINERENV_PYTHONPATH=$PYTHONPATH SINGULARITYENV_PYTHONPATH=$PYTHONPATH
+export APPTAINER_BIND=/ddnB,/project,/work   # top-level roots of the checkout + campaign
+# InterfaceForge needs only stdlib + numpy + PyYAML here (all already in the
+# image); if PyYAML is somehow absent: python -m pip install --user --no-deps pyyaml
+
 python -m interfaceforge.separation_energy audit/separation/stages/deepmd \
   "interface/300K/MD_Vac/N_Term/SiN_TiN_N-term=adhesion/N_term_dft" \
   "interface/300K/MD_Vac/Ti_Term/SiN-TiN-Ti-term=adhesion/Ti_term_dft" \
@@ -140,6 +147,14 @@ second environment's NumPy/PyTorch/CUDA packages. A useful job preflight is:
 command -v python
 python -c "import interfaceforge, deepmd; print(interfaceforge.__file__, deepmd.__file__)"
 ```
+
+If that import fails with `ModuleNotFoundError: No module named 'interfaceforge'`
+even though `PYTHONPATH` is set, the module's containerised Python either did not
+inherit `PYTHONPATH` (use the `APPTAINERENV_PYTHONPATH` / `SINGULARITYENV_PYTHONPATH`
+form above) or cannot see the checkout's filesystem (bind its top-level root via
+`APPTAINER_BIND`). The bundled `separation_energy_deepmd.sbatch` sets both and
+aborts in a preflight that names the exact cause; see
+[launcher details](../launch_scripts/README.md#sintin-separation-energy-comparison).
 
 Finally, in the lightweight InterfaceForge development environment:
 

@@ -202,6 +202,38 @@ else:
         self.assertIn("model_002", result.stderr)
         self.assertNotIn("module: command not found", result.stderr)
 
+    def test_bind_roots_helper_dedupes_and_tolerates_commas_and_relatives(self) -> None:
+        script = (
+            f'source "{LAUNCHERS / "separation_energy_common.sh"}"\n'
+            'sep_bind_roots /ddnB/project/x/InterfaceForge /ddnB/work/y/camp '
+            '"/home/u/camp with,commas/models/m" relative/skipped /solo\n'
+        )
+        out = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout, "/ddnB,/home,/solo")
+
+    def test_deepmd_preflight_aborts_before_srun_when_container_cannot_import(self) -> None:
+        result = self.submit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = Path(self.records()[0]["run"])
+        self.command("module", "#!/bin/bash\nexit 0\n")
+        self.command("nvidia-smi", "#!/bin/bash\nexit 0\n")
+        # A containerised Python that cannot import the evaluator's modules.
+        self.command("python", '#!/bin/bash\n'
+                     'if [ "$1" = "-" ]; then echo "  deepmd: no" >&2; exit 4; fi\n'
+                     'exit 0\n')
+        reached = self.root / "srun_reached"
+        self.command("srun", f'#!/bin/bash\ntouch "{reached}"\n')
+        result = subprocess.run(
+            ["bash", str(LAUNCHERS / "separation_energy_deepmd.sbatch")],
+            env={**self.env, "SEPARATION_CAMPAIGN_ROOT": str(self.camp),
+                 "SEPARATION_RUN_DIR": str(run), "INTERFACEFORGE_ROOT": str(ROOT)},
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("deepmd-kit container", result.stderr)
+        self.assertFalse(reached.exists())
+
     def test_batch_jobs_use_pinned_models_and_merge_the_same_run(self) -> None:
         result = self.submit()
         self.assertEqual(result.returncode, 0, result.stderr)
