@@ -21,6 +21,7 @@ questionable outputs are flagged instead of silently repaired or relaunched.
 | Datasets | Streaming OUTCAR collection, synchronized MACE extxyz and DeePMD NPY layouts, provenance, leakage-aware splitting, mapped multi-root campaigns |
 | MLIPs | MACE and DeePMD committee generation/evaluation, live progress summaries, matched-frame cross-backend comparison, Allegro scaffolding, optional MACE-ROI training |
 | Interface validation | Work of adhesion, rigid separation curves, separation energy, stratified errors, committee uncertainty and publication-oriented summaries |
+| Chemical ordering | Fixed-composition N/O swap Monte Carlo over MLIP-relaxed interfaces, provenance archive, DFT-verification shortlist and VASP export (after PAIPAI) |
 | Surface chemistry | AFM-compatible reactive oxide cells, hydroxylation/proton-transfer states, phosphonate docking, VASP export and post-relaxation audits |
 | Portability and adapters | Checksummed model/dataset archives (mirror or single-copy `--dedupe`), upload-ready Hugging Face repository packaging, one-call campaign-wide packaging, AI2-Kit active learning, InterMat and RegFGW adapters |
 
@@ -76,6 +77,7 @@ run for each engine, version, chemistry, and cluster environment.
 | Archive committees/datasets or package for Hugging Face | [Packaging](docs/packaging.md) |
 | Build reactive magnetic oxide campaigns | [Reactive surfaces](docs/reactive-surfaces.md) |
 | Validate adhesion or separation energetics | [Interface energy](docs/interface-energy.md) and [separation energy](docs/separation-energy.md) |
+| Search N/O ordering at fixed composition | [Swap Monte Carlo](docs/swap-mc.md) |
 
 The complete topic index is in **[Documentation](docs/README.md)**.
 

@@ -91,6 +91,7 @@ from .surface import (
     plan_surface_campaign,
     select_surface_candidates,
 )
+from .swap_mc import register_commands as register_swap_mc_commands
 from .training import generate_deepmd_training, generate_mace_training
 from .validation import (
     adhesion_from_csv,
@@ -2054,6 +2055,12 @@ def build_parser() -> argparse.ArgumentParser:
     surface_select.add_argument("--max-per-state", type=int, default=2)
     surface_select.add_argument("--uncertainty-weight", type=float, default=0.65)
     surface_select.set_defaults(func=cmd_surface_select)
+
+    swap_mc = commands.add_parser(
+        "swap-mc",
+        help="Fixed-composition N/O swap Monte Carlo over MLIP-relaxed interfaces (after PAIPAI)",
+    )
+    register_swap_mc_commands(swap_mc.add_subparsers(dest="swap_mc_command", required=True))
 
     vasp = commands.add_parser("vasp", help="Safe VASP utilities")
     vasp_commands = vasp.add_subparsers(dest="vasp_command", required=True)
