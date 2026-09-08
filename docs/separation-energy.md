@@ -149,6 +149,12 @@ command -v python
 python -c "import interfaceforge, deepmd; print(interfaceforge.__file__, deepmd.__file__)"
 ```
 
+InterfaceForge explicitly uses DeePMD's `nlist_backend="native"` for this
+evaluation. In the LONI 3.2.0b0 module, the default `auto` mode selects the
+optional vesin path; frozen PyTorch DPA-2 models can fail there because a
+TorchScript `ModelOutputDef` class is unavailable. The native path avoids that
+serialization boundary and does not require a new Conda environment.
+
 If that import fails with `ModuleNotFoundError: No module named 'interfaceforge'`
 even though `PYTHONPATH` is set, the module's containerised Python either did not
 inherit `PYTHONPATH` (use the `APPTAINERENV_PYTHONPATH` / `SINGULARITYENV_PYTHONPATH`

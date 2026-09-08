@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +18,7 @@ from interfaceforge.swap_mc import (
     MlipRelaxer,
     RelaxOutcome,
     RelaxTier,
+    _build_calculator,
     export_candidates,
     initial_occupation,
     propose_swap,
@@ -34,6 +37,26 @@ _STACK = [
 ]
 _A = 3.0
 _NX = _NY = 3
+
+
+def test_deepmd_calculator_uses_native_neighbor_list(monkeypatch):
+    calls = []
+
+    class FakeDP:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    deepmd = types.ModuleType("deepmd")
+    calculator = types.ModuleType("deepmd.calculator")
+    calculator.DP = FakeDP
+    deepmd.calculator = calculator
+    monkeypatch.setitem(sys.modules, "deepmd", deepmd)
+    monkeypatch.setitem(sys.modules, "deepmd.calculator", calculator)
+
+    result = _build_calculator("deepmd", ["frozen_model.pth"], device="cuda", dtype="float64")
+
+    assert isinstance(result, FakeDP)
+    assert calls == [{"model": "frozen_model.pth", "nlist_backend": "native"}]
 
 
 def _interface(path: Path, *, n_oxygen: int = 0, freeze_bottom: bool = True) -> Atoms:

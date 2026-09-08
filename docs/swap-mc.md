@@ -57,6 +57,11 @@ Needs an importable committee environment (`mace-torch` or `deepmd-kit`), so run
 it where `iface validate separation-energy` runs. Use `--dry-run` anywhere else
 to resolve the sites and write `plan.json` without importing a backend.
 
+For DeePMD, InterfaceForge requests the native neighbor-list backend explicitly.
+This avoids a TorchScript deserialization failure in the optional vesin path of
+the LONI DeePMD 3.2.0b0 module, at the cost of slower neighbor-list construction.
+MACE remains the preferred driving backend for long swap-MC searches.
+
 ```bash
 iface swap-mc run interface/SiN_TiN_O25.vasp runs/order/O25 \
   --interface-band 6 --move-classes layer \

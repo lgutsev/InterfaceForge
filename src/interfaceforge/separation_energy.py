@@ -189,7 +189,11 @@ def _deepmd_energies(model_paths: Sequence[str], atoms_by_part: Mapping[str, Any
         ) from exc
     out: dict[str, dict[str, float]] = {}
     for path, label in zip(model_paths, _model_member_labels(model_paths), strict=True):
-        calc = DP(model=path)
+        # DeePMD 3.2.0b0 selects vesin when it is installed. Its frozen
+        # PyTorch models can then fail in _eval_lower_vesin when TorchScript
+        # cannot restore ModelOutputDef. The native path evaluates the same
+        # model without crossing that serialized Python-class boundary.
+        calc = DP(model=path, nlist_backend="native")
         member: dict[str, float] = {}
         for part, atoms in atoms_by_part.items():
             probe = atoms.copy()

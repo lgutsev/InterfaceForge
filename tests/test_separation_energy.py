@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from interfaceforge.errors import SafetyError
 from interfaceforge.separation_energy import (
+    _deepmd_energies,
     _family_block,
     _gamma,
     _model_member_labels,
@@ -113,6 +116,35 @@ class SeparationEnergyMathTests(unittest.TestCase):
     def test_duplicate_model_path_is_rejected(self) -> None:
         with self.assertRaises(SafetyError):
             _model_member_labels(["model.pth", "model.pth"])
+
+    def test_deepmd_uses_native_neighbor_list_backend(self) -> None:
+        calls = []
+
+        class FakeDP:
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+
+        class FakeAtoms:
+            def copy(self):
+                return self
+
+            def get_potential_energy(self):
+                return 1.0
+
+        deepmd = types.ModuleType("deepmd")
+        calculator = types.ModuleType("deepmd.calculator")
+        calculator.DP = FakeDP
+        deepmd.calculator = calculator
+        with patch.dict(sys.modules, {"deepmd": deepmd, "deepmd.calculator": calculator}):
+            energies = _deepmd_energies(
+                ["model_000/frozen_model.pth"], {"interface": FakeAtoms()}
+            )
+
+        self.assertEqual(
+            calls,
+            [{"model": "model_000/frozen_model.pth", "nlist_backend": "native"}],
+        )
+        self.assertEqual(energies["frozen_model"]["interface"], 1.0)
 
 
 class SeparationEnergyTests(unittest.TestCase):

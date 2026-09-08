@@ -471,7 +471,10 @@ def _build_calculator(family: str, model_paths: Sequence[str], *, device: str, d
                 "the DeePMD ASE calculator takes a single model; pass one --deepmd-model for the driving PES "
                 "(committee spread for DeePMD is not yet wired into the search)"
             )
-        return DP(model=model_paths[0])
+        # Keep compatibility with the LONI DeePMD 3.2.0b0 module: its auto
+        # backend selects vesin and may fail on frozen PyTorch models because
+        # ModelOutputDef is unavailable after TorchScript deserialization.
+        return DP(model=model_paths[0], nlist_backend="native")
     raise SafetyError("family must be 'mace' or 'deepmd'")
 
 
