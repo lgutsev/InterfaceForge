@@ -14,6 +14,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 source "$SCRIPT_DIR/separation_energy_common.sh"
 sep_campaign
 for required in "$REPO_ROOT/src/interfaceforge/separation_energy.py" \
+    "$SCRIPT_DIR/run_interfaceforge_module.py" \
     "$SCRIPT_DIR/separation_energy_mace.sbatch" "$SCRIPT_DIR/separation_energy_deepmd.sbatch" \
     "$SCRIPT_DIR/separation_energy_merge.sbatch"; do sep_file "$required"; done
 sep_mace

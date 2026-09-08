@@ -94,11 +94,13 @@ priority use the newest modification time with a warning, matching the
 existing launcher policy. Symlinked files are accepted. Review the printed
 paths if several exports exist.
 
-DeePMD prefers a readable nonempty `frozen_model.pth`, falling back to
-`model.ckpt.pt`. File checks do not establish training completion or validate
-model contents. Use finished training artifacts; files and symlink targets
-must remain unchanged while queued jobs run. Model loading occurs inside
-each backend's environment, and a load failure prevents the dependent merge.
+DeePMD requires a readable nonempty `frozen_model.pth` for all four members.
+Raw `model.ckpt.pt` training checkpoints are rejected because the LONI
+inference runtime can fail on them during evaluation. File checks do not
+establish training completion or validate model contents. Use finished frozen
+artifacts; files and symlink targets must remain unchanged while queued jobs
+run. Model loading occurs inside each backend's environment, and a load failure
+prevents the dependent merge.
 
 Each submission creates a separate `audit/separation/runs/run.XXXXXXXX/`.
 The printed directory contains the selected model lists, raw `sbatch` logs,
@@ -115,11 +117,13 @@ location through `SEPARATION_CAMPAIGN_ROOT` when submitting from elsewhere.
 `MACE_CONDA_SH` and `MACE_ENV` override MACE activation paths; `DEEPMD_MODULE`
 and `INTERFACEFORGE_PYTHON` override the DeePMD module and merge interpreter.
 
-The `deepmd-kit` module runs Python inside an Apptainer/Singularity image, so
-the DeePMD job exports `APPTAINERENV_PYTHONPATH` / `SINGULARITYENV_PYTHONPATH`
-(the checkout's `src/` only) and adds the top-level filesystem roots of the
-checkout, campaign, and run directory to `APPTAINER_BIND` / `SINGULARITY_BIND`
-so the container Python can see them. Prepend more roots through
+The `deepmd-kit` module runs Python inside an Apptainer/Singularity image. The
+DeePMD job executes a repository-local bootstrap by absolute path, so importing
+InterfaceForge does not depend on the container preserving `PYTHONPATH`. It
+also exports `APPTAINERENV_PYTHONPATH` / `SINGULARITYENV_PYTHONPATH` and adds
+the top-level filesystem roots of the checkout, campaign, and run directory to
+`APPTAINER_BIND` / `SINGULARITY_BIND` so the container Python can see them.
+Prepend more roots through
 `APPTAINER_BIND` if your site needs them. If the job aborts in its preflight,
 the error names exactly what the container could not import (missing bind, a
 `--cleanenv` wrapper dropping `PYTHONPATH`, or a genuinely absent third-party

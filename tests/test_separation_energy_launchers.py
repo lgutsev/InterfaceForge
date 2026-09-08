@@ -25,7 +25,9 @@ class SeparationEnergyLauncherTests(unittest.TestCase):
         for seed in SEEDS:
             self.put(self.mace / f"seed_{seed}/mace_model/final_stagetwo.model")
         for i in range(4):
-            self.put(self.camp / f"models/deepmd/dpa2/model_{i:03d}/model.ckpt.pt")
+            directory = self.camp / f"models/deepmd/dpa2/model_{i:03d}"
+            self.put(directory / "model.ckpt.pt")
+            self.put(directory / "frozen_model.pth")
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.calls = self.root / "calls.jsonl"
@@ -83,7 +85,7 @@ else:
         result = self.submit("--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(str(self.mace), result.stdout)
-        self.assertIn("model.ckpt.pt", result.stdout)
+        self.assertIn("frozen_model.pth", result.stdout)
         self.assertFalse(self.calls.exists())
         self.assertFalse((self.camp / "audit").exists())
 
@@ -144,14 +146,13 @@ else:
         self.assertFalse(self.calls.exists())
 
     def test_missing_deepmd_fails_before_any_submission(self) -> None:
-        (self.camp / "models/deepmd/dpa2/model_003/model.ckpt.pt").unlink()
+        (self.camp / "models/deepmd/dpa2/model_003/frozen_model.pth").unlink()
         result = self.submit()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("model_003", result.stderr)
         self.assertFalse(self.calls.exists())
 
     def test_submission_pins_models_exports_paths_and_isolates_retries(self) -> None:
-        self.put(self.camp / "models/deepmd/dpa2/model_000/frozen_model.pth")
         for _ in range(2):
             result = self.submit()
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -164,7 +165,7 @@ else:
         self.assertEqual(len((run / "mace_models.txt").read_text().splitlines()), 4)
         deepmd = (run / "deepmd_models.txt").read_text().splitlines()
         self.assertTrue(deepmd[0].endswith("frozen_model.pth"))
-        self.assertTrue(deepmd[1].endswith("model.ckpt.pt"))
+        self.assertTrue(deepmd[1].endswith("frozen_model.pth"))
         self.assertEqual((run / "jobs.tsv").read_text(), "MACE\t1001\nDeePMD\t1002\nmerge\t1003\n")
 
     def test_parser_accepts_cluster_and_standard_output(self) -> None:
@@ -191,7 +192,7 @@ else:
         result = self.submit()
         self.assertEqual(result.returncode, 0, result.stderr)
         run = Path(self.records()[0]["run"])
-        (self.camp / "models/deepmd/dpa2/model_002/model.ckpt.pt").unlink()
+        (self.camp / "models/deepmd/dpa2/model_002/frozen_model.pth").unlink()
         result = subprocess.run(
             ["bash", str(LAUNCHERS / "separation_energy_deepmd.sbatch")],
             env={**self.env, "SEPARATION_CAMPAIGN_ROOT": str(self.camp),
@@ -200,6 +201,23 @@ else:
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("model_002", result.stderr)
+        self.assertNotIn("module: command not found", result.stderr)
+
+    def test_old_run_pinned_to_checkpoint_is_rejected_before_module_load(self) -> None:
+        result = self.submit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = Path(self.records()[0]["run"])
+        models = (run / "deepmd_models.txt").read_text().splitlines()
+        models[1] = str(self.camp / "models/deepmd/dpa2/model_001/model.ckpt.pt")
+        (run / "deepmd_models.txt").write_text("\n".join(models) + "\n")
+        result = subprocess.run(
+            ["bash", str(LAUNCHERS / "separation_energy_deepmd.sbatch")],
+            env={**self.env, "SEPARATION_CAMPAIGN_ROOT": str(self.camp),
+                 "SEPARATION_RUN_DIR": str(run), "INTERFACEFORGE_ROOT": str(ROOT)},
+            text=True, capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("training checkpoint", result.stderr)
         self.assertNotIn("module: command not found", result.stderr)
 
     def test_bind_roots_helper_dedupes_and_tolerates_commas_and_relatives(self) -> None:
@@ -240,7 +258,6 @@ else:
         run = Path(self.records()[0]["run"])
         # New exports appear after submission: jobs must still use saved paths.
         self.put(self.mace / "seed_11/mace_model/new_stagetwo.model")
-        self.put(self.camp / "models/deepmd/dpa2/model_000/frozen_model.pth")
         self.command("module", "#!/bin/bash\nexit 0\n")
         self.command("nvidia-smi", "#!/bin/bash\nexit 0\n")
         self.command("python", "#!/bin/bash\nexit 0\n")
@@ -271,7 +288,7 @@ for suffix in ('json', 'csv', 'md', 'png', 'svg', 'pdf'):
         calls = [json.loads(line) for line in runtime_calls.read_text().splitlines()]
         self.assertNotIn(str(self.mace / "seed_11/mace_model/new_stagetwo.model"), calls[0])
         self.assertIn(str(self.mace / "seed_11/mace_model/final_stagetwo.model"), calls[0])
-        self.assertIn(str(self.camp / "models/deepmd/dpa2/model_000/model.ckpt.pt"), calls[1])
+        self.assertIn(str(self.camp / "models/deepmd/dpa2/model_000/frozen_model.pth"), calls[1])
         self.assertIn(str(run / "stages/mace/separation_energy.json"), calls[2])
         self.assertIn(str(run / "stages/deepmd/separation_energy.json"), calls[2])
         self.assertTrue((run / "separation_energy.pdf").is_file())
@@ -309,6 +326,7 @@ for suffix in ('json', 'csv', 'md', 'png', 'svg', 'pdf'):
         self.command("dp", '#!/bin/bash\nprintf partial > "${@: -1}"\nexit "${DP_FAIL:-0}"\n')
         self.command("python", '#!/bin/bash\nexit "${LOAD_FAIL:-0}"\n')
         directory = self.camp / "models/deepmd/dpa2/model_000"
+        (directory / "frozen_model.pth").unlink()
         for flag in ("DP_FAIL", "LOAD_FAIL"):
             result = self.freeze(**{flag: "1"})
             self.assertNotEqual(result.returncode, 0)

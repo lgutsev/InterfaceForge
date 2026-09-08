@@ -97,20 +97,22 @@ sep_mace() {
 }
 
 sep_deepmd() {
-    local member dir model
+    local member dir model failed=0
     DEEPMD_MODELS=()
     for member in 000 001 002 003; do
         dir="$CAMP/models/deepmd/dpa2/model_$member"
-        if [[ -f "$dir/frozen_model.pth" && -r "$dir/frozen_model.pth" && -s "$dir/frozen_model.pth" ]]; then
-            model="$dir/frozen_model.pth"
-        else
-            model="$dir/model.ckpt.pt"
-            sep_file "$model" || return 2
-            echo "WARNING: member $member has no usable frozen export; using checkpoint: $model" >&2
+        model="$dir/frozen_model.pth"
+        if ! sep_file "$model"; then
+            echo "ERROR: DPA-2 member $member is not deployable; a training checkpoint is not an inference export." >&2
+            failed=1
+            continue
         fi
-        sep_file "$model" || return 2
         DEEPMD_MODELS+=("$model")
     done
+    if (( failed )); then
+        echo 'Freeze the missing members first with launch_scripts/freeze_missing_deepmd_dpa2.sbatch.' >&2
+        return 2
+    fi
 }
 
 sep_read_models() {

@@ -19,6 +19,8 @@ set -euo pipefail
 CAMP="${SEPARATION_CAMPAIGN_ROOT:-${SLURM_SUBMIT_DIR:?Submit this script with sbatch}}"
 REPO_ROOT="${INTERFACEFORGE_ROOT:?Set INTERFACEFORGE_ROOT to the InterfaceForge checkout}"
 source "$REPO_ROOT/launch_scripts/separation_energy_common.sh"
+BOOTSTRAP="$REPO_ROOT/launch_scripts/run_interfaceforge_module.py"
+sep_file "$BOOTSTRAP"
 sep_campaign
 OUTPUT="${SEPARATION_RUN_DIR:-$CAMP/audit/separation}/stages/deepmd"
 N_TERM="$CAMP/adhesion/N_term_dft"
@@ -33,6 +35,11 @@ else
 fi
 MODEL_ARGS=()
 for model in "${SELECTED_MODELS[@]}"; do
+    [[ "${model##*/}" == frozen_model.pth ]] || {
+        echo "ERROR: pinned DeePMD model is a training checkpoint, not a frozen inference export: $model" >&2
+        echo 'Create the frozen models and submit a new separation-energy run.' >&2
+        exit 2
+    }
     MODEL_ARGS+=(--deepmd-model "$model")
 done
 
@@ -40,11 +47,9 @@ module purge
 module load "$DEEPMD_MODULE"
 
 # The deepmd-kit module provides Python from inside an Apptainer/Singularity
-# image ("Mounting image with FUSE" in the job log). Host environment variables
-# and non-default bind paths do not cross into that container automatically, so
-# the pure-Python InterfaceForge checkout ($REPO_ROOT/src -- stdlib + numpy +
-# PyYAML, all already inside the image) has to be handed across explicitly. The
-# image's own NumPy / PyTorch / CUDA / DeePMD stack is left untouched.
+# image ("Mounting image with FUSE" in the job log). Keep PYTHONPATH propagation
+# as a convenience, but do not depend on it: the final command executes the
+# repository-local bootstrap by path and that bootstrap inserts src/ itself.
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 export APPTAINERENV_PYTHONPATH="$PYTHONPATH"
 export SINGULARITYENV_PYTHONPATH="$PYTHONPATH"
@@ -79,9 +84,11 @@ if [[ "${SEPARATION_DEEPMD_USER_PIP:-0}" == 1 ]] && ! python -c 'import interfac
     python -m pip install --user --no-deps --no-build-isolation "$REPO_ROOT" >&2 || true
 fi
 
-if ! python - <<'PY'
+if ! python - "$REPO_ROOT/src" <<'PY'
 import importlib, os, sys
 
+source_root = sys.argv[1]
+sys.path.insert(0, source_root)
 missing = []
 for name in ("interfaceforge", "numpy", "yaml", "ase", "deepmd"):
     try:
@@ -91,7 +98,7 @@ for name in ("interfaceforge", "numpy", "yaml", "ase", "deepmd"):
     else:
         print(f"  {name}: {getattr(module, '__file__', '<built-in>')}")
 if missing:
-    src = os.path.join(os.environ.get("INTERFACEFORGE_ROOT", ""), "src", "interfaceforge")
+    src = os.path.join(source_root, "interfaceforge")
     print("\n  cannot import inside the deepmd-kit container:", *missing, sep="\n    ", file=sys.stderr)
     print(f"\n  sys.executable                = {sys.executable}", file=sys.stderr)
     print(f"  PYTHONPATH (seen in container) = {os.environ.get('PYTHONPATH')}", file=sys.stderr)
@@ -110,11 +117,6 @@ separation-energy evaluation needs (details above).
       Add whatever else is needed and resubmit, e.g.:
         APPTAINER_BIND=/ddnB,/project,/work sbatch separation_energy_deepmd.sbatch
 
-  * "PYTHONPATH (seen in container) = None" while it is set on the host
-      The module wraps Python with 'apptainer exec --cleanenv'. This launcher
-      exports APPTAINERENV_PYTHONPATH / SINGULARITYENV_PYTHONPATH already -- make
-      sure the running copy is current.
-
   * a third-party module (numpy / yaml / ase) missing
       It is genuinely absent from the image. Install it once into the module
       Python's user site and resubmit:
@@ -129,7 +131,7 @@ nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,nohea
 
 mkdir -p "$OUTPUT"
 srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-8}" \
-    python -u -m interfaceforge.separation_energy "$OUTPUT" \
+    python -u "$BOOTSTRAP" interfaceforge.separation_energy "$OUTPUT" \
     "interface/300K/MD_Vac/N_Term/SiN_TiN_N-term=$N_TERM" \
     "interface/300K/MD_Vac/Ti_Term/SiN-TiN-Ti-term=$TI_TERM" \
     "${MODEL_ARGS[@]}" \
