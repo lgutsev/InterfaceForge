@@ -20,7 +20,7 @@
 # Conda activation hooks are not always compatible with nounset.
 set -eo pipefail
 
-BASE_DIR="${SLURM_SUBMIT_DIR:?This script must be submitted with sbatch}"
+SUBMIT_DIR="${SLURM_SUBMIT_DIR:?This script must be submitted with sbatch}"
 SEED="${MACE_SEED:?Set MACE_SEED when submitting this job}"
 
 if [[ ! "$SEED" =~ ^[0-9]+$ ]]; then
@@ -40,12 +40,73 @@ for required_value in MODEL_PREFIX ENERGY_KEY FORCES_KEY; do
     fi
 done
 
+# Resolve both the current campaign layout and the legacy layout used by this
+# standalone launcher. Explicit overrides may be absolute or relative to the
+# directory from which sbatch was invoked.
+dataset_is_complete() {
+    local directory="$1"
+    [[ -s "$directory/train.extxyz" && \
+       -s "$directory/valid.extxyz" && \
+       -s "$directory/test.extxyz" ]]
+}
+
+if [[ -n "${MACE_DATASET_DIR:-}" ]]; then
+    if [[ "$MACE_DATASET_DIR" = /* ]]; then
+        DATASET_DIR="$MACE_DATASET_DIR"
+    else
+        DATASET_DIR="$SUBMIT_DIR/$MACE_DATASET_DIR"
+    fi
+elif dataset_is_complete "$SUBMIT_DIR/datasets/canonical"; then
+    DATASET_DIR="$SUBMIT_DIR/datasets/canonical"
+elif dataset_is_complete "$SUBMIT_DIR"; then
+    DATASET_DIR="$SUBMIT_DIR"
+elif dataset_is_complete "$SUBMIT_DIR/../../datasets/canonical"; then
+    DATASET_DIR="$SUBMIT_DIR/../../datasets/canonical"
+else
+    echo "ERROR: could not locate a complete MACE train/valid/test split." >&2
+    echo "Checked:" >&2
+    echo "  $SUBMIT_DIR/datasets/canonical" >&2
+    echo "  $SUBMIT_DIR" >&2
+    echo "  $SUBMIT_DIR/../../datasets/canonical" >&2
+    echo "Set MACE_DATASET_DIR to override dataset discovery." >&2
+    exit 1
+fi
+
+if ! dataset_is_complete "$DATASET_DIR"; then
+    echo "ERROR: MACE_DATASET_DIR is not a complete train/valid/test split: $DATASET_DIR" >&2
+    exit 1
+fi
+DATASET_DIR="$(cd "$DATASET_DIR" && pwd -P)"
+
+if [[ -n "${MACE_OUTPUT_ROOT:-}" ]]; then
+    if [[ "$MACE_OUTPUT_ROOT" = /* ]]; then
+        OUTPUT_ROOT="$MACE_OUTPUT_ROOT"
+    else
+        OUTPUT_ROOT="$SUBMIT_DIR/$MACE_OUTPUT_ROOT"
+    fi
+elif [[ -d "$SUBMIT_DIR/datasets/canonical" ]]; then
+    OUTPUT_ROOT="$SUBMIT_DIR/models/mace_committee_520eV"
+else
+    OUTPUT_ROOT="$SUBMIT_DIR"
+fi
+mkdir -p "$OUTPUT_ROOT"
+OUTPUT_ROOT="$(cd "$OUTPUT_ROOT" && pwd -P)"
+
 MODEL_NAME="${MODEL_PREFIX}_seed${SEED}"
-RUN_DIR="$BASE_DIR/mace_committee/seed_${SEED}"
+RUN_DIR="$OUTPUT_ROOT/mace_committee/seed_${SEED}"
 MODEL_DIR="$RUN_DIR/mace_model"
 CHECKPOINTS_DIR="$RUN_DIR/checkpoints"
 RESULTS_DIR="$RUN_DIR/results"
 LOG_DIR="$RUN_DIR/logs"
+
+if [[ "${MACE_PREFLIGHT_ONLY:-False}" == "True" ]]; then
+    echo "MACE committee preflight succeeded"
+    echo "  submit dir:  $SUBMIT_DIR"
+    echo "  dataset dir: $DATASET_DIR"
+    echo "  output root: $OUTPUT_ROOT"
+    echo "  run dir:     $RUN_DIR"
+    exit 0
+fi
 
 mkdir -p \
     "$MODEL_DIR" \
@@ -114,9 +175,9 @@ if [[ ! -x "$MACE_TRAIN_BIN" ]]; then
 fi
 
 # All committee members use the same fixed data split.
-TRAIN_FILE="$BASE_DIR/train.extxyz"
-VALID_FILE="$BASE_DIR/valid.extxyz"
-TEST_FILE="$BASE_DIR/test.extxyz"
+TRAIN_FILE="$DATASET_DIR/train.extxyz"
+VALID_FILE="$DATASET_DIR/valid.extxyz"
+TEST_FILE="$DATASET_DIR/test.extxyz"
 
 for f in "$TRAIN_FILE" "$VALID_FILE" "$TEST_FILE"; do
     if [[ ! -s "$f" ]]; then
@@ -129,6 +190,8 @@ echo
 echo "Committee member:"
 echo "  seed:       $SEED"
 echo "  model name: $MODEL_NAME"
+echo "  dataset dir: $DATASET_DIR"
+echo "  output root: $OUTPUT_ROOT"
 echo "  run dir:    $RUN_DIR"
 echo "  energy key: $ENERGY_KEY"
 echo "  forces key: $FORCES_KEY"

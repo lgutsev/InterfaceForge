@@ -141,8 +141,9 @@ Failed exports never replace the final artifact. Existing nonempty exports
 are left untouched; this recovery job does not certify their validity or
 LAMMPS compatibility.
 
-Submit four independent committee members from the directory containing
-`train.extxyz`, `valid.extxyz`, and `test.extxyz`:
+Submit four independent committee members from the campaign root. The launcher
+uses `datasets/canonical/{train,valid,test}.extxyz` and writes models below
+`models/mace_committee_520eV/`, matching `iface mlip-progress`:
 
 ```bash
 for seed in 11 23 37 53; do
@@ -185,9 +186,7 @@ wget -P /project/lgutsev/foundational_models/mace/ \
 
 Check `python -c "import mace; print(mace.__version__)"` in `mace_env` first.
 
-Then submit four seeds **from the same directory that holds the committee's
-`train.extxyz` / `valid.extxyz` / `test.extxyz`** (the parent of the existing
-`mace_committee/`):
+Then submit four seeds from the campaign root:
 
 ```bash
 FM=/project/lgutsev/foundational_models/mace/mace-mpa-0-medium.model
@@ -196,6 +195,13 @@ for seed in 11 23 37 53; do
         mace_finetune_committee.sh
 done
 ```
+
+Both MACE committee launchers retain compatibility with the older flat layout
+where the submission directory directly contains the three `.extxyz` files.
+For custom layouts, set `MACE_DATASET_DIR` and/or `MACE_OUTPUT_ROOT`; relative
+overrides are resolved from the submission directory. Set
+`MACE_PREFLIGHT_ONLY=True` to print the resolved paths and exit before loading
+the compute environment or starting training.
 
 Defaults: naive fine-tuning (`MACE_MULTIHEADS=False` — specialise to this
 dataset, no replay head), `MACE_E0S=foundation` (reuse the foundation's atomic

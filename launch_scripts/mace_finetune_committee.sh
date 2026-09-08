@@ -32,7 +32,7 @@
 
 set -eo pipefail
 
-BASE_DIR="${SLURM_SUBMIT_DIR:?This script must be submitted with sbatch}"
+SUBMIT_DIR="${SLURM_SUBMIT_DIR:?This script must be submitted with sbatch}"
 SEED="${MACE_SEED:?Set MACE_SEED when submitting this job}"
 FOUNDATION_MODEL="${MACE_FOUNDATION_MODEL:?Set MACE_FOUNDATION_MODEL (a .model path, or small|medium|large)}"
 
@@ -75,12 +75,75 @@ PATIENCE="${MACE_PATIENCE:-10}"
 BATCH_SIZE="${MACE_BATCH_SIZE:-8}"
 VALID_BATCH_SIZE="${MACE_VALID_BATCH_SIZE:-4}"
 
+# Resolve both the current campaign layout and the legacy layout used by the
+# original standalone committee scripts. Explicit overrides may be absolute or
+# relative to the directory from which sbatch was invoked.
+dataset_is_complete() {
+    local directory="$1"
+    [[ -s "$directory/train.extxyz" && \
+       -s "$directory/valid.extxyz" && \
+       -s "$directory/test.extxyz" ]]
+}
+
+if [[ -n "${MACE_DATASET_DIR:-}" ]]; then
+    if [[ "$MACE_DATASET_DIR" = /* ]]; then
+        DATASET_DIR="$MACE_DATASET_DIR"
+    else
+        DATASET_DIR="$SUBMIT_DIR/$MACE_DATASET_DIR"
+    fi
+elif dataset_is_complete "$SUBMIT_DIR/datasets/canonical"; then
+    DATASET_DIR="$SUBMIT_DIR/datasets/canonical"
+elif dataset_is_complete "$SUBMIT_DIR"; then
+    DATASET_DIR="$SUBMIT_DIR"
+elif dataset_is_complete "$SUBMIT_DIR/../../datasets/canonical"; then
+    DATASET_DIR="$SUBMIT_DIR/../../datasets/canonical"
+else
+    echo "ERROR: could not locate a complete MACE train/valid/test split." >&2
+    echo "Checked:" >&2
+    echo "  $SUBMIT_DIR/datasets/canonical" >&2
+    echo "  $SUBMIT_DIR" >&2
+    echo "  $SUBMIT_DIR/../../datasets/canonical" >&2
+    echo "Set MACE_DATASET_DIR to override dataset discovery." >&2
+    exit 1
+fi
+
+if ! dataset_is_complete "$DATASET_DIR"; then
+    echo "ERROR: MACE_DATASET_DIR is not a complete train/valid/test split: $DATASET_DIR" >&2
+    exit 1
+fi
+DATASET_DIR="$(cd "$DATASET_DIR" && pwd -P)"
+
+if [[ -n "${MACE_OUTPUT_ROOT:-}" ]]; then
+    if [[ "$MACE_OUTPUT_ROOT" = /* ]]; then
+        OUTPUT_ROOT="$MACE_OUTPUT_ROOT"
+    else
+        OUTPUT_ROOT="$SUBMIT_DIR/$MACE_OUTPUT_ROOT"
+    fi
+elif [[ -d "$SUBMIT_DIR/datasets/canonical" ]]; then
+    # Modern campaign root: keep artifacts where iface mlip-progress expects.
+    OUTPUT_ROOT="$SUBMIT_DIR/models/mace_committee_520eV"
+else
+    # Legacy invocation from the directory containing the split/model roots.
+    OUTPUT_ROOT="$SUBMIT_DIR"
+fi
+mkdir -p "$OUTPUT_ROOT"
+OUTPUT_ROOT="$(cd "$OUTPUT_ROOT" && pwd -P)"
+
 MODEL_NAME="${MODEL_PREFIX}_ft_seed${SEED}"
-RUN_DIR="$BASE_DIR/mace_finetune_committee/seed_${SEED}"
+RUN_DIR="$OUTPUT_ROOT/mace_finetune_committee/seed_${SEED}"
 MODEL_DIR="$RUN_DIR/mace_model"
 CHECKPOINTS_DIR="$RUN_DIR/checkpoints"
 RESULTS_DIR="$RUN_DIR/results"
 LOG_DIR="$RUN_DIR/logs"
+
+if [[ "${MACE_PREFLIGHT_ONLY:-False}" == "True" ]]; then
+    echo "MACE fine-tune preflight succeeded"
+    echo "  submit dir:  $SUBMIT_DIR"
+    echo "  dataset dir: $DATASET_DIR"
+    echo "  output root: $OUTPUT_ROOT"
+    echo "  run dir:     $RUN_DIR"
+    exit 0
+fi
 
 mkdir -p "$MODEL_DIR" "$CHECKPOINTS_DIR" "$RESULTS_DIR" "$LOG_DIR"
 
@@ -121,9 +184,9 @@ MACE_TRAIN_BIN="$CONDA_PREFIX/bin/mace_run_train"
 MACE_EVAL_BIN="$CONDA_PREFIX/bin/mace_eval_configs"
 [[ -x "$MACE_TRAIN_BIN" ]] || { echo "ERROR: mace_run_train not found: $MACE_TRAIN_BIN"; exit 1; }
 
-TRAIN_FILE="$BASE_DIR/train.extxyz"
-VALID_FILE="$BASE_DIR/valid.extxyz"
-TEST_FILE="$BASE_DIR/test.extxyz"
+TRAIN_FILE="$DATASET_DIR/train.extxyz"
+VALID_FILE="$DATASET_DIR/valid.extxyz"
+TEST_FILE="$DATASET_DIR/test.extxyz"
 for f in "$TRAIN_FILE" "$VALID_FILE" "$TEST_FILE"; do
     [[ -s "$f" ]] || { echo "ERROR: missing or empty file: $f"; exit 1; }
 done
@@ -142,6 +205,8 @@ echo "  foundation model: $FOUNDATION_MODEL"
 echo "  default dtype:    $DEFAULT_DTYPE"
 echo "  E0s:              $E0S"
 echo "  multiheads:       $MULTIHEADS"
+echo "  dataset dir:      $DATASET_DIR"
+echo "  output root:      $OUTPUT_ROOT"
 echo "  run dir:          $RUN_DIR"
 echo
 
