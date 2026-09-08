@@ -78,8 +78,51 @@ else:
     def test_bash_syntax(self) -> None:
         for name in ("submit_separation_energy.sh", "separation_energy_common.sh",
                      "separation_energy_mace.sbatch", "separation_energy_deepmd.sbatch",
-                     "separation_energy_merge.sbatch", "freeze_missing_deepmd_dpa2.sbatch"):
+                     "separation_energy_merge.sbatch", "freeze_missing_deepmd_dpa2.sbatch",
+                     "prepare_interface_excess.sh", "submit_interface_excess.sh"):
             subprocess.run(["bash", "-n", str(LAUNCHERS / name)], check=True)
+
+    def test_entries_file_overrides_default_adhesion_trees(self) -> None:
+        result = self.submit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = Path(self.records()[0]["run"])
+        self.command("module", "#!/bin/bash\nexit 0\n")
+        self.command("nvidia-smi", "#!/bin/bash\nexit 0\n")
+        self.command("python", "#!/bin/bash\nexit 0\n")
+        activation = self.root / "conda.sh"
+        activation.write_text('conda() { return 0; }\n')
+        runtime_calls = self.root / "runtime.jsonl"
+        self.command("srun", """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with open(os.environ['RUNTIME_CALLS'], 'a') as f:
+    f.write(json.dumps(args) + '\\n')
+output = Path(args[args.index('interfaceforge.separation_energy') + 1])
+output.mkdir(parents=True, exist_ok=True)
+(output / 'separation_energy.json').write_text('{}')
+""")
+        rel = "audit/interface_excess/N_term"
+        for part in ("interface", "slab_a", "slab_b"):
+            self.put(self.camp / rel / part / "OUTCAR")
+        entries = self.camp / "audit/interface_excess/entries.txt"
+        entries.parent.mkdir(parents=True, exist_ok=True)
+        entries.write_text(f"interface/bulk-ref/N_term/SiN_TiN_N-term={rel}\n")
+        env = {**self.env, "SEPARATION_CAMPAIGN_ROOT": str(self.camp),
+               "SEPARATION_RUN_DIR": str(run), "INTERFACEFORGE_ROOT": str(ROOT),
+               "MACE_CONDA_SH": str(activation), "RUNTIME_CALLS": str(runtime_calls),
+               "SEPARATION_ENTRIES_FILE": str(entries), "SEPARATION_REFERENCE": "bulk",
+               "SEPARATION_N_INTERFACES": "1"}
+        result = subprocess.run(
+            ["bash", str(LAUNCHERS / "separation_energy_mace.sbatch")],
+            env=env, cwd=self.root, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = json.loads(runtime_calls.read_text().splitlines()[0])
+        self.assertIn(f"interface/bulk-ref/N_term/SiN_TiN_N-term={rel}", call)
+        self.assertIn("--reference", call)
+        self.assertIn("bulk", call)
+        self.assertNotIn("adhesion/N_term_dft", " ".join(call))
 
     def test_dry_run_checks_real_layout_without_submission_or_output(self) -> None:
         result = self.submit("--dry-run")

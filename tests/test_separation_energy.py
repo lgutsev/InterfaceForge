@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from interfaceforge.errors import SafetyError
 from interfaceforge.separation_energy import (
+    EV_A2_TO_J_M2,
     _deepmd_energies,
     _family_block,
     _gamma,
@@ -258,6 +259,9 @@ class SeparationEnergyTests(unittest.TestCase):
             self.assertEqual(set(row["mlip"]), {"mace", "deepmd"})
             self.assertEqual(row["mlip"]["mace"]["members"], 2)
             self.assertEqual(row["mlip"]["deepmd"]["members"], 2)
+            # per-part committee energies survive the merge/recompute
+            self.assertAlmostEqual(row["mlip"]["mace"]["parts_committee_ev"]["interface"], -200.1)
+            self.assertAlmostEqual(row["mlip"]["deepmd"]["parts_committee_ev"]["interface"], -199.1)
             self.assertIn("delta_vs_dft_j_per_m2", row["mlip"]["mace"])
             self.assertEqual({hit["source"] for hit in row["literature"]}, {"dft", "mace", "deepmd"})
             self.assertEqual(merged["merged_from"], [str(mace_path), str(deepmd_path)])
@@ -355,6 +359,158 @@ class SeparationEnergyTests(unittest.TestCase):
             row = payload["interfaces"][0]
             self.assertEqual(row["slab_mode"], "static")
             self.assertAlmostEqual(row["dft"]["gamma_sep_j_per_m2"], 8.0 / 132.0 * 16.02176634)
+
+
+_POSCAR_MULTI = """{title}
+1.0
+  12.0000000000  0.0000000000  0.0000000000
+   0.0000000000 11.0000000000  0.0000000000
+   0.0000000000  0.0000000000 28.0000000000
+{symbols}
+{counts}
+Cartesian
+{coords}
+"""
+
+
+def _run_dir(directory: Path, species: list[tuple[str, int]], energy: float | None) -> None:
+    directory.mkdir(parents=True)
+    total = sum(n for _, n in species)
+    coords = "\n".join(f"  {i * 0.5:.4f}  {i * 0.3:.4f}  {5 + i * 0.4:.4f}" for i in range(total))
+    (directory / "POSCAR").write_text(
+        _POSCAR_MULTI.format(
+            title=directory.name,
+            symbols=" ".join(s for s, _ in species),
+            counts=" ".join(str(n) for _, n in species),
+            coords=coords,
+        ),
+        encoding="utf-8",
+    )
+    (directory / "INCAR").write_text("IBRION = -1\nNSW = 0\n", encoding="utf-8")
+    if energy is not None:
+        (directory / "OUTCAR").write_text(
+            _OUTCAR.format(without=energy + 0.01, sigma0=energy), encoding="utf-8"
+        )
+
+
+def _bulk_set(
+    root: Path, name: str, *, e_int: float | None, e_a: float | None, e_b: float | None
+) -> Path:
+    """interface Si2Ti3N5 = 1x TiN-bulk (Ti3N3) + 1x Si3N4-like (Si2N2)."""
+
+    base = root / name
+    _run_dir(base / "interface", [("Si", 2), ("Ti", 3), ("N", 5)], e_int)
+    _run_dir(base / "slab_a", [("Ti", 3), ("N", 3)], e_a)
+    _run_dir(base / "slab_b", [("Si", 2), ("N", 2)], e_b)
+    return base
+
+
+class BulkReferenceTests(unittest.TestCase):
+    def test_gamma_flips_sign_for_bulk_reference(self) -> None:
+        energies = {"interface": -100.0, "slab_a": -60.0, "slab_b": -30.0}
+        free = _gamma(energies, 132.0)
+        bulk = _gamma(energies, 132.0, reference="bulk")
+        self.assertAlmostEqual(free, (-60.0 - 30.0 + 100.0) / 132.0 * EV_A2_TO_J_M2)
+        self.assertAlmostEqual(bulk, (-100.0 + 60.0 + 30.0) / 132.0 * EV_A2_TO_J_M2)
+        self.assertAlmostEqual(bulk, -free)
+
+    def test_end_to_end_recovers_formula_units_and_skips_literature(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            n_set = _bulk_set(root, "nterm", e_int=-100.0, e_a=-60.0, e_b=-30.0)
+            payload = separation_energy(
+                [("interface/450K/Real/N_Term/nterm", n_set)],
+                reference="bulk",
+                n_interfaces=1,
+                campaign_validation=_VALIDATION,
+            )
+            self.assertEqual(payload["reference"], "bulk")
+            self.assertIn("bulk-referenced interfacial excess", payload["definition"])
+            row = payload["interfaces"][0]
+            self.assertAlmostEqual(
+                row["dft"]["gamma_sep_j_per_m2"],
+                (-100.0 + 60.0 + 30.0) / 132.0 * EV_A2_TO_J_M2,
+            )
+            self.assertEqual(row["bulk_reference"]["formula_units"], {"slab_a": 1.0, "slab_b": 1.0})
+            self.assertTrue(row["bulk_reference"]["composition_balanced"])
+            self.assertEqual(row["literature"], [])
+
+    def test_committee_delta_and_reports(self) -> None:
+        def fake_mace(models, atoms_by_part, device):
+            return {
+                f"seed_{k}": {"interface": -100.0 + 0.1 * k, "slab_a": -60.0, "slab_b": -30.0}
+                for k in range(3)
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            n_set = _bulk_set(root, "nterm", e_int=-100.0, e_a=-60.0, e_b=-30.0)
+            with patch("interfaceforge.separation_energy._mace_energies", fake_mace):
+                payload = separation_energy(
+                    [("interface/nterm", n_set)],
+                    mace_models=["a.model", "b.model", "c.model"],
+                    reference="bulk",
+                )
+            block = payload["interfaces"][0]["mlip"]["mace"]
+            self.assertEqual(block["members"], 3)
+            # interface pushed up by ~0.1 eV/member -> bulk excess grows -> +delta
+            self.assertGreater(block["delta_vs_dft_j_per_m2"], 0.0)
+            # per-part committee mean: interface ~ -99.9, slabs exact
+            self.assertAlmostEqual(block["parts_committee_ev"]["interface"], -99.9, places=6)
+            self.assertAlmostEqual(block["parts_committee_ev"]["slab_a"], -60.0)
+
+            outputs = write_reports(payload, root / "report")
+            self.assertTrue(Path(outputs["figure_png"]).is_file())
+            markdown = (root / "report" / "separation_energy.md").read_text(encoding="utf-8")
+            self.assertIn("Bulk-referenced interfacial excess", markdown)
+            self.assertIn("Per-part committee-mean MLIP − DFT energy", markdown)
+            # slab parts match DFT exactly here; the interface term carries it
+            self.assertRegex(markdown, r"\| .* \| slab_a \| [+-]0\.000 \|")
+            self.assertRegex(markdown, r"\| .* \| interface \| \+0\.100 \|")
+
+    def test_unbalanced_composition_is_flagged_not_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = root / "bad"
+            # interface has more N than the two bulk cells can supply
+            _run_dir(base / "interface", [("Si", 2), ("Ti", 3), ("N", 12)], -100.0)
+            _run_dir(base / "slab_a", [("Ti", 3), ("N", 3)], -60.0)
+            _run_dir(base / "slab_b", [("Si", 2), ("N", 2)], -30.0)
+            payload = separation_energy([("interface/bad", base)], reference="bulk")
+            row = payload["interfaces"][0]
+            self.assertFalse(row["bulk_reference"]["composition_balanced"])
+            write_reports(payload, root / "report")
+            self.assertIn(
+                "Composition does not balance",
+                (root / "report" / "separation_energy.md").read_text(encoding="utf-8"),
+            )
+
+    def test_references_sharing_all_elements_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = root / "ambiguous"
+            _run_dir(base / "interface", [("Si", 4), ("N", 4)], -100.0)
+            _run_dir(base / "slab_a", [("Si", 2), ("N", 2)], -50.0)
+            _run_dir(base / "slab_b", [("Si", 2), ("N", 2)], -50.0)
+            with self.assertRaisesRegex(SafetyError, "shares every element"):
+                separation_energy([("interface/ambiguous", base)], reference="bulk")
+
+    def test_merge_refuses_to_mix_reference_kinds(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bulk = separation_energy(
+                [("interface/x", _bulk_set(root, "b", e_int=-100.0, e_a=-60.0, e_b=-30.0))],
+                reference="bulk",
+            )
+            free = separation_energy(
+                [("interface/x", _set(root, "f", -200.0, -95.0, -97.0))],
+            )
+            bulk_path = root / "bulk.json"
+            free_path = root / "free.json"
+            bulk_path.write_text(json.dumps(bulk), encoding="utf-8")
+            free_path.write_text(json.dumps(free), encoding="utf-8")
+            with self.assertRaisesRegex(SafetyError, "reference"):
+                merge_separation_energy([bulk_path, free_path])
 
 
 if __name__ == "__main__":

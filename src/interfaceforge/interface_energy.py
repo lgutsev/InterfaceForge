@@ -236,6 +236,7 @@ def interface_energy(
     blocks: int = 10,
     stacking_axis: str | None = None,
     interface_metadata: Sequence[Mapping[str, Any]] | None = None,
+    include_polar: bool = False,
 ) -> dict[str, Any]:
     """Bulk-referenced interfacial energy for every unoxidized, non-polar interface leaf.
 
@@ -244,9 +245,16 @@ def interface_energy(
     ``n_interfaces`` (an explicit ``stacking_axis``/``n_interfaces`` argument
     still wins), records ``orientation``/``termination`` on the row, and -- when
     ``polar_termination: true`` -- skips the leaf entirely: a (111)/(0001)
-    polar-terminated slab is not an integer number of bulk formula units, so the
-    bulk-referenced excess is undefined. Run ``iface validate adhesion`` for
-    those instead.
+    polar-terminated slab is generally not an integer number of bulk formula
+    units, so the bulk-referenced excess is undefined. Run ``iface validate
+    adhesion`` for those instead.
+
+    ``include_polar=True`` overrides that skip: the leaf goes through the normal
+    path and the ``nitrogen_balanced`` check decides. Use it for a coherent /
+    stoichiometric periodic cell (composition = an integer count of each bulk
+    formula unit) where the excess *is* well defined despite polar planes at the
+    interface -- the row is marked ``polar_termination: true`` and its
+    ``nitrogen_balanced`` flag is the thing to trust.
     """
 
     campaign = Path(campaign_root).expanduser().resolve()
@@ -290,13 +298,15 @@ def interface_energy(
                 }
             )
             continue
-        if meta.get("polar_termination"):
+        polar = bool(meta.get("polar_termination"))
+        if polar and not include_polar:
             skipped.append(
                 {
                     "leaf": leaf,
                     "reason": "polar termination (validation.interfaces); a (111)/(0001) "
-                    "slab is not an integer count of bulk formula units, so the "
-                    "bulk-referenced excess is undefined -- run 'iface validate adhesion'",
+                    "slab is generally not an integer count of bulk formula units, so the "
+                    "bulk-referenced excess is undefined -- run 'iface validate adhesion', "
+                    "or pass --include-polar for a stoichiometric coherent cell",
                 }
             )
             continue
@@ -321,6 +331,8 @@ def interface_energy(
         }
         if meta.get("orientation"):
             row["orientation"] = meta["orientation"]
+        if polar:
+            row["polar_termination"] = True
         if not tin_leaf or not sin_leaf:
             row["status"] = f"missing bulk reference at {temperature} K"
             rows.append(row)
@@ -361,7 +373,13 @@ def interface_energy(
                 "gamma_int_ev_per_ang2": gamma_ev_a2,
                 "gamma_int_j_per_m2": gamma_ev_a2 * EV_A2_TO_J_M2,
                 "gamma_int_sem_j_per_m2": sem_ev_a2 * EV_A2_TO_J_M2,
-                "status": "OK" if abs(predicted_n - n_n) < 0.5 else "nitrogen imbalance; check the clean split",
+                "status": (
+                    ("OK (polar termination; excess valid because the cell is stoichiometric)"
+                     if polar else "OK")
+                    if abs(predicted_n - n_n) < 0.5
+                    else "nitrogen imbalance; check the clean split"
+                    + (" -- polar slab, expected unless the cell is coherent/stoichiometric" if polar else "")
+                ),
             }
         )
         if predictions is not None:
@@ -378,6 +396,7 @@ def interface_energy(
         "equilibration_frames": equilibration_frames,
         "n_interfaces": n_interfaces,
         "n_interfaces_source": "explicit" if n_interfaces is not None else "campaign-metadata",
+        "include_polar": include_polar,
         "block_count": blocks,
         "conversion_ev_a2_to_j_m2": EV_A2_TO_J_M2,
         "reference_state": "MD-averaged bulk DFT energy per formula unit (potential energy, no vibrational entropy)",
@@ -487,14 +506,21 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
         lines += ["", "## Skipped interfaces", ""]
         for item in payload["skipped"]:
             lines.append(f"- `{item['leaf']}` — {item['reason']}")
+    if payload.get("include_polar"):
+        lines += [
+            "",
+            "`--include-polar` is set: leaves flagged `polar_termination` were evaluated; "
+            "a polar row is only trustworthy where `nitrogen_balanced` is yes (a coherent, "
+            "stoichiometric cell).",
+        ]
     lines += [
         "",
         "γ_int here is an approximation to the interface free energy: it is the MD-averaged",
         "potential-energy excess over the bulk phases, without the vibrational-entropy term",
         "(which largely cancels in an excess quantity). Oxidized interfaces and interfaces",
         "flagged `polar_termination` in the campaign are excluded (see Skipped interfaces);",
-        "the polar ones need `iface validate adhesion`, the oxidized ones an oxygen",
-        "chemical-potential treatment.",
+        "the polar ones need `iface validate adhesion`, or `--include-polar` when the cell",
+        "is coherent/stoichiometric; the oxidized ones an oxygen chemical-potential treatment.",
     ]
     (out / "interface_energy.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {
@@ -524,6 +550,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--blocks", type=int, default=10)
     parser.add_argument("--stacking-axis", choices=("a", "b", "c"))
+    parser.add_argument(
+        "--include-polar",
+        action="store_true",
+        help="evaluate leaves flagged polar_termination instead of skipping them; "
+        "the nitrogen_balanced flag then decides (use for a coherent/stoichiometric cell)",
+    )
     args = parser.parse_args(argv)
     campaign_file = Path(args.campaign) if args.campaign else Path(args.campaign_root) / "campaign.yaml"
     interface_metadata = None
@@ -540,6 +572,7 @@ def main(argv: list[str] | None = None) -> int:
         blocks=args.blocks,
         stacking_axis=args.stacking_axis,
         interface_metadata=interface_metadata,
+        include_polar=args.include_polar,
     )
     payload["outputs"] = write_reports(payload, args.output_dir)
     print(json.dumps(payload, indent=2))

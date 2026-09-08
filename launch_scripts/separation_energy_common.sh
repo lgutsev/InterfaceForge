@@ -14,10 +14,65 @@ sep_file() {
 
 sep_campaign() {
     CAMP="$(cd -- "$CAMP" && pwd -P)" || return 2
-    for required in "$CAMP/campaign.yaml" \
-        "$CAMP/adhesion/N_term_dft/manifest.json" \
+    sep_file "$CAMP/campaign.yaml" || return 2
+    if [[ -n "${SEPARATION_ENTRIES_FILE:-}" ]]; then
+        # Bulk-referenced / custom run: validate the listed [LABEL=]DIR entries
+        # instead of the default N/Ti adhesion trees.
+        sep_file "$SEPARATION_ENTRIES_FILE" || return 2
+        local line dir
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -n "${line//[[:space:]]/}" ]] || continue
+            dir="${line#*=}"
+            [[ "$dir" = /* ]] || dir="$CAMP/$dir"
+            [[ -d "$dir" ]] || { echo "ERROR: entry directory missing: $dir" >&2; return 2; }
+        done < "$SEPARATION_ENTRIES_FILE"
+        return 0
+    fi
+    for required in "$CAMP/adhesion/N_term_dft/manifest.json" \
         "$CAMP/adhesion/Ti_term_dft/manifest.json"; do
         sep_file "$required" || return 2
+    done
+}
+
+# The positional [LABEL=]SET_DIR arguments for interfaceforge.separation_energy.
+# SEPARATION_ENTRIES_FILE (one entry per line) overrides the default two adhesion
+# trees. Populates the SEP_ENTRIES array in the caller's scope.
+sep_entry_args() {
+    SEP_ENTRIES=()
+    if [[ -n "${SEPARATION_ENTRIES_FILE:-}" ]]; then
+        local line
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -n "${line//[[:space:]]/}" ]] || continue
+            SEP_ENTRIES+=("$line")
+        done < "$SEPARATION_ENTRIES_FILE"
+        (( ${#SEP_ENTRIES[@]} )) || { echo "ERROR: $SEPARATION_ENTRIES_FILE has no entries" >&2; return 2; }
+    else
+        SEP_ENTRIES=(
+            "interface/300K/MD_Vac/N_Term/SiN_TiN_N-term=$CAMP/adhesion/N_term_dft"
+            "interface/300K/MD_Vac/Ti_Term/SiN-TiN-Ti-term=$CAMP/adhesion/Ti_term_dft"
+        )
+    fi
+}
+
+# Optional pass-through flags. SEPARATION_REFERENCE -> --reference,
+# SEPARATION_N_INTERFACES -> --n-interfaces. Populates SEP_EXTRA in the caller.
+sep_extra_args() {
+    SEP_EXTRA=()
+    [[ -z "${SEPARATION_REFERENCE:-}" ]] || SEP_EXTRA+=(--reference "$SEPARATION_REFERENCE")
+    [[ -z "${SEPARATION_N_INTERFACES:-}" ]] || SEP_EXTRA+=(--n-interfaces "$SEPARATION_N_INTERFACES")
+}
+
+# Resolved (pwd -P) directories of every entry, for APPTAINER_BIND in the DeePMD
+# job. Populates SEP_ENTRY_DIRS in the caller.
+sep_entry_dirs() {
+    SEP_ENTRY_DIRS=()
+    local entry dir
+    sep_entry_args || return 2
+    for entry in "${SEP_ENTRIES[@]}"; do
+        dir="${entry#*=}"
+        [[ "$dir" = /* ]] || dir="$CAMP/$dir"
+        dir="$(cd -- "$dir" && pwd -P)" || return 2
+        SEP_ENTRY_DIRS+=("$dir")
     done
 }
 

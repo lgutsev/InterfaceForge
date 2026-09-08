@@ -23,8 +23,9 @@ BOOTSTRAP="$REPO_ROOT/launch_scripts/run_interfaceforge_module.py"
 sep_file "$BOOTSTRAP"
 sep_campaign
 OUTPUT="${SEPARATION_RUN_DIR:-$CAMP/audit/separation}/stages/deepmd"
-N_TERM="$CAMP/adhesion/N_term_dft"
-TI_TERM="$CAMP/adhesion/Ti_term_dft"
+sep_entry_args
+sep_extra_args
+sep_entry_dirs
 DEEPMD_MODULE="${DEEPMD_MODULE:-deepmd-kit/r9.3-deepmd3.2.0.b.0-gpu}"
 
 if [[ -n "${SEPARATION_RUN_DIR:-}" ]]; then
@@ -55,7 +56,7 @@ export APPTAINERENV_PYTHONPATH="$PYTHONPATH"
 export SINGULARITYENV_PYTHONPATH="$PYTHONPATH"
 export APPTAINERENV_PYTHONUNBUFFERED=1
 export SINGULARITYENV_PYTHONUNBUFFERED=1
-BIND_ROOTS="$(sep_bind_roots "$REPO_ROOT" "$CAMP" "$OUTPUT" "${SELECTED_MODELS[@]}")"
+BIND_ROOTS="$(sep_bind_roots "$REPO_ROOT" "$CAMP" "$OUTPUT" "${SELECTED_MODELS[@]}" "${SEP_ENTRY_DIRS[@]}")"
 if [[ -n "$BIND_ROOTS" ]]; then
     export APPTAINER_BIND="${APPTAINER_BIND:+$APPTAINER_BIND,}$BIND_ROOTS"
     export SINGULARITY_BIND="${SINGULARITY_BIND:+$SINGULARITY_BIND,}$BIND_ROOTS"
@@ -132,9 +133,9 @@ nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,nohea
 mkdir -p "$OUTPUT"
 srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-8}" \
     python -u "$BOOTSTRAP" interfaceforge.separation_energy "$OUTPUT" \
-    "interface/300K/MD_Vac/N_Term/SiN_TiN_N-term=$N_TERM" \
-    "interface/300K/MD_Vac/Ti_Term/SiN-TiN-Ti-term=$TI_TERM" \
+    "${SEP_ENTRIES[@]}" \
     "${MODEL_ARGS[@]}" \
+    "${SEP_EXTRA[@]}" \
     --json-only -c "$CAMP/campaign.yaml"
 
 [[ -s "$OUTPUT/separation_energy.json" ]] || {

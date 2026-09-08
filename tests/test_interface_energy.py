@@ -207,6 +207,35 @@ class TestInterfaceEnergy(unittest.TestCase):
             self.assertIn("polar", skipped["reason"].lower())
             self.assertIn("adhesion", skipped["reason"])
 
+    def test_include_polar_evaluates_a_balanced_polar_leaf(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _dataset(Path(temporary))
+            metadata = [
+                {
+                    "match": "interface/*/*/N_Term/*",
+                    "polar_termination": True,
+                    "orientation": "Si3N4(0001)/TiN(111)",
+                }
+            ]
+            payload = interface_energy(
+                root,
+                equilibration_frames=2,
+                blocks=4,
+                interface_metadata=metadata,
+                include_polar=True,
+            )
+            self.assertTrue(payload["include_polar"])
+            self.assertEqual(payload["skipped"], [])
+            row = next(
+                r for r in payload["interfaces"]
+                if r["leaf"] == "interface/300K/Ideal/N_Term/SiN_TiN_N-term"
+            )
+            self.assertIs(row["polar_termination"], True)
+            self.assertTrue(row["nitrogen_balanced"])
+            self.assertIn("polar termination", row["status"])
+            # synthetic interface: excess = -100 - 4*(-12) - 4*(-10) = -12 eV
+            self.assertAlmostEqual(row["gamma_int_j_per_m2"], -0.06 * 16.02176634)
+
     def test_metadata_supplies_stacking_axis_n_interfaces_and_labels(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = _dataset(Path(temporary))

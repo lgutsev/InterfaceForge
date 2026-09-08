@@ -465,6 +465,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             blocks=args.blocks,
             stacking_axis=args.stacking_axis,
             interface_metadata=campaign.validation.get("interfaces"),
+            include_polar=args.include_polar,
         )
         payload["outputs"] = write_interface_energy_reports(payload, args.output)
     else:
@@ -1661,7 +1662,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     separation_energy_parser = validation.add_parser(
         "separation-energy",
-        help="Slab-referenced separation energy (J/m2) of hand-built interfaces, DFT vs MLIP",
+        help="Separation energy / bulk-referenced excess (J/m2) of hand-built interfaces, DFT vs MLIP",
     )
     separation_energy_parser.add_argument(
         "output", help="Directory for separation_energy.{json,csv,md,png,svg,pdf}"
@@ -1672,9 +1673,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="[LABEL=]SET_DIR",
         help="Each SET_DIR is either a directory with interface/ slab_a/ slab_b/ "
         "sub-directories, or an 'iface vasp adhesion prepare' output tree "
-        "(interface_static/ + slabs/*, read from manifest.json). The optional "
-        "'LABEL=' prefix is fnmatched against validation.interfaces for the "
-        "literature overlay",
+        "(interface_static/ + slabs/*, read from manifest.json). With "
+        "--reference bulk the slab_a/slab_b directories hold bulk crystal cells "
+        "instead of half-slabs. The optional 'LABEL=' prefix is fnmatched against "
+        "validation.interfaces for the literature overlay",
     )
     separation_energy_parser.add_argument(
         "--mace-model", action="append", default=[], dest="mace_models",
@@ -1686,7 +1688,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     separation_energy_parser.add_argument(
         "--reference", choices=("free-surface", "bulk"), default="free-surface",
-        help="free-surface (relaxed half-slabs; equals the work of adhesion) or bulk",
+        help="free-surface: slab_a/slab_b are relaxed half-slabs, gamma_sep = the "
+        "work of adhesion. bulk: slab_a/slab_b are bulk crystal cells, gamma = the "
+        "bulk-referenced interfacial excess (a DFT-vs-MLIP control, not the work of "
+        "separation)",
     )
     separation_energy_parser.add_argument("--n-interfaces", type=int, default=1)
     separation_energy_parser.add_argument("--area-axis", choices=("a", "b", "c"))
@@ -1731,6 +1736,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--stacking-axis",
         choices=("a", "b", "c"),
         help="override; the default per interface comes from validation.interfaces",
+    )
+    interface_energy_parser.add_argument(
+        "--include-polar",
+        action="store_true",
+        help="evaluate leaves flagged polar_termination instead of skipping them "
+        "(the nitrogen_balanced flag then decides); for a coherent/stoichiometric cell",
     )
     interface_energy_parser.set_defaults(func=cmd_validate)
     stratified = validation.add_parser(

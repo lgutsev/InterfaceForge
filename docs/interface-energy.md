@@ -36,6 +36,19 @@ references the two relaxed slabs directly, so their non-stoichiometry cancels.
 A grand-canonical γ(μ_N, μ_Ti) treatment that would give a meaningful band for
 polar and oxidized interfaces is a planned follow-up.
 
+**Exception — `--include-polar`.** A polar *interface* does not force a
+non-stoichiometric *cell*: a coherent periodic stack (two compensating
+interfaces, no vacuum) or a slab cut at whole formula-unit planes can contain an
+exact integer count of each bulk phase. Pass `--include-polar` to evaluate the
+`polar_termination` leaves anyway; each such row is tagged `polar_termination:
+true` and its `nitrogen_balanced` flag is the thing to trust — a balanced row is
+a valid bulk-referenced γ_int (status `OK (polar termination; …)`), an unbalanced
+one is the same meaningless number the skip was protecting you from. This is the
+in-dataset counterpart to `iface validate separation-energy --reference bulk`
+(hand-built runs): use it when the intact interface and both bulk phases are
+already in `datasets/canonical` and you want the DFT-vs-MLIP control with no new
+VASP.
+
 ## Method
 
 - **Energies** are MD averages of the DFT `REF_energy` over post-equilibration

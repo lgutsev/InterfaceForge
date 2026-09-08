@@ -20,8 +20,8 @@ REPO_ROOT="${INTERFACEFORGE_ROOT:?Set INTERFACEFORGE_ROOT to the InterfaceForge 
 source "$REPO_ROOT/launch_scripts/separation_energy_common.sh"
 sep_campaign
 OUTPUT="${SEPARATION_RUN_DIR:-$CAMP/audit/separation}/stages/mace"
-N_TERM="$CAMP/adhesion/N_term_dft"
-TI_TERM="$CAMP/adhesion/Ti_term_dft"
+sep_entry_args
+sep_extra_args
 
 if [[ -n "${SEPARATION_RUN_DIR:-}" ]]; then
     sep_read_models "$SEPARATION_RUN_DIR/mace_models.txt"
@@ -58,9 +58,9 @@ nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,nohea
 mkdir -p "$OUTPUT"
 srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-8}" \
     python -u -m interfaceforge.separation_energy "$OUTPUT" \
-    "interface/300K/MD_Vac/N_Term/SiN_TiN_N-term=$N_TERM" \
-    "interface/300K/MD_Vac/Ti_Term/SiN-TiN-Ti-term=$TI_TERM" \
+    "${SEP_ENTRIES[@]}" \
     "${MODEL_ARGS[@]}" \
+    "${SEP_EXTRA[@]}" \
     --device cuda --json-only -c "$CAMP/campaign.yaml"
 
 [[ -s "$OUTPUT/separation_energy.json" ]] || {

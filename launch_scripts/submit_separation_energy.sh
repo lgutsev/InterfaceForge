@@ -12,6 +12,14 @@ CAMP="${SEPARATION_CAMPAIGN_ROOT:-$(pwd -P)}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 source "$SCRIPT_DIR/separation_energy_common.sh"
+# Custom / bulk-referenced runs: resolve the entries file to an absolute path
+# before it reaches the batch jobs (which chdir to the campaign root).
+if [[ -n "${SEPARATION_ENTRIES_FILE:-}" ]]; then
+    [[ "$SEPARATION_ENTRIES_FILE" = /* ]] || SEPARATION_ENTRIES_FILE="$(pwd -P)/$SEPARATION_ENTRIES_FILE"
+    export SEPARATION_ENTRIES_FILE
+fi
+[[ -z "${SEPARATION_REFERENCE:-}" ]] || export SEPARATION_REFERENCE
+[[ -z "${SEPARATION_N_INTERFACES:-}" ]] || export SEPARATION_N_INTERFACES
 sep_campaign
 for required in "$REPO_ROOT/src/interfaceforge/separation_energy.py" \
     "$SCRIPT_DIR/run_interfaceforge_module.py" \
@@ -27,8 +35,10 @@ if (( DRY_RUN )); then
     exit 0
 fi
 command -v sbatch >/dev/null || { echo 'ERROR: sbatch is unavailable' >&2; exit 2; }
-mkdir -p "$CAMP/audit/separation/runs"
-SEPARATION_RUN_DIR="$(mktemp -d "$CAMP/audit/separation/runs/run.XXXXXXXX")"
+RUNS_DIR="${SEPARATION_RUNS_DIR:-$CAMP/audit/separation/runs}"
+[[ "$RUNS_DIR" = /* ]] || RUNS_DIR="$CAMP/$RUNS_DIR"
+mkdir -p "$RUNS_DIR"
+SEPARATION_RUN_DIR="$(mktemp -d "$RUNS_DIR/run.XXXXXXXX")"
 printf '%s\n' "${MACE_MODELS[@]}" > "$SEPARATION_RUN_DIR/mace_models.txt"
 printf '%s\n' "${DEEPMD_MODELS[@]}" > "$SEPARATION_RUN_DIR/deepmd_models.txt"
 # Export through the environment rather than a comma-delimited value string,

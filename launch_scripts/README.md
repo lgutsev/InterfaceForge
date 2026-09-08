@@ -57,6 +57,11 @@ environment paths, wall time, job name, executable, and resource counts before r
   the combined DFT/MACE/DeePMD reports.
 - `submit_separation_energy.sh`: submits both GPU jobs concurrently and attaches
   the merge job with `afterok` dependencies.
+- `prepare_interface_excess.sh`: copies a finished interface run plus two bulk-cell
+  runs into one `interface/ slab_a/ slab_b/` set directory for the bulk-referenced
+  control (`iface validate separation-energy --reference bulk`).
+- `submit_interface_excess.sh`: runs `prepare_interface_excess.sh` for both
+  terminations and submits the same three-job workflow with `--reference bulk`.
 
 ## SiN/TiN separation-energy comparison
 
@@ -116,6 +121,41 @@ The MACE and DeePMD jobs use separate GPU environments. Override the campaign
 location through `SEPARATION_CAMPAIGN_ROOT` when submitting from elsewhere.
 `MACE_CONDA_SH` and `MACE_ENV` override MACE activation paths; `DEEPMD_MODULE`
 and `INTERFACEFORGE_PYTHON` override the DeePMD module and merge interpreter.
+
+### Bulk-referenced control (`--reference bulk`)
+
+`submit_separation_energy.sh` also honours three environment variables so the
+same three-job workflow can evaluate the bulk-referenced interfacial excess (a
+DFT-vs-MLIP control that never cleaves a surface — see
+[`docs/separation-energy.md`](../separation-energy.md)):
+
+- `SEPARATION_ENTRIES_FILE` — a file of `LABEL=DIR` lines (one per interface),
+  replacing the default `adhesion/{N_term,Ti_term}_dft` trees. `DIR` may be
+  absolute or campaign-root-relative.
+- `SEPARATION_REFERENCE` — passed through as `--reference` (`bulk`).
+- `SEPARATION_N_INTERFACES` — passed through as `--n-interfaces` (`1` for a
+  single-interface vacuum slab).
+- `SEPARATION_RUNS_DIR` — where `run.XXXXXXXX/` is created (default
+  `audit/separation/runs`).
+
+`submit_interface_excess.sh` wires all of this up. From the campaign root, with
+the two interface runs and the two bulk-cell runs (e.g. rocksalt TiN and
+β-Si₃N₄, whose compositions must sum to the interface):
+
+```bash
+bash /path/to/InterfaceForge/launch_scripts/submit_interface_excess.sh --dry-run \
+  adhesion/N_term_dft adhesion/Ti_term_dft \
+  bulk/TiN_static bulk/Si3N4_static
+```
+
+It assembles `audit/interface_excess/{N_term,Ti_term}/` (copying `INCAR`,
+`OUTCAR`, `OSZICAR`, `CONTCAR`/`POSCAR`), writes `entries.txt`, and hands off to
+`submit_separation_energy.sh`. An interface source that is an
+`iface vasp adhesion prepare` tree contributes its `interface_static/` run.
+Output lands in `audit/interface_excess/runs/run.XXXXXXXX/` as the usual
+`separation_energy.{json,csv,md,png,svg,pdf}` (panel (a) is labelled
+γ_excess). The report flags any interface whose bulk cells do not balance
+stoichiometrically.
 
 The `deepmd-kit` module runs Python inside an Apptainer/Singularity image. The
 DeePMD job executes a repository-local bootstrap by absolute path, so importing

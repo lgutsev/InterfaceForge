@@ -17,9 +17,9 @@ It is deliberately separate from `iface validate interface-energy`:
 | | `interface-energy` | `separation-energy` |
 |---|---|---|
 | structures | the synchronized MD dataset | a few hand-built slabs |
-| reference | bulk phases | the two isolated slabs |
+| reference | bulk phases | the two isolated slabs (`--reference free-surface`), or hand-built bulk cells (`--reference bulk`) |
 | DFT vs MLIP | committee on test frames | committee **evaluated in place** |
-| headline number | γ_int(T) | **γ_sep^MLIP − γ_sep^DFT** on identical geometry |
+| headline number | γ_int(T) | **γ^MLIP − γ^DFT** on identical geometry |
 
 ## Layout
 
@@ -221,7 +221,80 @@ within-tolerance flag.
   `reference` field records which you declared; it does not check.
 - An MLIP trained mostly on the bonded interface can extrapolate poorly for an
   isolated, vacuum-exposed slab. A committee spread that blows up on `slab_a` or
-  `slab_b` relative to `interface` is the tell.
-- `--reference bulk` is accepted and recorded but the bulk-referenced scaling
-  (formula-unit matching, `n_interfaces = 2`) is not yet implemented — use
-  `iface validate interface-energy` for the bulk-referenced quantity.
+  `slab_b` relative to `interface` is the tell. Note that a *small* committee
+  spread does **not** clear the MLIP: every member can share the same
+  free-surface extrapolation bias. The `--reference bulk` control below is what
+  actually isolates that.
+
+## `--reference bulk`: the bulk-referenced control
+
+`--reference free-surface` compares DFT and MLIP on three structures, two of
+which are cleaved (polar, for SiN/TiN) free-surface slabs far outside any
+interface/bulk training set. If DFT and MLIP disagree there, you cannot tell
+whether the error is in the interface, the slabs, or the normalisation.
+
+`--reference bulk` removes the cleaved surfaces from the question. The two
+"slab" directories now hold **bulk crystal cells** whose compositions sum to the
+interface, and the quantity is
+
+```
+gamma = ( E(interface) - m_a·E(bulk_a) - m_b·E(bulk_b) ) / (n_interfaces · A)
+```
+
+`m_a` / `m_b` are recovered from the element unique to each bulk cell (Ti for
+TiN, Si for Si₃N₄); every shared element (N) is then checked for balance and the
+report flags an imbalance. Only the bonded interface and the bulk phases enter,
+so **DFT ≈ MLIP here means the discrepancy in the free-surface run lives entirely
+in the cleaved slabs** (fix: add polar-slab configs to training, or trust DFT for
+the surface term). **DFT ≠ MLIP here means the problem is broader** — the MLIP
+misprices even the intact interface or a strained bulk.
+
+If the interface cell carries vacuum it also has two outer free surfaces, so this
+`gamma` is a combined surface-plus-interface excess, not the interface energy
+itself — that is fine for a DFT-vs-MLIP *control*, where only the agreement
+matters. `n_interfaces` stays `1` for a single-interface vacuum slab. Bulk cells
+should ideally be at the interface's in-plane lattice; a cell relaxed with
+`ISIF=3` carries an extra strain-energy difference into `gamma`.
+
+The report (both modes) also prints **Per-part committee-mean MLIP − DFT energy
+(eV)** — `interface`, `slab_a`, `slab_b` separately — whenever the DFT run is
+finished. When the bulk cells are already in the MLIP training set their rows
+should be ≈ 0; a family that reproduces the bulks but not `interface` is
+mispricing the bonded interface itself, not extrapolating on the references.
+It is carried through `--merge-json` per family.
+
+```bash
+# layout: SET_DIR/interface/ (the interface run), SET_DIR/slab_a/ (TiN bulk),
+#         SET_DIR/slab_b/ (Si3N4 bulk) — each a finished static VASP run
+iface validate separation-energy audit/interface_excess \
+  "interface/450K/Real/N_Term/SiN_TiN_N-term=audit/bulk_ref/N_term" \
+  "interface/450K/Real/Ti_Term/SiN-TiN-Ti-term=audit/bulk_ref/Ti_term" \
+  --reference bulk --n-interfaces 1 \
+  --mace-model models/mace_committee/seed_11/…_stagetwo.model \
+  --mace-model models/mace_committee/seed_23/…_stagetwo.model \
+  --deepmd-model models/deepmd/dpa2/model_000/frozen_model.pth \
+  -c campaign.yaml
+```
+
+The isolated-backend and `--merge-json` workflow is identical to the
+free-surface case (the merge refuses to mix `reference` kinds). The literature
+overlay is skipped for `--reference bulk` (Sharifi et al. report the work of
+adhesion, a different quantity).
+
+### Bundled LONI submitter
+
+`launch_scripts/submit_interface_excess.sh` assembles the set directories and
+submits the same isolated-MACE / isolated-DeePMD / `afterok` merge workflow with
+`--reference bulk`. From the campaign root, given the two interface runs and the
+two bulk-cell runs:
+
+```bash
+bash /path/to/InterfaceForge/launch_scripts/submit_interface_excess.sh --dry-run \
+  adhesion/N_term_dft adhesion/Ti_term_dft bulk/TiN_static bulk/Si3N4_static
+```
+
+It copies each run into `audit/interface_excess/{N_term,Ti_term}/{interface,slab_a,slab_b}/`
+(an `adhesion prepare` tree contributes its `interface_static/`), then drives
+`submit_separation_energy.sh` through the `SEPARATION_ENTRIES_FILE` /
+`SEPARATION_REFERENCE` / `SEPARATION_N_INTERFACES` hooks. See
+[launch_scripts/README.md](../launch_scripts/README.md#bulk-referenced-control---reference-bulk).
