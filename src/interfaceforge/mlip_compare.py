@@ -512,17 +512,37 @@ def comparison_status(
                 if Path(str(prefix) + ".e_peratom.out").is_file() and Path(str(prefix) + ".f.out").is_file():
                     dpa_counts[label] += 1
     expected = len(systems)
-    ready = all(value == expected for value in mace_counts.values()) and all(
-        value == expected for value in dpa_counts.values()
-    )
+    mace_ready = all(value == expected for value in mace_counts.values())
+    dpa_ready = bool(dpa_counts) and all(value == expected for value in dpa_counts.values())
+    hints: list[str] = []
+    if not mace_ready:
+        hints.append(
+            f"MACE inference incomplete -- (re-)submit {output / 'run_mace_evaluate.slurm'}"
+        )
+    if not dpa_ready:
+        if deepmd_eval_root and not (dpa_root and dpa_root.is_dir()):
+            hints.append(f"--deepmd-eval-root does not exist: {dpa_root}")
+        elif dpa_root is None:
+            hints.append(
+                f"no job_* evaluation under {campaign / 'models' / 'deepmd' / 'evaluation' / arch}/"
+                " -- run the DeePMD `dp test` job for this architecture first"
+            )
+        elif all(value == 0 for value in dpa_counts.values()):
+            hints.append(
+                f"{dpa_root} has no by_system/*/model_XXX_detail.*.out files for this test set"
+            )
+        else:
+            hints.append(f"DeePMD evaluation partial under {dpa_root}")
     return {
         "schema_version": 1,
-        "status": "READY_TO_FINALIZE" if ready else "INCOMPLETE",
+        "status": "READY_TO_FINALIZE" if (mace_ready and dpa_ready) else "INCOMPLETE",
         "expected_systems_per_model": expected,
         "deepmd_architecture": arch,
         "mace": mace_counts,
         "deepmd": dpa_counts,
         "deepmd_eval_root": str(dpa_root) if dpa_root else None,
+        "deepmd_eval_root_exists": bool(dpa_root and dpa_root.is_dir()),
+        "hints": hints,
     }
 
 
@@ -1353,7 +1373,11 @@ def finalize_comparison(
         campaign, output_root=output, deepmd_eval_root=deepmd_eval_root
     )
     if status["status"] != "READY_TO_FINALIZE":
-        raise SafetyError(f"Comparison is incomplete: {status}")
+        hints = "; ".join(status.get("hints", [])) or "see the counts below"
+        raise SafetyError(
+            f"Comparison is incomplete ({hints}). MACE {status['mace']}, "
+            f"DeePMD {status['deepmd']} of {status['expected_systems_per_model']} systems."
+        )
     dpa_root = Path(status["deepmd_eval_root"])
     iread, _ = _ase_io()
     systems, models = manifest["systems"], manifest["models"]

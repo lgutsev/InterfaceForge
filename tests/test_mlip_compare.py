@@ -653,6 +653,19 @@ class TestMLIPComparison(unittest.TestCase):
             with self.assertRaisesRegex(SafetyError, "incomplete"):
                 finalize_comparison(campaign, deepmd_eval_root=dpa_root)
 
+    def test_status_hints_point_at_the_missing_deepmd_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign = _campaign(Path(temporary))
+            prepare_comparison(campaign)
+            auto = comparison_status(campaign)
+            self.assertEqual(auto["status"], "INCOMPLETE")
+            self.assertTrue(any("no job_*" in hint for hint in auto["hints"]))
+            explicit = comparison_status(
+                campaign, deepmd_eval_root=campaign / "nowhere" / "job_9"
+            )
+            self.assertFalse(explicit["deepmd_eval_root_exists"])
+            self.assertTrue(any("does not exist" in hint for hint in explicit["hints"]))
+
     def test_finalize_rejects_corrupted_deepmd_reference(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             campaign = _campaign(Path(temporary))
