@@ -587,6 +587,11 @@ class TestMLIPComparison(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             campaign = _campaign(Path(temporary))
             # the fine-tune tree sits beside mace_committee/ under the ENCUT parent
+            # a stale empty tree beside the campaign root must not shadow the real one
+            for seed in DEFAULT_SEEDS:
+                (campaign / "mace_finetune_committee" / f"seed_{seed}" / "mace_model").mkdir(
+                    parents=True
+                )
             ft_root = campaign / "models" / "mace_committee_520eV" / "mace_finetune_committee"
             for seed in DEFAULT_SEEDS:
                 directory = ft_root / f"seed_{seed}" / "mace_model"
@@ -604,9 +609,10 @@ class TestMLIPComparison(unittest.TestCase):
                 mace_models_root="mace_finetune_committee",  # bare name
                 force=True,
             )
-            paths = [Path(model["model_path"]).name for model in manifest["models"]]
-            self.assertTrue(all(name.endswith(".model") for name in paths))
-            self.assertFalse(any("compiled" in name for name in paths))
+            paths = [Path(model["model_path"]) for model in manifest["models"]]
+            self.assertTrue(all(str(p).startswith(str(ft_root)) for p in paths))
+            self.assertTrue(all(p.name.endswith(".model") for p in paths))
+            self.assertFalse(any("compiled" in p.name for p in paths))
             self.assertEqual(len(manifest["model_selection_notes"]), len(DEFAULT_SEEDS))
             self.assertIn("no stage-two export", manifest["model_selection_notes"][0])
 

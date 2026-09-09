@@ -296,30 +296,45 @@ def _select_seed_model(mace_model_dir: Path, seed: int) -> tuple[Path, str]:
     return chosen.resolve(), note
 
 
+def _has_committee_layout(directory: Path) -> bool:
+    """A ``seed_*`` directory that actually holds a non-empty ``.model`` file."""
+
+    for seed_dir in directory.glob("seed_*"):
+        if not seed_dir.is_dir():
+            continue
+        for search in (seed_dir / "mace_model", seed_dir):
+            if search.is_dir() and any(
+                path.is_file() and path.stat().st_size for path in search.glob("*.model")
+            ):
+                return True
+    return False
+
+
 def _resolve_committee_root(campaign: Path, mace_models_root: str | Path | None) -> Path:
     if not mace_models_root:
         return campaign / "models" / "mace_committee_520eV" / "mace_committee"
     given = Path(mace_models_root).expanduser()
     if given.is_absolute():
         return given.resolve()
-    # A bare name (or a relative path) resolves against the cwd, the campaign,
-    # or -- since the from-scratch and fine-tuned trees share it -- the
-    # ENCUT-tagged committee parent.
-    bases = (
-        Path.cwd(),
-        campaign,
-        campaign / "models",
-        campaign / "models" / "mace_committee_520eV",
-    )
-    for base in bases:
-        candidate = base / given
-        if candidate.is_dir():
+    encut_parent = campaign / "models" / "mace_committee_520eV"
+    if len(given.parts) == 1:
+        # A bare name ('mace_finetune_committee'): the committees live under the
+        # ENCUT-tagged parent -- check there first so a stale empty tree beside
+        # the campaign root does not shadow the real one.
+        bases = (encut_parent, campaign / "models", campaign, Path.cwd())
+    else:
+        bases = (campaign, Path.cwd())
+    matches = [base / given for base in bases if (base / given).is_dir()]
+    if not matches:
+        raise SafetyError(
+            f"MACE committee root not found: {mace_models_root!r}. Looked under "
+            f"{', '.join(str(base) for base in bases)}. Pass an absolute path or a "
+            "name like 'mace_finetune_committee'."
+        )
+    for candidate in matches:
+        if _has_committee_layout(candidate):
             return candidate.resolve()
-    raise SafetyError(
-        f"MACE committee root not found: {mace_models_root!r}. Looked under the "
-        f"working directory, {campaign}, and {campaign / 'models' / 'mace_committee_520eV'}. "
-        "Pass an absolute path or a name like 'mace_finetune_committee'."
-    )
+    return matches[0].resolve()
 
 
 def _discover_models(
