@@ -69,6 +69,7 @@ from .packaging import (
     pack_huggingface,
     verify_package,
 )
+from .phase_diagram import hull_report, suggest_phases
 from .progress import mlip_progress
 from .progress import render as render_progress
 from .reference_import import (
@@ -487,6 +488,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             area_axis=args.area_axis,
             device=args.device,
             allow_vacuum=args.allow_vacuum,
+            window_method=args.window,
         )
         payload["outputs"] = write_interface_mu_reports(payload, args.output)
     elif args.validation == "interface-energy":
@@ -515,6 +517,27 @@ def cmd_validate(args: argparse.Namespace) -> int:
             low_coordination_percentile=args.low_coordination_percentile,
         )
     _json(payload)
+    return 0
+
+
+
+def cmd_phases(args: argparse.Namespace) -> int:
+    if args.phases_command == "suggest":
+        _json(suggest_phases(args.elements, api_key=args.api_key))
+        return 0
+    phases = {}
+    for item in args.phases:
+        name, sep, directory = item.partition("=")
+        if not sep:
+            raise SafetyError(f"--phase expects NAME=DIR; got {item!r}")
+        from .interface_mu import _read_phase
+
+        phase = _read_phase(name.strip(), directory.strip(), allow_vacuum=True)
+        phases[name.strip()] = {
+            "composition": phase["composition"],
+            "energy_ev": phase["energy_ev"],
+        }
+    _json(hull_report(phases, args.compounds, args.anion))
     return 0
 
 
@@ -1599,6 +1622,31 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--force", action="store_true")
     train.set_defaults(func=cmd_train)
 
+    phases_parser = commands.add_parser(
+        "phases",
+        help="Convex-hull phase diagram and chemical-potential windows (vacuum-free)",
+    )
+    phases_commands = phases_parser.add_subparsers(dest="phases_command", required=True)
+    phases_suggest = phases_commands.add_parser(
+        "suggest", help="Which phases to calculate for a chemical system"
+    )
+    phases_suggest.add_argument("elements", nargs="+", metavar="ELEMENT")
+    phases_suggest.add_argument("--api-key", default=None, help="Materials Project API key")
+    phases_suggest.set_defaults(func=cmd_phases)
+    phases_hull = phases_commands.add_parser(
+        "hull", help="Build the hull from your own runs and derive the dmu window"
+    )
+    phases_hull.add_argument(
+        "--phase", action="append", default=[], dest="phases", required=True,
+        metavar="NAME=DIR", help="A finished VASP run for one phase (repeatable)",
+    )
+    phases_hull.add_argument(
+        "--compound", action="append", default=[], dest="compounds", required=True,
+        metavar="NAME", help="The phases the interface is made of (repeatable)",
+    )
+    phases_hull.add_argument("--anion", default="N")
+    phases_hull.set_defaults(func=cmd_phases)
+
     mlip_compare = commands.add_parser(
         "mlip-compare",
         help="Compare MACE and DeePMD committees on exactly matched canonical frames",
@@ -1785,6 +1833,12 @@ def build_parser() -> argparse.ArgumentParser:
         "per compound (Ti, Si) to bound the chemical-potential window",
     )
     interface_mu_parser.add_argument("--anion", default="N", help="Shared anion (default N)")
+    interface_mu_parser.add_argument(
+        "--window", choices=("hull", "pairwise"), default="hull",
+        help="How to bound the chemical-potential window: 'hull' builds the convex "
+        "phase diagram over every --phase (rigorous; a competing silicide or ternary "
+        "can cut it) or 'pairwise' uses each compound's own formation enthalpy",
+    )
     interface_mu_parser.add_argument("--n-interfaces", type=int, default=2)
     interface_mu_parser.add_argument("--area-axis", choices=("a", "b", "c"))
     interface_mu_parser.add_argument(

@@ -69,14 +69,16 @@ class RegimeTests(unittest.TestCase):
 
 
 class InterfaceMuTests(unittest.TestCase):
-    def test_window_is_bounded_by_the_binding_compound(self) -> None:
+    def test_pairwise_window_is_bounded_by_the_binding_compound(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
             payload = interface_mu(
-                [("balanced", iface)], phases=_phases(root), anion="N", n_interfaces=2
+                [("balanced", iface)], phases=_phases(root), anion="N",
+                n_interfaces=2, window_method="pairwise",
             )
             window = payload["chemical_potential_window"]
+            self.assertEqual(payload["window_method"], "pairwise-formation-enthalpy")
             self.assertAlmostEqual(window["mu_anion_reference_ev"], -8.0)
             self.assertAlmostEqual(window["dmu_min_ev"], -2.0)
             self.assertEqual(window["dmu_max_ev"], 0.0)
@@ -84,6 +86,39 @@ class InterfaceMuTests(unittest.TestCase):
             by_compound = {b["compound"]: b for b in window["bounds"]}
             self.assertAlmostEqual(by_compound["TiN"]["formation_enthalpy_ev_per_fu"], -3.5)
             self.assertAlmostEqual(by_compound["Si3N4"]["formation_enthalpy_ev_per_fu"], -8.0)
+
+    def test_hull_window_agrees_with_the_pairwise_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            phases = _phases(root)
+            hull = interface_mu(
+                [("balanced", iface)], phases=phases, anion="N", n_interfaces=2,
+                window_method="hull",
+            )["chemical_potential_window"]
+            pairwise = interface_mu(
+                [("balanced", iface)], phases=phases, anion="N", n_interfaces=2,
+                window_method="pairwise",
+            )["chemical_potential_window"]
+            self.assertEqual(hull["method"], "convex-hull")
+            # the hull is the rigorous route; on a system with no competing
+            # ternary it must reproduce the pairwise formation-enthalpy bound
+            self.assertAlmostEqual(hull["dmu_min_ev"], pairwise["dmu_min_ev"], places=6)
+            self.assertAlmostEqual(hull["dmu_max_ev"], pairwise["dmu_max_ev"], places=6)
+            self.assertEqual(hull["binding_compound"], pairwise["binding_compound"])
+            self.assertEqual(hull["hull"]["unstable_phases"], [])
+            self.assertEqual(hull["competing_stable_phases"], [])
+
+    def test_hull_names_a_competing_silicide(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            phases = _phases(root)
+            phases["TiSi2"] = _run(root / "TiSi2", [("Ti", 2), ("Si", 4)], -46.0)
+            window = interface_mu(
+                [("balanced", iface)], phases=phases, anion="N", n_interfaces=2,
+            )["chemical_potential_window"]
+            self.assertEqual(window["competing_stable_phases"], ["TiSi2"])
 
     def test_balanced_cell_is_chemical_potential_independent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

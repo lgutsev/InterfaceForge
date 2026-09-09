@@ -70,6 +70,48 @@ identical for DFT and every MLIP — only the intercept moves.
 `--allow-vacuum` skips the regime guard. Use it only knowing the result then
 folds two free-surface energies into γ and is not comparable to a periodic one.
 
+## Phase diagrams (pymatgen)
+
+The Δμ window is bounded by whatever phase decomposes first. The pairwise bound
+`Δμ ≥ max_C ΔH_f(C)/b_C` only asks about each cation's *elemental* phase — right
+for a binary, but in Ti–Si–N the window can instead be cut by a silicide or a
+ternary. `--window hull` (the **default**) builds the convex hull over every
+`--phase` you supply and intersects the stability ranges of the compounds the
+interface is actually made of, naming the phase that binds each side.
+
+```bash
+# which phases exist in the system (MP IDs; energies are NOT taken from MP)
+iface phases suggest Ti Si N
+
+# the hull and the window, from your own runs
+iface phases hull --anion N --compound TiN --compound Si3N4   --phase TiN=bulk/TiN --phase Si3N4=bulk/Si3N4   --phase N2=bulk/N2 --phase Ti=bulk/Ti_hcp --phase Si=bulk/Si_diamond   --phase TiSi2=bulk/TiSi2 --phase Ti5Si3=bulk/Ti5Si3
+```
+
+`interface-mu` runs the same hull internally, so extra `--phase` entries that are
+neither a decomposition reference nor an elemental phase (TiSi₂, Ti₅Si₃, Ti₂N)
+are still accepted — they go on the hull as **auxiliary constraints** and can
+tighten the window. Their names appear under `competing_stable_phases`.
+
+Two hard rules the tooling enforces:
+
+- **Every element needs an elemental reference.** Without it the chemical-potential
+  scale for that element is undefined, and the hull refuses to build.
+- **A reference phase above the hull is rejected** as a reservoir — it would
+  decompose. `e_above_hull_ev_per_atom` is reported per phase, so a bad structure
+  or a settings mismatch shows up immediately.
+
+**Never mix Materials Project energies into your hull.** MP uses different
+cutoffs, no dispersion, and fitted anion corrections; a hull built from a mix of
+MP and your PBE+IVDW numbers is meaningless. `iface phases suggest` returns MP
+IDs so you know *which* phases to compute — recompute all of them yourself.
+It uses `mp_api` for a live query when installed (`pip install
+'interfaceforge[phases-mp]'` + `MP_API_KEY`), and otherwise returns the verified
+built-in list for this chemical system.
+
+Sanity check worth doing once: run both `--window hull` and `--window pairwise`.
+On a system with no competing ternary they agree exactly; if they differ, the
+hull is right and the difference tells you which phase you had been ignoring.
+
 ## Bulk phases to calculate
 
 Same settings as the interfaces (520 eV, `IVDW=11`, consistent k-point density,

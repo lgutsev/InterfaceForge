@@ -44,6 +44,7 @@ from typing import Any
 import numpy as np
 
 from .errors import DependencyError, SafetyError
+from .phase_diagram import hull_report
 from .regime import BULK, FREE_SURFACE, MLIP_DOMAIN, measure_regime, require_regime
 from .separation_energy import (
     EV_A2_TO_J_M2,
@@ -110,6 +111,7 @@ def _classify_phases(phases: Mapping[str, dict[str, Any]], anion: str) -> dict[s
 
     compounds: dict[str, dict[str, Any]] = {}
     elemental: dict[str, dict[str, Any]] = {}
+    auxiliary: dict[str, dict[str, Any]] = {}
     anion_ref: dict[str, Any] | None = None
     for name, phase in phases.items():
         elements = sorted(phase["composition"])
@@ -132,10 +134,10 @@ def _classify_phases(phases: Mapping[str, dict[str, Any]], anion: str) -> dict[s
                 )
             compounds[name] = {**phase, "cation": cations[0]}
         else:
-            raise SafetyError(
-                f"reference phase {name!r} ({phase['formula']}) is neither elemental "
-                f"nor a {anion} compound; it cannot act as a reference here"
-            )
+            # A phase with no anion (a silicide, an intermetallic) cannot be a
+            # decomposition reference, but it belongs on the convex hull: it may
+            # be what actually cuts the chemical-potential window.
+            auxiliary[name] = phase
     if not compounds:
         raise SafetyError(f"no compound reference phase containing {anion} was given")
     if anion_ref is None:
@@ -143,7 +145,12 @@ def _classify_phases(phases: Mapping[str, dict[str, Any]], anion: str) -> dict[s
             f"no elemental {anion} reference given (e.g. --phase N2=<N2 molecule run>); "
             "it sets the anion-rich limit of the chemical-potential window"
         )
-    return {"compounds": compounds, "elemental": elemental, "anion_ref": anion_ref}
+    return {
+        "compounds": compounds,
+        "elemental": elemental,
+        "auxiliary": auxiliary,
+        "anion_ref": anion_ref,
+    }
 
 
 def _units(phase: Mapping[str, Any], anion: str) -> tuple[float, float, float]:
@@ -210,6 +217,34 @@ def chemical_potential_window(classified: Mapping[str, Any], anion: str) -> dict
             f"({anion}-rich, elemental {anion} condenses), lower limit set by "
             "precipitation of an elemental cation phase"
         ),
+    }
+
+
+
+def _hull_window(
+    phases: Mapping[str, Any], classified: Mapping[str, Any], anion: str
+) -> dict[str, Any]:
+    """Chemical-potential window from the convex hull, shaped like the pairwise one."""
+
+    serialisable = {
+        name: {"composition": phase["composition"], "energy_ev": phase["energy_ev"]}
+        for name, phase in phases.items()
+    }
+    report = hull_report(serialisable, list(classified["compounds"]), anion)
+    window = report["chemical_potential_window"]
+    return {
+        "anion": anion,
+        "method": "convex-hull",
+        "anion_reference": classified["anion_ref"]["name"],
+        "mu_anion_reference_ev": window["mu_anion_reference_ev"],
+        "dmu_min_ev": window["dmu_min_ev"],
+        "dmu_max_ev": window["dmu_max_ev"],
+        "binding_compound": window["dmu_min_set_by"],
+        "upper_bound_set_by": window["dmu_max_set_by"],
+        "bounds": window["per_compound"],
+        "competing_stable_phases": window["competing_stable_phases"],
+        "hull": {k: v for k, v in report.items() if k != "chemical_potential_window"},
+        "note": window["note"],
     }
 
 
@@ -341,6 +376,7 @@ def interface_mu(
     area_axis: str | None = None,
     device: str = "cpu",
     allow_vacuum: bool = False,
+    window_method: str = "hull",
 ) -> dict[str, Any]:
     """gamma(dmu_anion) for one or more vacuum-free periodic interface cells."""
 
@@ -357,7 +393,20 @@ def interface_mu(
         for name, directory in phases.items()
     }
     classified = _classify_phases(read, anion)
-    window = chemical_potential_window(classified, anion)
+    if window_method not in {"hull", "pairwise"}:
+        raise SafetyError("window_method must be 'hull' or 'pairwise'")
+    window_note = None
+    if window_method == "hull":
+        try:
+            window = _hull_window(read, classified, anion)
+        except DependencyError as exc:
+            window = chemical_potential_window(classified, anion)
+            window_note = f"convex hull unavailable ({exc}); fell back to the pairwise bound"
+    else:
+        window = chemical_potential_window(classified, anion)
+    window.setdefault("method", "pairwise-formation-enthalpy")
+    if window_note:
+        window["fallback"] = window_note
 
     rows: list[dict[str, Any]] = []
     atoms_by_key: dict[str, Any] = {
@@ -441,6 +490,7 @@ def interface_mu(
         "n_interfaces": n_interfaces,
         "conversion_ev_a2_to_j_m2": EV_A2_TO_J_M2,
         "chemical_potential_window": window,
+        "window_method": window["method"],
         "reference_phases": {
             name: {k: v for k, v in phase.items() if k != "atoms"}
             for name, phase in read.items()
