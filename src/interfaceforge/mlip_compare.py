@@ -296,9 +296,41 @@ def _select_seed_model(mace_model_dir: Path, seed: int) -> tuple[Path, str]:
     return chosen.resolve(), note
 
 
+def _resolve_committee_root(campaign: Path, mace_models_root: str | Path | None) -> Path:
+    if not mace_models_root:
+        return campaign / "models" / "mace_committee_520eV" / "mace_committee"
+    given = Path(mace_models_root).expanduser()
+    if given.is_absolute():
+        return given.resolve()
+    # A bare name (or a relative path) resolves against the cwd, the campaign,
+    # or -- since the from-scratch and fine-tuned trees share it -- the
+    # ENCUT-tagged committee parent.
+    bases = (
+        Path.cwd(),
+        campaign,
+        campaign / "models",
+        campaign / "models" / "mace_committee_520eV",
+    )
+    for base in bases:
+        candidate = base / given
+        if candidate.is_dir():
+            return candidate.resolve()
+    raise SafetyError(
+        f"MACE committee root not found: {mace_models_root!r}. Looked under the "
+        f"working directory, {campaign}, and {campaign / 'models' / 'mace_committee_520eV'}. "
+        "Pass an absolute path or a name like 'mace_finetune_committee'."
+    )
+
+
 def _discover_models(
     root: Path, seeds: tuple[int, ...]
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    seed_dirs = sorted(path.name for path in root.glob("seed_*") if path.is_dir())
+    if not any((root / f"seed_{seed}").is_dir() for seed in seeds):
+        raise SafetyError(
+            f"No seed directories for {list(seeds)} under {root}"
+            + (f"; found {seed_dirs}" if seed_dirs else " (it has no seed_* directories)")
+        )
     rows, notes = [], []
     for index, seed in enumerate(seeds):
         chosen, note = _select_seed_model(root / f"seed_{seed}" / "mace_model", seed)
@@ -355,11 +387,7 @@ def prepare_comparison(
     output = Path(output_root).expanduser().resolve() if output_root else campaign / "audit" / "mlip_compare"
     _prepare_output(output, campaign, force)
     canonical = campaign / "datasets" / "canonical"
-    model_root = (
-        Path(mace_models_root).expanduser().resolve()
-        if mace_models_root
-        else campaign / "models" / "mace_committee_520eV" / "mace_committee"
-    )
+    model_root = _resolve_committee_root(campaign, mace_models_root)
     models, model_notes = _discover_models(model_root, seeds)
     systems, validation = validate_membership(
         canonical / "test.extxyz", canonical / "deepmd" / "test", output / "inputs"

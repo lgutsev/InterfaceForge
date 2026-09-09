@@ -583,10 +583,11 @@ class TestMLIPComparison(unittest.TestCase):
             with self.assertRaisesRegex(SafetyError, "No usable MACE model for seed 53"):
                 prepare_comparison(campaign)
 
-    def test_prepare_accepts_single_stage_finetune_export(self) -> None:
+    def test_prepare_accepts_single_stage_finetune_export_by_bare_name(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             campaign = _campaign(Path(temporary))
-            ft_root = campaign / "models" / "mace_finetune_committee"
+            # the fine-tune tree sits beside mace_committee/ under the ENCUT parent
+            ft_root = campaign / "models" / "mace_committee_520eV" / "mace_finetune_committee"
             for seed in DEFAULT_SEEDS:
                 directory = ft_root / f"seed_{seed}" / "mace_model"
                 directory.mkdir(parents=True)
@@ -600,7 +601,7 @@ class TestMLIPComparison(unittest.TestCase):
             manifest = prepare_comparison(
                 campaign,
                 output_root=campaign / "audit" / "mlip_compare_mace_ft",
-                mace_models_root=ft_root,
+                mace_models_root="mace_finetune_committee",  # bare name
                 force=True,
             )
             paths = [Path(model["model_path"]).name for model in manifest["models"]]
@@ -608,6 +609,12 @@ class TestMLIPComparison(unittest.TestCase):
             self.assertFalse(any("compiled" in name for name in paths))
             self.assertEqual(len(manifest["model_selection_notes"]), len(DEFAULT_SEEDS))
             self.assertIn("no stage-two export", manifest["model_selection_notes"][0])
+
+    def test_prepare_reports_a_missing_committee_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign = _campaign(Path(temporary))
+            with self.assertRaisesRegex(SafetyError, "committee root not found"):
+                prepare_comparison(campaign, mace_models_root="not_a_committee", force=True)
 
     def test_finalize_refuses_incomplete_committees(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -1591,7 +1591,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_campaign_option(compare_prepare)
     compare_prepare.add_argument("--output-root")
-    compare_prepare.add_argument("--mace-models-root")
+    compare_prepare.add_argument(
+        "--mace-models-root",
+        help="MACE committee directory holding seed_<seed>/mace_model/ (default: the "
+        "from-scratch mace_committee). A bare name like 'mace_finetune_committee' "
+        "resolves under models/mace_committee_520eV/",
+    )
     compare_prepare.add_argument(
         "--seeds", nargs="+", type=int, default=[11, 23, 37, 53]
     )

@@ -95,9 +95,10 @@ for arch in dpa2 dpa2_ft dpa3 dpa3_ft dpa4; do
   sbatch "audit/mlip_compare_$arch/run_mace_evaluate.slurm"
 done
 # the fine-tuned MACE committee is its own run (any --deepmd-arch will do; only
-# its MACE rows are used downstream):
+# its MACE rows are used downstream). --mace-models-root takes a bare name that
+# resolves under models/mace_committee_520eV/:
 iface mlip-compare prepare --deepmd-arch dpa2 \
-  --mace-models-root models/mace_finetune_committee \
+  --mace-models-root mace_finetune_committee \
   --output-root audit/mlip_compare_mace_ft --force
 sbatch audit/mlip_compare_mace_ft/run_mace_evaluate.slurm
 
