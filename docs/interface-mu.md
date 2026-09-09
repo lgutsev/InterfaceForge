@@ -84,7 +84,7 @@ interface is actually made of, naming the phase that binds each side.
 iface phases suggest Ti Si N
 
 # the hull and the window, from your own runs
-iface phases hull --anion N --compound TiN --compound Si3N4   --phase TiN=bulk/TiN --phase Si3N4=bulk/Si3N4   --phase N2=bulk/N2 --phase Ti=bulk/Ti_hcp --phase Si=bulk/Si_diamond   --phase TiSi2=bulk/TiSi2 --phase Ti5Si3=bulk/Ti5Si3
+iface phases hull --anion N --compound TiN --compound Si3N4 \n  --phase TiN=bulk/TiN --phase Si3N4=bulk/Si3N4 \n  --phase N2=bulk/N2 --phase Ti=bulk/Ti_hcp --phase Si=bulk/Si_diamond \n  --phase TiSi2=bulk/TiSi2 --phase Ti5Si3=bulk/Ti5Si3
 ```
 
 `interface-mu` runs the same hull internally, so extra `--phase` entries that are
