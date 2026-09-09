@@ -262,17 +262,52 @@ def validate_membership(
     return rows, summary
 
 
-def _discover_models(root: Path, seeds: tuple[int, ...]) -> list[dict[str, Any]]:
-    rows = []
+# Same priority as launch_scripts/separation_energy_common.sh:sep_mace_member --
+# a stage-two / SWA export wins, otherwise the single-stage export is used. A
+# naive foundation-model fine-tune (EMA, no SWA) only writes "<name>.model".
+_STAGE_TWO_SUFFIXES = ("_stagetwo", "_stage_two", "_stage2", "_swa")
+
+
+def _select_seed_model(mace_model_dir: Path, seed: int) -> tuple[Path, str]:
+    directory = mace_model_dir if mace_model_dir.is_dir() else mace_model_dir.parent
+    candidates = [
+        path
+        for path in sorted(directory.glob("*.model"))
+        if path.is_file() and path.stat().st_size and "_compiled" not in path.name
+    ]
+    if not candidates:
+        raise SafetyError(
+            f"No usable MACE model for seed {seed} in {directory}: expected a "
+            "non-empty, uncompiled *.model export (stage-two preferred)"
+        )
+    stage_two = [
+        path
+        for path in candidates
+        if any(path.stem.endswith(suffix) for suffix in _STAGE_TWO_SUFFIXES)
+    ]
+    pool, tier = (stage_two, "stage-two") if stage_two else (candidates, "single-stage")
+    chosen = max(pool, key=lambda path: path.stat().st_mtime)
+    if len(pool) > 1:
+        note = f"seed {seed}: {len(pool)} {tier} exports in {directory}; using newest {chosen.name}"
+    elif tier == "single-stage":
+        note = f"seed {seed}: no stage-two export in {directory}; using {chosen.name}"
+    else:
+        note = ""
+    return chosen.resolve(), note
+
+
+def _discover_models(
+    root: Path, seeds: tuple[int, ...]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    rows, notes = [], []
     for index, seed in enumerate(seeds):
-        directory = root / f"seed_{seed}" / "mace_model"
-        matches = sorted(directory.glob("*_stagetwo.model"))
-        if len(matches) != 1:
-            raise SafetyError(
-                f"Expected one stage-two model for seed {seed}; found {len(matches)} in {directory}"
-            )
-        rows.append({"model": f"model_{index:03d}", "seed": seed, "model_path": str(matches[0].resolve())})
-    return rows
+        chosen, note = _select_seed_model(root / f"seed_{seed}" / "mace_model", seed)
+        if note:
+            notes.append(note)
+        rows.append(
+            {"model": f"model_{index:03d}", "seed": seed, "model_path": str(chosen)}
+        )
+    return rows, notes
 
 
 def _slurm(root: Path, nmodels: int) -> str:
@@ -325,7 +360,7 @@ def prepare_comparison(
         if mace_models_root
         else campaign / "models" / "mace_committee_520eV" / "mace_committee"
     )
-    models = _discover_models(model_root, seeds)
+    models, model_notes = _discover_models(model_root, seeds)
     systems, validation = validate_membership(
         canonical / "test.extxyz", canonical / "deepmd" / "test", output / "inputs"
     )
@@ -347,6 +382,7 @@ def prepare_comparison(
         "campaign_root": str(campaign),
         "output_root": str(output),
         "models": models,
+        "model_selection_notes": model_notes,
         "systems": systems,
         "validation": validation,
         "launcher": str(launcher),

@@ -42,10 +42,16 @@ From the campaign root:
 iface mlip-compare prepare --force
 ```
 
-Preparation requires exactly one stage-two MACE model for each seed
-`11 23 37 53`. It then proves that the MACE extxyz and DeePMD NPY test data
-have identical `(IF_leaf, source_frame)` membership, atom order, coordinates,
-cells, energies, and forces. The tolerance is `1e-7`.
+Preparation needs one usable MACE export per seed `11 23 37 53` in
+`seed_<seed>/mace_model/`. A stage-two / SWA export (`*_stagetwo.model`,
+`*_swa.model`, …) is preferred; a single-stage export (`<name>.model`, e.g. a
+naive EMA-only foundation-model fine-tune) is accepted with a note in
+`comparison_manifest.json.model_selection_notes`. `*_compiled.model` and empty
+files are ignored; the newest is used when several exports share the top tier
+(same rule as the separation-energy launcher). It then proves that the MACE
+extxyz and DeePMD NPY test data have identical `(IF_leaf, source_frame)`
+membership, atom order, coordinates, cells, energies, and forces. The tolerance
+is `1e-7`.
 
 Submit the generated MACE inference array:
 

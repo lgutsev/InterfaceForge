@@ -580,8 +580,34 @@ class TestMLIPComparison(unittest.TestCase):
                 / "synthetic_seed53_stagetwo.model"
             )
             missing.unlink()
-            with self.assertRaisesRegex(SafetyError, "Expected one stage-two model"):
+            with self.assertRaisesRegex(SafetyError, "No usable MACE model for seed 53"):
                 prepare_comparison(campaign)
+
+    def test_prepare_accepts_single_stage_finetune_export(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign = _campaign(Path(temporary))
+            ft_root = campaign / "models" / "mace_finetune_committee"
+            for seed in DEFAULT_SEEDS:
+                directory = ft_root / f"seed_{seed}" / "mace_model"
+                directory.mkdir(parents=True)
+                # naive fine-tune: EMA export only, no *_stagetwo.model
+                (directory / f"periodic_mace_ft_seed{seed}.model").write_text(
+                    "placeholder\n", encoding="utf-8"
+                )
+                (directory / f"periodic_mace_ft_seed{seed}_compiled.model").write_text(
+                    "ignore me\n", encoding="utf-8"
+                )
+            manifest = prepare_comparison(
+                campaign,
+                output_root=campaign / "audit" / "mlip_compare_mace_ft",
+                mace_models_root=ft_root,
+                force=True,
+            )
+            paths = [Path(model["model_path"]).name for model in manifest["models"]]
+            self.assertTrue(all(name.endswith(".model") for name in paths))
+            self.assertFalse(any("compiled" in name for name in paths))
+            self.assertEqual(len(manifest["model_selection_notes"]), len(DEFAULT_SEEDS))
+            self.assertIn("no stage-two export", manifest["model_selection_notes"][0])
 
     def test_finalize_refuses_incomplete_committees(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
