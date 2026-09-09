@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 from interfaceforge.errors import SafetyError
 from interfaceforge.separation_energy import (
-    EV_A2_TO_J_M2,
     _deepmd_energies,
     _family_block,
     _gamma,
@@ -405,112 +404,52 @@ def _bulk_set(
     return base
 
 
-class BulkReferenceTests(unittest.TestCase):
-    def test_gamma_flips_sign_for_bulk_reference(self) -> None:
-        energies = {"interface": -100.0, "slab_a": -60.0, "slab_b": -30.0}
-        free = _gamma(energies, 132.0)
-        bulk = _gamma(energies, 132.0, reference="bulk")
-        self.assertAlmostEqual(free, (-60.0 - 30.0 + 100.0) / 132.0 * EV_A2_TO_J_M2)
-        self.assertAlmostEqual(bulk, (-100.0 + 60.0 + 30.0) / 132.0 * EV_A2_TO_J_M2)
-        self.assertAlmostEqual(bulk, -free)
-
-    def test_end_to_end_recovers_formula_units_and_skips_literature(self) -> None:
+class RegimeSeparationTests(unittest.TestCase):
+    def test_reference_bulk_now_redirects_to_the_vacuum_free_branch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            n_set = _bulk_set(root, "nterm", e_int=-100.0, e_a=-60.0, e_b=-30.0)
-            payload = separation_energy(
-                [("interface/450K/Real/N_Term/nterm", n_set)],
-                reference="bulk",
-                n_interfaces=1,
-                campaign_validation=_VALIDATION,
-            )
-            self.assertEqual(payload["reference"], "bulk")
-            self.assertIn("bulk-referenced interfacial excess", payload["definition"])
-            row = payload["interfaces"][0]
-            self.assertAlmostEqual(
-                row["dft"]["gamma_sep_j_per_m2"],
-                (-100.0 + 60.0 + 30.0) / 132.0 * EV_A2_TO_J_M2,
-            )
-            self.assertEqual(row["bulk_reference"]["formula_units"], {"slab_a": 1.0, "slab_b": 1.0})
-            self.assertTrue(row["bulk_reference"]["composition_balanced"])
-            self.assertEqual(row["literature"], [])
-
-    def test_committee_delta_and_reports(self) -> None:
-        def fake_mace(models, atoms_by_part, device):
-            return {
-                f"seed_{k}": {"interface": -100.0 + 0.1 * k, "slab_a": -60.0, "slab_b": -30.0}
-                for k in range(3)
-            }
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            n_set = _bulk_set(root, "nterm", e_int=-100.0, e_a=-60.0, e_b=-30.0)
-            with patch("interfaceforge.separation_energy._mace_energies", fake_mace):
-                payload = separation_energy(
-                    [("interface/nterm", n_set)],
-                    mace_models=["a.model", "b.model", "c.model"],
-                    reference="bulk",
+            with self.assertRaisesRegex(SafetyError, "interface-mu"):
+                separation_energy(
+                    [("x", _set(root, "x", -200.0, -95.0, -97.0))], reference="bulk"
                 )
-            block = payload["interfaces"][0]["mlip"]["mace"]
-            self.assertEqual(block["members"], 3)
-            # interface pushed up by ~0.1 eV/member -> bulk excess grows -> +delta
-            self.assertGreater(block["delta_vs_dft_j_per_m2"], 0.0)
-            # per-part committee mean: interface ~ -99.9, slabs exact
-            self.assertAlmostEqual(block["parts_committee_ev"]["interface"], -99.9, places=6)
-            self.assertAlmostEqual(block["parts_committee_ev"]["slab_a"], -60.0)
 
-            outputs = write_reports(payload, root / "report")
-            self.assertTrue(Path(outputs["figure_png"]).is_file())
-            markdown = (root / "report" / "separation_energy.md").read_text(encoding="utf-8")
-            self.assertIn("Bulk-referenced interfacial excess", markdown)
-            self.assertIn("Per-part committee-mean MLIP − DFT energy", markdown)
-            # slab parts match DFT exactly here; the interface term carries it
-            self.assertRegex(markdown, r"\| .* \| slab_a \| [+-]0\.000 \|")
-            self.assertRegex(markdown, r"\| .* \| interface \| \+0\.100 \|")
-
-    def test_unbalanced_composition_is_flagged_not_fatal(self) -> None:
+    def test_payload_and_report_declare_the_free_surface_regime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            base = root / "bad"
-            # interface has more N than the two bulk cells can supply
-            _run_dir(base / "interface", [("Si", 2), ("Ti", 3), ("N", 12)], -100.0)
-            _run_dir(base / "slab_a", [("Ti", 3), ("N", 3)], -60.0)
-            _run_dir(base / "slab_b", [("Si", 2), ("N", 2)], -30.0)
-            payload = separation_energy([("interface/bad", base)], reference="bulk")
-            row = payload["interfaces"][0]
-            self.assertFalse(row["bulk_reference"]["composition_balanced"])
+            payload = separation_energy([("nterm", _set(root, "nterm", -200.0, -95.0, -97.0))])
+            self.assertEqual(payload["regime"], "free-surface")
+            self.assertIn("free surface", payload["mlip_validity_domain"])
+            self.assertEqual(payload["interfaces"][0]["regime"]["regime"], "free-surface")
             write_reports(payload, root / "report")
-            self.assertIn(
-                "Composition does not balance",
-                (root / "report" / "separation_energy.md").read_text(encoding="utf-8"),
-            )
+            markdown = (root / "report" / "separation_energy.md").read_text(encoding="utf-8")
+            self.assertIn("Regime: free-surface (vacuum)", markdown)
 
-    def test_references_sharing_all_elements_are_rejected(self) -> None:
+    def test_a_periodic_cell_is_refused_by_the_free_surface_branch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            base = root / "ambiguous"
-            _run_dir(base / "interface", [("Si", 4), ("N", 4)], -100.0)
-            _run_dir(base / "slab_a", [("Si", 2), ("N", 2)], -50.0)
-            _run_dir(base / "slab_b", [("Si", 2), ("N", 2)], -50.0)
-            with self.assertRaisesRegex(SafetyError, "shares every element"):
-                separation_energy([("interface/ambiguous", base)], reference="bulk")
-
-    def test_merge_refuses_to_mix_reference_kinds(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            bulk = separation_energy(
-                [("interface/x", _bulk_set(root, "b", e_int=-100.0, e_a=-60.0, e_b=-30.0))],
-                reference="bulk",
-            )
-            free = separation_energy(
-                [("interface/x", _set(root, "f", -200.0, -95.0, -97.0))],
-            )
-            bulk_path = root / "bulk.json"
-            free_path = root / "free.json"
-            bulk_path.write_text(json.dumps(bulk), encoding="utf-8")
-            free_path.write_text(json.dumps(free), encoding="utf-8")
-            with self.assertRaisesRegex(SafetyError, "reference"):
-                merge_separation_energy([bulk_path, free_path])
+            base = root / "periodic"
+            nl = chr(10)
+            for part, count in (("interface", 24), ("slab_a", 12), ("slab_b", 12)):
+                directory = base / part
+                directory.mkdir(parents=True)
+                coords = nl.join(
+                    f"  {(i * 0.7548776662) % 1.0:.6f}  {(i * 0.5698402910) % 1.0:.6f}"
+                    f"  {(i * 0.6180339887) % 1.0:.6f}"
+                    for i in range(count)
+                )
+                header = nl.join(
+                    ["dense", "1.0", "  9.0 0 0", "  0 9.0 0", "  0 0 9.0",
+                     "Si", str(count), "Direct"]
+                )
+                (directory / "POSCAR").write_text(
+                    header + nl + coords + nl, encoding="utf-8"
+                )
+                (directory / "INCAR").write_text("IBRION = -1" + nl, encoding="utf-8")
+                (directory / "OUTCAR").write_text(
+                    _OUTCAR.format(without=-1.0, sigma0=-1.0), encoding="utf-8"
+                )
+            with self.assertRaisesRegex(SafetyError, "bulk structure"):
+                separation_energy([("periodic", base)])
 
 
 if __name__ == "__main__":

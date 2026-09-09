@@ -10,16 +10,12 @@ converted to J/m^2. With ``reference: free-surface`` (each half-slab relaxed
 against its own vacuum surface) and ``n_interfaces = 1`` this is exactly the
 Dupre work of adhesion -- the quantity Sharifi et al. (2026) report.
 
-With ``reference: bulk`` the two "slab" directories instead hold *bulk* crystal
-cells and the quantity is the bulk-referenced interfacial excess::
-
-    gamma = ( E(interface) - m_a E(bulk_a) - m_b E(bulk_b) ) / (n_interfaces * A)
-
-``m_a`` / ``m_b`` are the formula-unit counts of each bulk cell inside the
-interface, recovered from the element unique to each reference. This is a
-control: it exercises only the bonded interface and the bulk phases (no cleaved
-free surface), so DFT-vs-MLIP agreement here localises any separation-energy
-discrepancy to the newly created surfaces.
+This command is the **free-surface** branch: every structure it touches carries
+vacuum, and an MLIP is only trustworthy here if it was trained on isolated
+surfaces. The vacuum-free branch is ``iface validate interface-mu``. The two are
+kept apart deliberately -- a bulk-trained committee reproduces a periodic
+interface energy to ~0.005 J/m^2 and can still be wrong by J/m^2 on a cleaved
+polar surface, with a small committee spread either way.
 
 Unlike ``iface validate interface-energy`` (which references the MD dataset
 against bulk phases), this evaluates a small set of *hand-built* structures with
@@ -45,11 +41,12 @@ import numpy as np
 from .audit import audit_run
 from .config import merge_interface_metadata, references_for
 from .errors import DependencyError, SafetyError
+from .regime import FREE_SURFACE, MLIP_DOMAIN, require_regime
 from .validation import compare_to_references
 
 EV_A2_TO_J_M2 = 16.02176634
 _PARTS = ("interface", "slab_a", "slab_b")
-_REFERENCE_KINDS = ("free-surface", "bulk")
+_REFERENCE_KINDS = ("free-surface",)
 
 
 # --------------------------------------------------------------------------- IO
@@ -216,101 +213,23 @@ def _deepmd_energies(model_paths: Sequence[str], atoms_by_part: Mapping[str, Any
 
 # ----------------------------------------------------------------------- maths
 
-_UNIT_MULT: dict[str, float] = {"slab_a": 1.0, "slab_b": 1.0}
-
-
 def _composition(atoms: Any) -> dict[str, int]:
+    """Element counts of a structure; shared with the vacuum-free branch."""
+
     return dict(Counter(atoms.get_chemical_symbols()))
 
 
-def _bulk_multiplicities(
-    atoms_by_part: Mapping[str, Any],
-) -> tuple[dict[str, float], dict[str, Any]]:
-    """Formula-unit counts of each bulk reference cell contained in the interface.
-
-    ``--reference bulk`` forms ``E(interface) - m_a E(slab_a) - m_b E(slab_b)``.
-    ``m_a`` / ``m_b`` are recovered from the element unique to each bulk cell
-    (Ti for a TiN reference, Si for a Si3N4 reference); every shared element
-    (N) is then checked for stoichiometric balance. Raises when the two
-    references share every element -- the split is undetermined then, and the
-    caller should use ``iface validate interface-energy`` instead.
-    """
-
-    inter = _composition(atoms_by_part["interface"])
-    comps = {
-        "slab_a": _composition(atoms_by_part["slab_a"]),
-        "slab_b": _composition(atoms_by_part["slab_b"]),
-    }
-    mult: dict[str, float] = {}
-    for part, other in (("slab_a", "slab_b"), ("slab_b", "slab_a")):
-        unique = [el for el in comps[part] if el not in comps[other]]
-        if not unique:
-            raise SafetyError(
-                f"--reference bulk cannot split the interface: {part} shares every "
-                "element with the other reference cell"
-            )
-        marker = max(unique, key=lambda el: comps[part][el])
-        if inter.get(marker, 0) == 0:
-            raise SafetyError(
-                f"--reference bulk: the interface has no {marker}, the marker element of {part}"
-            )
-        mult[part] = inter[marker] / comps[part][marker]
-
-    balance: dict[str, dict[str, float]] = {}
-    for el in sorted(set(comps["slab_a"]) | set(comps["slab_b"])):
-        predicted = (
-            mult["slab_a"] * comps["slab_a"].get(el, 0)
-            + mult["slab_b"] * comps["slab_b"].get(el, 0)
-        )
-        balance[el] = {"predicted": round(predicted, 3), "interface": inter.get(el, 0)}
-    balanced = all(abs(v["predicted"] - v["interface"]) < 0.5 for v in balance.values())
-    diagnostics: dict[str, Any] = {
-        "interface_composition": inter,
-        "slab_a_composition": comps["slab_a"],
-        "slab_b_composition": comps["slab_b"],
-        "formula_units": {k: round(v, 4) for k, v in mult.items()},
-        "composition_balance": balance,
-        "composition_balanced": balanced,
-    }
-    return mult, diagnostics
-
-
-def _excess(
-    energies: Mapping[str, float], *, reference: str, mult: Mapping[str, float]
-) -> float:
-    scaled_a = mult["slab_a"] * energies["slab_a"]
-    scaled_b = mult["slab_b"] * energies["slab_b"]
-    if reference == "bulk":
-        return energies["interface"] - scaled_a - scaled_b
-    return scaled_a + scaled_b - energies["interface"]
-
-
-def _gamma(
-    energies: Mapping[str, float],
-    denom: float,
-    *,
-    reference: str = "free-surface",
-    mult: Mapping[str, float] | None = None,
-) -> float:
-    return (
-        _excess(energies, reference=reference, mult=mult or _UNIT_MULT)
-        / denom
-        * EV_A2_TO_J_M2
-    )
+def _gamma(energies: Mapping[str, float], denom: float) -> float:
+    excess = energies["slab_a"] + energies["slab_b"] - energies["interface"]
+    return excess / denom * EV_A2_TO_J_M2
 
 
 def _family_block(
     members: Mapping[str, Mapping[str, float]],
     denom: float,
     dft_gamma: float | None,
-    *,
-    reference: str = "free-surface",
-    mult: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
-    per_member = {
-        name: _gamma(energy, denom, reference=reference, mult=mult)
-        for name, energy in members.items()
-    }
+    per_member = {name: _gamma(energy, denom) for name, energy in members.items()}
     values = np.array(list(per_member.values()), dtype=float)
     ensemble = float(values.mean())
     spread = float(values.std(ddof=1)) if values.size > 1 else 0.0
@@ -360,7 +279,7 @@ def _literature_hits(
     lit_refs: Sequence[Mapping[str, Any]] | None,
     interfaces_meta: Any,
 ) -> list[dict[str, Any]]:
-    if not lit_refs or row.get("reference") == "bulk":
+    if not lit_refs:
         return []
     attrs = merge_interface_metadata(interfaces_meta, row["spec"]) if interfaces_meta else {}
     probes: list[tuple[str, float]] = []
@@ -388,7 +307,16 @@ def separation_energy(
     area_axis: str | None = None,
     device: str = "cpu",
     campaign_validation: Mapping[str, Any] | None = None,
+    allow_regime_mismatch: bool = False,
 ) -> dict[str, Any]:
+    if reference == "bulk":
+        raise SafetyError(
+            "--reference bulk has moved to 'iface validate interface-mu', which is the "
+            "vacuum-free branch: it references periodic cells to bulk phases with an "
+            "anion chemical potential, so a non-stoichiometric polar cell is handled "
+            "correctly and a stoichiometric one gives the same single number. "
+            "separation-energy is now free-surface only."
+        )
     if reference not in _REFERENCE_KINDS:
         raise SafetyError(f"reference must be one of {_REFERENCE_KINDS}")
     if n_interfaces < 1:
@@ -411,24 +339,18 @@ def separation_energy(
         if slab_mode:
             slab_modes.add(slab_mode)
         atoms = {part: _read_atoms(_structure_file(runs[part])) for part in _PARTS}
+        regime = require_regime(
+            atoms["interface"], FREE_SURFACE, f"interface {spec!r}",
+            allow_mismatch=allow_regime_mismatch,
+        )
         cell = np.array(atoms["interface"].cell.array, dtype=float)
         area, axis = _plane_area(cell, area_axis)
         denom = n_interfaces * area
 
-        mult: dict[str, float] = _UNIT_MULT
-        bulk_reference: dict[str, Any] | None = None
-        if reference == "bulk":
-            mult, bulk_reference = _bulk_multiplicities(atoms)
-
         dft_energies = {part: _dft_energy(runs[part]) for part in _PARTS}
         dft_ready = all(value is not None for value in dft_energies.values())
         dft_gamma = (
-            _gamma(
-                {k: float(v) for k, v in dft_energies.items()},
-                denom,
-                reference=reference,
-                mult=mult,
-            )
+            _gamma({k: float(v) for k, v in dft_energies.items()}, denom)
             if dft_ready
             else None
         )
@@ -442,6 +364,7 @@ def separation_energy(
             "area_axis": axis,
             "n_interfaces": n_interfaces,
             "reference": reference,
+            "regime": regime,
             "natoms": {part: int(len(atoms[part])) for part in _PARTS},
             "dft": {
                 "ready": dft_ready,
@@ -451,24 +374,14 @@ def separation_energy(
             "mlip": {},
             "literature": [],
         }
-        if bulk_reference is not None:
-            row["bulk_reference"] = bulk_reference
 
         if mace_models:
             row["mlip"]["mace"] = _family_block(
-                _mace_energies(mace_models, atoms, device),
-                denom,
-                dft_gamma,
-                reference=reference,
-                mult=mult,
+                _mace_energies(mace_models, atoms, device), denom, dft_gamma
             )
         if deepmd_models:
             row["mlip"]["deepmd"] = _family_block(
-                _deepmd_energies(deepmd_models, atoms),
-                denom,
-                dft_gamma,
-                reference=reference,
-                mult=mult,
+                _deepmd_energies(deepmd_models, atoms), denom, dft_gamma
             )
 
         row["literature"] = _literature_hits(
@@ -477,29 +390,21 @@ def separation_energy(
 
         rows.append(row)
 
-    if reference == "bulk":
-        formula = "gamma = (E(interface) - sum_i m_i E(bulk_i)) / (n_interfaces * A)"
-        interpretation = (
-            "bulk-referenced interfacial excess energy: E(interface) minus the "
-            "composition-matched bulk cells, per interface area. This is a control "
-            "for DFT-vs-MLIP agreement on the bonded interface and the bulk phases "
-            "-- when the interface cell carries vacuum the value also contains its "
-            "two outer free-surface energies, so it is not itself the work of separation"
-        )
+    formula = "gamma_sep = (E(slab_a) + E(slab_b) - E(interface)) / (n_interfaces * A)"
+    if slab_modes == {"static"}:
+        interpretation = "ideal work of separation (slabs frozen at the interface geometry)"
+    elif slab_modes == {"relax"}:
+        interpretation = "Dupre work of adhesion (relaxed slab geometries from DFT)"
     else:
-        formula = "gamma_sep = (E(slab_a) + E(slab_b) - E(interface)) / (n_interfaces * A)"
-        if slab_modes == {"static"}:
-            interpretation = "ideal work of separation (slabs frozen at the interface geometry)"
-        elif slab_modes == {"relax"}:
-            interpretation = "Dupre work of adhesion (relaxed slab geometries from DFT)"
-        else:
-            interpretation = (
-                "Dupre work of adhesion for relaxed free-surface half-slabs with n_interfaces=1"
-            )
+        interpretation = (
+            "Dupre work of adhesion for relaxed free-surface half-slabs with n_interfaces=1"
+        )
 
     return {
         "schema_version": 1,
         "quantity": "separation_energy",
+        "regime": FREE_SURFACE,
+        "mlip_validity_domain": MLIP_DOMAIN[FREE_SURFACE],
         "definition": formula + "; " + interpretation,
         "reference": reference,
         "slab_modes": sorted(slab_modes),
@@ -786,18 +691,14 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
                     )
                 writer.writerow(record)
 
-    is_bulk = payload["reference"] == "bulk"
-    headline = "Bulk-referenced interfacial excess" if is_bulk else "Separation energy"
-    gamma_formula = (
-        f"γ = (E(interface) − Σ mᵢ·E(bulkᵢ)) / ({payload['n_interfaces']} · A)"
-        if is_bulk
-        else f"γ_sep = (E(slab_a) + E(slab_b) − E(interface)) / ({payload['n_interfaces']} · A)"
-    )
-    gamma_col = "γ_excess (J/m²)" if is_bulk else "γ_sep (J/m²)"
+    gamma_col = "γ_sep (J/m²)"
     lines = [
-        f"# {headline} (DFT vs MLIP)",
+        "# Separation energy (DFT vs MLIP)",
         "",
-        f"{gamma_formula}, reference: {payload['reference']}.",
+        f"**Regime: {payload['regime']} (vacuum).** MLIP validity: {payload['mlip_validity_domain']}.",
+        "",
+        f"γ_sep = (E(slab_a) + E(slab_b) − E(interface)) / ({payload['n_interfaces']} · A), "
+        f"reference: {payload['reference']}.",
         "",
         f"Interpretation: {payload['definition'].split('; ', 1)[-1]}.",
         "",
@@ -819,18 +720,6 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
             lines.append(
                 f"| {row['label']} | {source} | {gamma_text} | {spread_text} | {delta_text} | {lit_text} |"
             )
-    unbalanced = [
-        row["label"]
-        for row in payload["interfaces"]
-        if (row.get("bulk_reference") or {}).get("composition_balanced") is False
-    ]
-    if unbalanced:
-        lines += [
-            "",
-            f"> ⚠ Composition does not balance for: {', '.join(unbalanced)} — the bulk "
-            "cells do not sum to the interface stoichiometry, so γ_excess is not meaningful. "
-            "Check that `slab_a`/`slab_b` are the right bulk phases.",
-        ]
 
     part_lines = _per_part_delta_lines(payload)
     if part_lines:
@@ -880,9 +769,8 @@ def _write_figure(payload: dict[str, Any], out: Path) -> dict[str, str]:
     rows = [row for row in payload["interfaces"] if _row_sources(row)]
     if not rows:
         raise SafetyError("no interface has a finished energy to plot")
-    is_bulk = payload.get("reference") == "bulk"
-    gsym = r"\gamma_{\mathrm{excess}}" if is_bulk else r"\gamma_{\mathrm{sep}}"
-    panel_name = "Bulk-referenced excess" if is_bulk else "Separation energy"
+    gsym = r"\gamma_{\mathrm{sep}}"
+    panel_name = "Separation energy"
     order = list(reversed(rows))
     y = np.arange(len(order), dtype=float)
     has_delta = any(
@@ -949,17 +837,7 @@ def _write_figure(payload: dict[str, Any], out: Path) -> dict[str, str]:
                 break
         ax.set_yticks(y, labels=[row["label"] for row in order])
         ax.set_ylim(len(order) - 0.5, -0.5)
-        gamma_values = [g for row in order for _, g, *_ in _row_sources(row) if g is not None]
-        if is_bulk:
-            # the bulk-referenced excess can land either side of zero; keep 0 in
-            # view as an anchor but never clip a negative value.
-            ax.axvline(0.0, color="#6B7280", lw=0.8, zorder=1)
-            low = min([0.0, *gamma_values])
-            high = max([0.0, *gamma_values])
-            pad = 0.08 * (high - low or 1.0)
-            ax.set_xlim(low - pad, high + pad)
-        else:
-            ax.set_xlim(left=0.0)
+        ax.set_xlim(left=0.0)
         ax.set_xlabel(rf"${gsym}$ (J m$^{{-2}}$)")
         ax.set_title(f"(a) {panel_name}" if has_delta else panel_name, loc="left", fontweight="bold")
         ax.grid(axis="x", color="#D1D5DB", linewidth=0.45, alpha=0.75)

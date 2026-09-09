@@ -32,6 +32,7 @@ import numpy as np
 
 from .config import merge_interface_metadata
 from .errors import SafetyError
+from .regime import BULK, MLIP_DOMAIN
 
 EV_A2_TO_J_M2 = 16.02176634
 _INTERFACE_T = re.compile(r"(?:^|/)interface/(\d+)k/", re.IGNORECASE)
@@ -390,6 +391,8 @@ def interface_energy(
 
     return {
         "schema_version": 1,
+        "regime": BULK,
+        "mlip_validity_domain": MLIP_DOMAIN[BULK],
         "campaign_root": str(campaign),
         "dataset_root": str(deepmd_root),
         "predictions_root": str(predictions) if predictions else None,

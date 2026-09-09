@@ -45,6 +45,8 @@ from .geometry import (
 )
 from .interface_energy import interface_energy
 from .interface_energy import write_reports as write_interface_energy_reports
+from .interface_mu import interface_mu, parse_named_entry
+from .interface_mu import write_reports as write_interface_mu_reports
 from .intermat import generate_intermat_interfaces, intermat_status
 from .mace_roi import evaluate_mace_roi_predictions, prepare_mace_roi_dataset
 from .mlff_interfaces import (
@@ -469,6 +471,24 @@ def cmd_validate(args: argparse.Namespace) -> int:
             if args.json_only
             else write_separation_energy_reports(payload, args.output)
         )
+    elif args.validation == "interface-mu":
+        validation = None
+        if args.campaign and Path(args.campaign).is_file():
+            validation = load_campaign(args.campaign).validation
+        entries = [parse_named_entry(item, "interface entry") for item in args.entries]
+        phases = dict(parse_named_entry(item, "--phase") for item in args.phases)
+        payload = interface_mu(
+            entries,
+            phases=phases,
+            anion=args.anion,
+            mace_models=args.mace_models,
+            deepmd_models=args.deepmd_models,
+            n_interfaces=args.n_interfaces,
+            area_axis=args.area_axis,
+            device=args.device,
+            allow_vacuum=args.allow_vacuum,
+        )
+        payload["outputs"] = write_interface_mu_reports(payload, args.output)
     elif args.validation == "interface-energy":
         campaign = _campaign(args)
         payload = interface_energy(
@@ -1747,6 +1767,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_campaign_option(separation_energy_parser)
     separation_energy_parser.set_defaults(func=cmd_validate)
+
+    interface_mu_parser = validation.add_parser(
+        "interface-mu",
+        help="[vacuum-free] Grand-canonical interfacial energy gamma(dmu) for periodic cells",
+    )
+    interface_mu_parser.add_argument("output", help="Directory for interface_mu.{json,csv,md,png,svg,pdf}")
+    interface_mu_parser.add_argument(
+        "entries", nargs="+", metavar="LABEL=DIR",
+        help="A finished VASP run of a vacuum-free periodic interface cell (repeatable)",
+    )
+    interface_mu_parser.add_argument(
+        "--phase", action="append", default=[], dest="phases", required=True,
+        metavar="NAME=DIR",
+        help="Reference phase run directory (repeat): one compound per cation "
+        "(TiN, Si3N4), the elemental anion molecule (N2), and one elemental cation "
+        "per compound (Ti, Si) to bound the chemical-potential window",
+    )
+    interface_mu_parser.add_argument("--anion", default="N", help="Shared anion (default N)")
+    interface_mu_parser.add_argument("--n-interfaces", type=int, default=2)
+    interface_mu_parser.add_argument("--area-axis", choices=("a", "b", "c"))
+    interface_mu_parser.add_argument(
+        "--mace-model", action="append", default=[], dest="mace_models")
+    interface_mu_parser.add_argument(
+        "--deepmd-model", action="append", default=[], dest="deepmd_models")
+    interface_mu_parser.add_argument("--device", default="cpu")
+    interface_mu_parser.add_argument(
+        "--allow-vacuum", action="store_true",
+        help="Escape hatch: skip the vacuum-free guard. The result then folds free-surface "
+        "energies into gamma and is not comparable to a periodic one",
+    )
+    add_campaign_option(interface_mu_parser)
+    interface_mu_parser.set_defaults(func=cmd_validate)
 
     interface_energy_parser = validation.add_parser(
         "interface-energy",
