@@ -45,7 +45,7 @@ For mapped collections spanning unrelated VASP roots, see the
 |---|---|
 | [Interface energy](interface-energy.md) | Work of adhesion and literature/reference comparison |
 | [Separation energy](separation-energy.md) | Cleavage/separation calculations and DFT-versus-MLIP comparison |
-| [Swap Monte Carlo](swap-mc.md) | Fixed-composition N/O ordering search over MLIP-relaxed interfaces, DFT shortlist and export (after PAIPAI) |
+| [Swap Monte Carlo](swap-mc.md) | Fixed-composition N/O ordering search over MLIP-relaxed interfaces, plus the VASP ordering benchmark that verifies it (after PAIPAI) |
 | [Stratified validation](stratified-validation.md) | Errors by geometry class, temperature, coordination, and other physical groups |
 | [Reactive surfaces](reactive-surfaces.md) | AFM-compatible cells, hydroxylation, proton transfer, phosphonate docking, export, and audit |
 

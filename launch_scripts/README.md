@@ -8,6 +8,10 @@ environment paths, wall time, job name, executable, and resource counts before r
 ## Files
 
 - `runvasp.sh`: two-node, 128-rank VASP Gamma launcher for `workq`.
+- `ordering_dft_workflow.sh`: driver for the swap-MC to VASP ordering benchmark.
+  `prepare` builds the run tree from an `iface swap-mc export` and ends with a
+  launch dry run, `submit` sbatches it, `report` collects the finished energies
+  and prints the DFT-vs-MLIP comparison. Set `REPO` if the checkout is elsewhere.
 - `runvasp_bigmem.sh`: two-node, 128-rank VASP Gamma launcher for `bigmem`.
 - `run_mace_gpu2_nomask_v2.sh`: original two-GPU TiN/SiN MACE training launcher.
 - `mace_train_committee.sh`: isolated, fixed-split launcher that writes each

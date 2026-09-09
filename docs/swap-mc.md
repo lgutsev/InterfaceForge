@@ -1,9 +1,10 @@
 # N/O swap Monte Carlo interface generator
 
 > **Verification note:** automated-test only. The search, archive, selection,
-> and export logic are regression tested with an analytic energy model. No real
-> MACE/DeePMD search has been run through it, and no ordering prediction has been
-> checked against DFT.
+> export, and the DFT benchmark preparation, launch, collection and comparison
+> are regression tested with an analytic energy model and synthetic VASP output.
+> No real MACE/DeePMD search has been run through it, and no ordering prediction
+> has yet been checked against real DFT.
 
 `iface swap-mc` searches for low-energy oxygen arrangements in an oxynitride
 interface at **fixed oxygen content**: N and O are exchanged on an explicit set
@@ -120,16 +121,112 @@ iface swap-mc export runs/order/O25 runs/order/O25_dft
 ```
 
 Writes one directory per shortlisted candidate with a `POSCAR` (relaxed geometry,
-frozen layers preserved) and `ordering.json`. From there:
+frozen layers preserved) and `ordering.json` (role, archive roles, MLIP energies,
+committee spread). `--cand-id CAND_ID` (repeatable) exports specific candidates
+instead of the shortlist.
 
-- **DFT ordering benchmark:** `iface vasp opt-prepare` over the exported POSCARs
-  (fixed cell, same frozen layers) and compare relative energies and rankings
-  with the same relaxation convention.
-- **Adhesion contrast:** `iface vasp adhesion prepare` per candidate, then
-  `iface validate separation-energy` random vs searched at identical composition.
+## 5. Prepare the DFT benchmark
 
-`--cand-id CAND_ID` (repeatable) exports specific candidates instead of the
-shortlist.
+```bash
+iface swap-mc dft-prepare runs/order/O25_dft runs/order/O25_vasp \
+  --reference /path/to/converged/interface/run \
+  --stage static --stage relax
+```
+
+The `--reference` directory is an existing converged run for the same interface.
+Its INCAR supplies every electronic setting (ENCUT, PREC, ISPIN, LDAU, smearing,
+parallelization), its KPOINTS is copied verbatim, and its POTCAR is reused when
+the species order matches. Nothing in it is modified.
+
+**What this guarantees, and why it is the whole point.** Ordering energies are
+differences of tens of meV between structures with the same atoms in the same
+box. They are meaningful only if the candidates differ in *nothing else*, so
+`dft-prepare` enforces that rather than trusting it:
+
+| Check | Behaviour |
+|---|---|
+| composition | identical across candidates, or refuse |
+| cell | identical within 1e-4 A, or refuse |
+| frozen layers | same selective-dynamics count per species, or refuse |
+| species blocks | every POSCAR rewritten into one canonical (alphabetical) order so a single POTCAR is valid everywhere; selective-dynamics flags travel with their atom |
+| INCAR | byte-identical apart from `SYSTEM`; verified by hashing the body, and the hash recorded in the manifest |
+| KPOINTS / POTCAR | one shared file, hard-linked into every run |
+| `ISYM` | forced to 0. Different N/O arrangements have different symmetry, and symmetry-reduced k-point sets would make their energies inconsistent at exactly the meV scale being measured |
+| ML tags | removed; this is a DFT benchmark |
+
+Two stages are prepared, under `static/` and `relax/`:
+
+- **`static`** (`IBRION=-1`, `NSW=0`) scores the MLIP geometries as they are. It
+  separates the energy *ranking* from any geometry error and is the cheap first
+  test. Run it on the whole shortlist.
+- **`relax`** (`IBRION=2`, `ISIF=2`, fixed cell, same frozen layers) re-relaxes
+  each arrangement, which is the quantity the MLIP search itself approximated.
+  Run it on the subset that matters.
+
+Useful options: `--ediff`, `--ediffg`, `--nsw`, `--launcher NAME` (default
+`runvasp.sh` then `run.slurm` from the reference), `--potcar-root` when a POTCAR
+must be assembled, and `--mlip-energy {best,refine,screen}` to choose which
+archived MLIP energy is carried into the comparison.
+
+## 6. Launch
+
+```bash
+iface swap-mc dft-launch runs/order/O25_vasp --stage static
+iface swap-mc dft-launch runs/order/O25_vasp --stage static --execute
+```
+
+The dry run is the default. Preflight re-hashes every prepared input and refuses
+to submit if one changed since `dft-prepare`, because editing a single run's
+INCAR silently breaks the comparison. A directory that already holds
+`OUTCAR`/`OSZICAR` is reported as skipped, never resubmitted. `--limit N` bounds
+the batch. Submission writes `ordering_dft_launch_<stage>.{json,tsv}`.
+
+## 7. Collect and compare
+
+```bash
+iface swap-mc dft-collect runs/order/O25_vasp --stage static
+iface swap-mc dft-compare runs/order/O25_vasp --stage static
+```
+
+`dft-collect` reads `energy(sigma->0)` from the last completed ionic step of each
+run with the same parsing `iface audit` uses, and writes
+`static/ordering_dft_energies.{json,csv}`. Unfinished runs are reported, not
+dropped; in the relax stage a run that never reached `EDIFFG` is marked unusable.
+
+`dft-compare` runs the collection itself, then compares both methods through
+`dE_i = E_i - E_reference` evaluated on the *same* configuration, so the
+arbitrary offset between a DFT total energy and an MLIP energy cancels exactly
+and no fitted shift is applied. The reference is the initial arrangement when the
+export contains it, else the lowest-MLIP random baseline, else the highest-DFT
+candidate; `--reference-cand CAND_ID` overrides it, and `--per-atom` reports
+meV/atom.
+
+Outputs in `static/`: `ordering_comparison.{json,csv,md}` and a DFT-vs-MLIP
+scatter `ordering_comparison.png` grouped by searched / random / initial.
+
+The report answers three separate questions:
+
+1. **Does the model rank these arrangements as DFT does?** Pearson r, Spearman
+   rho, pairwise order agreement, and MAE/RMSE/max residual next to the DFT
+   spread they have to be judged against. A max residual comparable to the whole
+   DFT spread means this model does not resolve the ranking, and the report says
+   so.
+2. **Is the search's own best arrangement real?** Whether the MLIP minimum is
+   also the DFT minimum, its DFT rank, and how far above the DFT best it sits.
+3. **Is the headline claim true?** `searched_vs_random` gives the best searched
+   arrangement minus the mean random arrangement under both methods, with the
+   sign agreement. A disagreeing sign is the signature of a search exploiting
+   model error: add those configurations to training and repeat.
+
+## 8. The other compositions
+
+Validate the workflow at one composition (O25) with the full DFT check, then run
+the MLIP searches for the others. Keep a small DFT spot-check at each, two to
+four runs covering the searched minimum and a random control, because agreement
+at one oxygen content does not establish agreement at another, especially after
+a search deliberately leaves the random-arrangement distribution the model was
+trained near. Compositions whose eligible sites are all N or all O have no swaps
+to make and serve as endpoint controls.
 
 ## What to check before trusting a result
 
@@ -140,6 +237,7 @@ shortlist.
   distance, the search has not converged — add seeds or steps.
 - DFT vs MLIP on the shortlist: the failure mode is the search finding an
   arrangement that looks favorable only because the model underestimates its
-  energy. A good aggregate test RMSE does not cover this.
+  energy. A good aggregate test RMSE does not cover this. `dft-compare` reports
+  the sign agreement of the searched-vs-random gain, which is the direct test.
 - `--kt-ev` is an energy scale in eV. It sets how far above the current energy a
   swap can be accepted; it is not a temperature.

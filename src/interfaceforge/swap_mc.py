@@ -1158,10 +1158,17 @@ def export_candidates(
                 {
                     "cand_id": row["cand_id"],
                     "role": row.get("role"),
+                    # roles from the archive (initial / random-baseline / accepted / ...)
+                    # are what 'iface swap-mc dft-compare' groups searched vs random by.
+                    "roles": row.get("roles") or [],
+                    "seeds": row.get("seeds") or [],
                     "n_substituent": row["n_substituent"],
                     "substituent_sites": row["occupation"],
                     "energy_ev": row["energy_ev"],
+                    "energy_screen_ev": row.get("energy_screen_ev"),
                     "energy_refine_ev": row.get("energy_refine_ev"),
+                    "screen_converged": row.get("screen_converged"),
+                    "refine_converged": row.get("refine_converged"),
                     "force_std_ev_ang": row.get("force_std_ev_ang"),
                 },
                 indent=2,
@@ -1179,8 +1186,9 @@ def export_candidates(
         "n_exported": len(written),
         "candidates": written,
         "next_steps": [
-            "DFT ordering benchmark: 'iface vasp opt-prepare' over the exported POSCARs "
-            "(fixed cell, same frozen layers) and compare relative energies / rankings.",
+            "DFT ordering benchmark: 'iface swap-mc dft-prepare EXPORT_DIR DFT_DIR --reference RUN' "
+            "builds one VASP run per candidate with identical INCAR/KPOINTS/POTCAR, then "
+            "dft-launch, dft-collect, dft-compare.",
             "Adhesion contrast: 'iface vasp adhesion prepare' per candidate, then "
             "'iface validate separation-energy' random vs searched at identical composition.",
         ],
@@ -1392,6 +1400,33 @@ def register_commands(commands: Any) -> None:
     export.add_argument("--cand-id", action="append", default=[], help="Export exactly these candidate ids instead")
     export.add_argument("--force", action="store_true")
     export.set_defaults(func=cmd_export)
+
+    # The DFT half of the workflow lives in ordering_dft. It is imported here
+    # rather than at module scope so a thin MACE/DeePMD environment -- which may
+    # lack the full InterfaceForge dependency set -- can still run the search
+    # commands; the DFT subcommands then explain themselves instead of vanishing.
+    try:
+        from .ordering_dft import register_dft_commands
+    except ImportError as exc:
+        _register_unavailable_dft_commands(commands, exc)
+    else:
+        register_dft_commands(commands)
+
+
+def _register_unavailable_dft_commands(commands: Any, exc: Exception) -> None:
+    """Placeholders that name the missing dependency instead of a missing command."""
+
+    def unavailable(_args: argparse.Namespace, name: str = "") -> int:
+        raise DependencyError(
+            f"'swap-mc {name}' needs the full InterfaceForge environment (import failed: {exc}). "
+            "Run the DFT preparation, launch, collection, and comparison steps where "
+            "'iface vasp' runs, not inside an isolated MLIP environment."
+        )
+
+    for name in ("dft-prepare", "dft-launch", "dft-collect", "dft-compare"):
+        parser = commands.add_parser(name, help=f"unavailable in this environment: {exc}")
+        parser.add_argument("arguments", nargs="*")
+        parser.set_defaults(func=lambda args, name=name: unavailable(args, name))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
