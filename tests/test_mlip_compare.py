@@ -20,11 +20,117 @@ from interfaceforge.mlip_compare import (
     _oxidation_summary_rows,
     _publication_summary_rows,
     _temperature_summary_rows,
+    combine_comparisons,
     comparison_status,
     finalize_comparison,
+    parse_combine_entry,
     prepare_comparison,
     validate_membership,
 )
+
+_PUB_GROUPS = (
+    "Overall",
+    "Bulk SiN",
+    "Bulk TiN",
+    "Bulk TiO",
+    "Ideal / N-terminated interface",
+    "Ideal / Ti-terminated interface",
+    "Real / N-terminated interface",
+    "Real / Ti-terminated interface",
+)
+
+
+def _write_pub_csv(path: Path, engine: str, scale: float) -> None:
+    fieldnames = [
+        "engine", "model", "seed", "physical_group", "systems", "frames",
+        "atom_frames", "energy_rmse_mev_per_atom", "force_rmse_mev_per_angstrom",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for group in _PUB_GROUPS:
+            members = [scale * (0.8 + 0.1 * k) for k in range(4)]
+            for k, value in enumerate(members):
+                writer.writerow({
+                    "engine": engine, "model": f"model_{k:03d}", "seed": 11 + k,
+                    "physical_group": group, "systems": 6, "frames": 120,
+                    "atom_frames": 6000, "energy_rmse_mev_per_atom": value,
+                    "force_rmse_mev_per_angstrom": value * 40.0,
+                })
+            writer.writerow({
+                "engine": engine, "model": "ensemble_mean", "seed": "committee",
+                "physical_group": group, "systems": 6, "frames": 120,
+                "atom_frames": 6000,
+                "energy_rmse_mev_per_atom": sum(members) / 4,
+                "force_rmse_mev_per_angstrom": sum(members) / 4 * 40.0,
+            })
+
+
+class CombineComparisonsTests(unittest.TestCase):
+    def test_parse_entry_infers_engine_from_label(self) -> None:
+        self.assertEqual(parse_combine_entry("mace_ft=x"), ("mace_ft", "MACE", "x"))
+        self.assertEqual(parse_combine_entry("dpa3=y"), ("dpa3", "DPA2", "y"))
+        self.assertEqual(parse_combine_entry("odd:DPA2=z"), ("odd", "DPA2", "z"))
+        with self.assertRaises(SafetyError):
+            parse_combine_entry("noeq")
+        with self.assertRaises(SafetyError):
+            parse_combine_entry("a:bogus=z")
+
+    def test_combine_overlays_seven_families(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runs = {
+                "mace": ("MACE", 0.6), "mace_ft": ("MACE", 0.4),
+                "dpa2": ("DPA2", 1.1), "dpa2_ft": ("DPA2", 0.8),
+                "dpa3": ("DPA2", 0.7), "dpa3_ft": ("DPA2", 0.55),
+                "dpa4": ("DPA2", 0.45),
+            }
+            entries = []
+            for label, (engine, scale) in runs.items():
+                _write_pub_csv(root / label / "publication_rmse_by_group.csv", engine, scale)
+                entries.append((label, engine, str(root / label)))
+            payload = combine_comparisons(entries, root / "combined")
+            self.assertEqual(payload["status"], "OK")
+            self.assertEqual([f["label"] for f in payload["families"]], list(runs))
+            for key in ("publication_rmse_png", "publication_rmse_svg", "publication_rmse_pdf"):
+                self.assertTrue(Path(payload["outputs"][key]).is_file())
+            self.assertEqual(payload["views"]["publication_rmse"], "OK")
+            self.assertTrue(payload["views"]["temperature_rmse"].startswith("skipped"))
+            combined = list(csv.DictReader(
+                (root / "combined" / "publication_rmse_by_group.csv").open()
+            ))
+            self.assertEqual(
+                sorted({row["family"] for row in combined}), sorted(runs)
+            )
+            # mace run contributes MACE rows only, dpa runs contribute DPA2 rows
+            self.assertEqual(
+                {row["source_engine"] for row in combined if row["family"] == "mace"},
+                {"MACE"},
+            )
+
+    def test_combine_rejects_duplicate_labels_and_too_few_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_pub_csv(root / "a" / "publication_rmse_by_group.csv", "MACE", 0.5)
+            with self.assertRaises(SafetyError):
+                combine_comparisons([("m", "MACE", str(root / "a"))], root / "o")
+            with self.assertRaises(SafetyError):
+                combine_comparisons(
+                    [("m", "MACE", str(root / "a")), ("m", "MACE", str(root / "a"))],
+                    root / "o",
+                )
+
+    def test_combine_errors_when_no_view_csv_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "a").mkdir(parents=True)
+            (root / "b").mkdir(parents=True)
+            with self.assertRaisesRegex(SafetyError, "no figures"):
+                combine_comparisons(
+                    [("a", "MACE", str(root / "a")), ("b", "DPA2", str(root / "b"))],
+                    root / "o",
+                )
 
 
 def _write_system(

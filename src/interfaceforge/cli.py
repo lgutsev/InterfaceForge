@@ -53,7 +53,13 @@ from .mlff_interfaces import (
     mass_audit_mlff_interfaces,
     write_throttled_array_launcher,
 )
-from .mlip_compare import comparison_status, finalize_comparison, prepare_comparison
+from .mlip_compare import (
+    combine_comparisons,
+    comparison_status,
+    finalize_comparison,
+    parse_combine_entry,
+    prepare_comparison,
+)
 from .packaging import (
     materialize_dataset,
     pack_campaign,
@@ -316,6 +322,15 @@ def cmd_train(args: argparse.Namespace) -> int:
 
 
 def cmd_mlip_compare(args: argparse.Namespace) -> int:
+    if args.mlip_compare_command == "combine":
+        _json(
+            combine_comparisons(
+                [parse_combine_entry(item) for item in args.run],
+                args.output_root,
+                members=args.members,
+            )
+        )
+        return 0
     campaign = _campaign(args)
     if args.mlip_compare_command == "prepare":
         payload = prepare_comparison(
@@ -1602,6 +1617,23 @@ def build_parser() -> argparse.ArgumentParser:
     compare_finalize.add_argument("--output-root")
     compare_finalize.add_argument("--deepmd-eval-root")
     compare_finalize.set_defaults(func=cmd_mlip_compare)
+    compare_combine = mlip_compare_commands.add_parser(
+        "combine",
+        help="Overlay several finalized runs into one many-family RMSE figure set",
+    )
+    compare_combine.add_argument("output_root")
+    compare_combine.add_argument(
+        "--run",
+        action="append",
+        required=True,
+        metavar="LABEL[:ENGINE]=DIR",
+        help="A finalized mlip-compare output dir and its family label (repeat). "
+        "ENGINE (MACE|DPA2) defaults to MACE when LABEL starts with 'mace', else DPA2",
+    )
+    combine_members = compare_combine.add_mutually_exclusive_group()
+    combine_members.add_argument("--members", action="store_true", default=None)
+    combine_members.add_argument("--no-members", dest="members", action="store_false")
+    compare_combine.set_defaults(func=cmd_mlip_compare)
 
     mlip_progress_parser = commands.add_parser(
         "mlip-progress",

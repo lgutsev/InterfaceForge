@@ -83,20 +83,54 @@ Run once per architecture into its own output directory, against the same MACE
 committee:
 
 ```bash
-for arch in dpa2 dpa3 dpa3_ft; do
+for arch in dpa2 dpa2_ft dpa3 dpa3_ft dpa4; do
   iface mlip-compare prepare --deepmd-arch "$arch" \
     --output-root "audit/mlip_compare_$arch" --force
   sbatch "audit/mlip_compare_$arch/run_mace_evaluate.slurm"
 done
+# the fine-tuned MACE committee is its own run (any --deepmd-arch will do; only
+# its MACE rows are used downstream):
+iface mlip-compare prepare --deepmd-arch dpa2 \
+  --mace-models-root models/mace_finetune_committee \
+  --output-root audit/mlip_compare_mace_ft --force
+sbatch audit/mlip_compare_mace_ft/run_mace_evaluate.slurm
+
 # after every MACE array and every DeePMD evaluation finishes:
-for arch in dpa2 dpa3 dpa3_ft; do
+for arch in dpa2 dpa2_ft dpa3 dpa3_ft dpa4; do
   iface mlip-compare finalize --output-root "audit/mlip_compare_$arch" \
     --deepmd-eval-root "models/deepmd/evaluation/$arch/job_<jobid>"
 done
+iface mlip-compare finalize --output-root audit/mlip_compare_mace_ft \
+  --deepmd-eval-root models/deepmd/evaluation/dpa2/job_<jobid>
 ```
 
-MACE inference re-runs per architecture (cheap at float32); overlay the
-`publication_rmse_by_group.csv` files afterward for the combined view.
+MACE inference re-runs per architecture (cheap at float32).
+
+### `combine`: one figure for every family
+
+`iface mlip-compare combine` overlays the pooled per-group RMSE CSVs from
+several finalized runs into one figure set — no committee is re-evaluated:
+
+```bash
+iface mlip-compare combine audit/mlip_compare_all \
+  --run "MACE=audit/mlip_compare_dpa2" \
+  --run "MACE (fine-tuned)=audit/mlip_compare_mace_ft" \
+  --run "DPA-2=audit/mlip_compare_dpa2" \
+  --run "DPA-2 (fine-tuned)=audit/mlip_compare_dpa2_ft" \
+  --run "DPA-3=audit/mlip_compare_dpa3" \
+  --run "DPA-3 (fine-tuned)=audit/mlip_compare_dpa3_ft" \
+  --run "DPA-4=audit/mlip_compare_dpa4"
+```
+
+Each `--run LABEL[:ENGINE]=DIR` names a finalized output directory and the
+family label to draw it as. `ENGINE` is `MACE` or `DPA2` and defaults to `MACE`
+when the label starts with `mace` (case-insensitive), else `DPA2` — so a MACE
+row is pulled from any run and each DeePMD arch from its own run. Output is
+`audit/mlip_compare_all/{publication,temperature,oxidation}_rmse_summary.{png,svg,pdf}`
+plus the merged CSVs and `combined_manifest.json`. Views whose CSV is missing
+from a run are skipped with a note. `--members` forces the per-member open
+circles (default: shown only for ≤ 4 families); `--no-members` forces the
+compact ensemble-only form; families beyond four get alternating row bands.
 
 Finalization independently checks that the reference columns written by
 `dp test -d` still match the canonical MACE labels. It then writes:

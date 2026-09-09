@@ -963,7 +963,33 @@ def _pooled_summary_rows(
     return rows
 
 
-def _write_publication_rmse_figure(
+# Ordered qualitative palette (Okabe-Ito, then two extras) for N-family figures.
+FAMILY_PALETTE = (
+    "#0072B2",  # blue
+    "#D55E00",  # vermillion
+    "#009E73",  # bluish green
+    "#E69F00",  # orange
+    "#CC79A7",  # reddish purple
+    "#56B4E9",  # sky blue
+    "#000000",  # black
+    "#F0E442",  # yellow
+    "#7F3C8D",  # violet
+    "#11A579",  # teal
+)
+
+
+def _family_offsets(families: list[str]) -> dict[str, float]:
+    """Symmetric vertical offsets within a group row; +/-0.13 for two families."""
+
+    n = len(families)
+    if n <= 1:
+        return {families[0]: 0.0} if families else {}
+    spacing = 0.26 if n == 2 else min(0.22, 0.62 / (n - 1))
+    start = -spacing * (n - 1) / 2.0
+    return {family: start + index * spacing for index, family in enumerate(families)}
+
+
+def _render_rmse_summary(
     output: Path,
     summary_rows: list[dict[str, Any]],
     *,
@@ -972,9 +998,20 @@ def _write_publication_rmse_figure(
     path_stem: str = "publication_rmse_summary",
     output_key: str = "publication_rmse",
     figure_height: float = 4.0,
-    deepmd_display: str = "DPA-2",
+    families: list[str] | tuple[str, ...] | None = None,
+    family_key: str = "engine",
+    family_display: dict[str, str] | None = None,
+    family_colors: dict[str, str] | None = None,
+    members: bool | None = None,
 ) -> dict[str, Path]:
-    """Plot compact, publication-oriented energy and force RMSE panels."""
+    """Plot compact energy and force RMSE panels for one or more model families.
+
+    ``families`` are the ordered ``family_key`` values to draw (default: the
+    ``MACE``/``DPA2`` engines present). Each family/group draws its committee
+    member range (open circles + a connecting line) and the committee-averaged
+    (``ensemble_mean``) diamond. ``members=False`` drops the per-member circles
+    for a legible many-family plot; the default keeps them for up to four.
+    """
 
     try:
         import matplotlib
@@ -988,23 +1025,31 @@ def _write_publication_rmse_figure(
             "install InterfaceForge with interfaceforge[report]"
         ) from exc
 
-    engines = ("MACE", "DPA2")
-    colors = {"MACE": "#0072B2", "DPA2": "#D55E00"}
-    offsets = {"MACE": -0.13, "DPA2": 0.13}
+    present = list(dict.fromkeys(str(row[family_key]) for row in summary_rows))
+    families = list(families) if families is not None else [
+        name for name in ("MACE", "DPA2") if name in present
+    ] or present
+    missing = [name for name in families if name not in present]
+    if missing:
+        raise SafetyError(f"RMSE figure: no rows for {family_key} {missing}")
+    display = dict(family_display or {})
+    colors = dict(family_colors) if family_colors else {
+        family: FAMILY_PALETTE[index % len(FAMILY_PALETTE)]
+        for index, family in enumerate(families)
+    }
+    offsets = _family_offsets(families)
+    show_members = members if members is not None else len(families) <= 4
+
     groups = [
         group
         for group in group_order
         if any(row[group_key] == group for row in summary_rows)
     ]
     if not groups:
-        raise SafetyError("No groups available for publication figure")
+        raise SafetyError("No groups available for the RMSE figure")
     group_counts = {
         group: int(
-            next(
-                row["systems"]
-                for row in summary_rows
-                if row[group_key] == group
-            )
+            next(row["systems"] for row in summary_rows if row[group_key] == group)
         )
         for group in groups
     }
@@ -1013,6 +1058,9 @@ def _write_publication_rmse_figure(
         ("(a) Energy", "energy_rmse_mev_per_atom", r"RMSE (meV atom$^{-1}$)"),
         ("(b) Force", "force_rmse_mev_per_angstrom", r"RMSE (meV $\AA^{-1}$)"),
     )
+    scale = 1.0 + 0.13 * max(len(families) - 2, 0)
+    width = 7.2 if len(families) <= 2 else 8.0
+    member_size = 13.0 if len(families) <= 3 else 8.0
 
     with plt.rc_context(
         {
@@ -1031,20 +1079,31 @@ def _write_publication_rmse_figure(
         fig, axes = plt.subplots(
             1,
             2,
-            figsize=(7.2, figure_height),
+            figsize=(width, figure_height * scale),
             sharey=True,
             layout="constrained",
         )
+        banded = len(families) > 2
         for ax, (title, metric, xlabel) in zip(axes, metrics, strict=True):
+            if banded:
+                for group_index in range(len(groups)):
+                    if group_index % 2 == 0:
+                        ax.axhspan(
+                            group_index - 0.5,
+                            group_index + 0.5,
+                            color="#F1F3F5",
+                            zorder=0,
+                        )
             maximum = 0.0
-            for engine in engines:
+            for family in families:
                 for group_index, group in enumerate(groups):
                     selected = [
                         row
                         for row in summary_rows
-                        if row["engine"] == engine
-                        and row[group_key] == group
+                        if str(row[family_key]) == family and row[group_key] == group
                     ]
+                    if not selected:
+                        continue
                     member_values = [
                         float(row[metric])
                         for row in selected
@@ -1055,36 +1114,37 @@ def _write_publication_rmse_figure(
                         for row in selected
                         if row["model"] == "ensemble_mean"
                     ]
-                    if len(member_values) != 4 or len(ensemble_values) != 1:
+                    if len(ensemble_values) != 1 or not member_values:
                         raise SafetyError(
-                            "Publication figure requires four members and one "
-                            f"ensemble mean for {engine} / {group}"
+                            "RMSE figure needs >=1 member and exactly one ensemble "
+                            f"mean for {family} / {group}"
                         )
-                    y = y_positions[group_index] + offsets[engine]
+                    y = y_positions[group_index] + offsets[family]
                     maximum = max(maximum, *member_values, ensemble_values[0])
-                    ax.plot(
-                        [min(member_values), max(member_values)],
-                        [y, y],
-                        color=colors[engine],
-                        linewidth=1.0,
-                        zorder=2,
-                    )
-                    ax.scatter(
-                        member_values,
-                        [y] * len(member_values),
-                        marker="o",
-                        s=13,
-                        facecolors="white",
-                        edgecolors=colors[engine],
-                        linewidths=0.75,
-                        zorder=3,
-                    )
+                    if show_members:
+                        ax.plot(
+                            [min(member_values), max(member_values)],
+                            [y, y],
+                            color=colors[family],
+                            linewidth=1.0,
+                            zorder=2,
+                        )
+                        ax.scatter(
+                            member_values,
+                            [y] * len(member_values),
+                            marker="o",
+                            s=member_size,
+                            facecolors="white",
+                            edgecolors=colors[family],
+                            linewidths=0.75,
+                            zorder=3,
+                        )
                     ax.scatter(
                         [ensemble_values[0]],
                         [y],
                         marker="D",
                         s=22,
-                        color=colors[engine],
+                        color=colors[family],
                         edgecolors="white",
                         linewidths=0.45,
                         zorder=4,
@@ -1107,33 +1167,23 @@ def _write_publication_rmse_figure(
             labels=[f"{group}  ($n$={group_counts[group]})" for group in groups],
         )
         handles = [
-            Line2D([0], [0], color=colors["MACE"], linewidth=1.5, label="MACE"),
-            Line2D([0], [0], color=colors["DPA2"], linewidth=1.5, label=deepmd_display),
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="#4B5563",
-                markerfacecolor="white",
-                linewidth=0,
-                markersize=4.2,
-                label="committee member",
-            ),
-            Line2D(
-                [0],
-                [0],
-                marker="D",
-                color="#4B5563",
-                markerfacecolor="#4B5563",
-                linewidth=0,
-                markersize=4.6,
-                label="committee-averaged prediction",
-            ),
+            Line2D([0], [0], color=colors[family], linewidth=1.5,
+                   label=display.get(family, family))
+            for family in families
         ]
+        if show_members:
+            handles.append(
+                Line2D([0], [0], marker="o", color="#4B5563", markerfacecolor="white",
+                       linewidth=0, markersize=4.2, label="committee member")
+            )
+        handles.append(
+            Line2D([0], [0], marker="D", color="#4B5563", markerfacecolor="#4B5563",
+                   linewidth=0, markersize=4.6, label="committee-averaged prediction")
+        )
         fig.legend(
             handles=handles,
             loc="outside upper center",
-            ncols=4,
+            ncols=min(len(handles), 4),
             frameon=False,
             handlelength=1.5,
             columnspacing=1.2,
@@ -1150,6 +1200,35 @@ def _write_publication_rmse_figure(
         f"{output_key}_svg": svg,
         f"{output_key}_pdf": pdf,
     }
+
+
+def _write_publication_rmse_figure(
+    output: Path,
+    summary_rows: list[dict[str, Any]],
+    *,
+    group_key: str = "physical_group",
+    group_order: tuple[str, ...] = PUBLICATION_GROUP_ORDER,
+    path_stem: str = "publication_rmse_summary",
+    output_key: str = "publication_rmse",
+    figure_height: float = 4.0,
+    deepmd_display: str = "DPA-2",
+) -> dict[str, Path]:
+    """Two-family (MACE vs one DeePMD arch) wrapper over ``_render_rmse_summary``."""
+
+    return _render_rmse_summary(
+        output,
+        summary_rows,
+        group_key=group_key,
+        group_order=group_order,
+        path_stem=path_stem,
+        output_key=output_key,
+        figure_height=figure_height,
+        families=("MACE", "DPA2"),
+        family_key="engine",
+        family_display={"MACE": "MACE", "DPA2": deepmd_display},
+        family_colors={"MACE": "#0072B2", "DPA2": "#D55E00"},
+        members=True,
+    )
 
 
 def finalize_comparison(
@@ -1392,6 +1471,135 @@ def finalize_comparison(
     return payload
 
 
+# (csv_name, group_key, group_order, path_stem, output_key, figure_height)
+_COMBINE_VIEWS = (
+    ("publication_rmse_by_group.csv", "physical_group", PUBLICATION_GROUP_ORDER,
+     "publication_rmse_summary", "publication_rmse", 4.0),
+    ("temperature_rmse_by_group.csv", "temperature_group", TEMPERATURE_GROUP_ORDER,
+     "temperature_rmse_summary", "temperature_rmse", 2.6),
+    ("oxidation_rmse_by_group.csv", "oxidation_group", OXIDATION_GROUP_ORDER,
+     "oxidation_rmse_summary", "oxidation_rmse", 3.6),
+)
+
+
+def _infer_engine(label: str) -> str:
+    """A run label naming a MACE committee contributes its MACE rows, else DPA2."""
+
+    return "MACE" if label.lower().replace("-", "_").startswith("mace") else "DPA2"
+
+
+def parse_combine_entry(item: str) -> tuple[str, str, str]:
+    """``LABEL=DIR`` or ``LABEL:ENGINE=DIR`` -> (label, engine, directory)."""
+
+    spec, sep, directory = item.partition("=")
+    if not sep or not spec.strip() or not directory.strip():
+        raise SafetyError(f"--run expects LABEL=DIR (or LABEL:ENGINE=DIR); got {item!r}")
+    label, _, engine_raw = spec.partition(":")
+    label = label.strip()
+    engine = engine_raw.strip().upper().replace("-", "").replace("_", "") or _infer_engine(label)
+    engine = {"MACE": "MACE", "DPA2": "DPA2", "DPA": "DPA2", "DEEPMD": "DPA2"}.get(engine, engine)
+    if engine not in {"MACE", "DPA2"}:
+        raise SafetyError(f"--run engine must be MACE or DPA2; got {engine_raw!r}")
+    return label, engine, directory.strip()
+
+
+def _read_dicts(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def combine_comparisons(
+    entries: list[tuple[str, str, str]],
+    output_root: str | Path,
+    *,
+    members: bool | None = None,
+) -> dict[str, Any]:
+    """Overlay several finalized ``mlip-compare`` runs into one N-family figure set.
+
+    Each entry is ``(label, engine, finalized_output_dir)``: the pooled
+    per-group RMSE CSVs written by ``finalize`` are read, the chosen engine's
+    rows are relabelled to the family ``label``, and the publication /
+    temperature / oxidation summary figures are re-rendered with every family
+    on shared axes. No committee is re-evaluated; this is pure post-processing.
+    """
+
+    if len(entries) < 2:
+        raise SafetyError("combine needs at least two --run entries")
+    labels = [label for label, _, _ in entries]
+    if len(set(labels)) != len(labels):
+        raise SafetyError(f"Duplicate family label in --run entries: {labels}")
+    output = Path(output_root).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+
+    resolved = [(label, engine, Path(d).expanduser().resolve()) for label, engine, d in entries]
+    figures: dict[str, str] = {}
+    view_status: dict[str, str] = {}
+    for csv_name, group_key, group_order, stem, output_key, height in _COMBINE_VIEWS:
+        combined: list[dict[str, Any]] = []
+        skip_reason = ""
+        for label, engine, directory in resolved:
+            source = directory / csv_name
+            if not source.is_file():
+                skip_reason = f"{label}: no {csv_name} in {directory}"
+                break
+            picked = [row for row in _read_dicts(source) if row.get("engine") == engine]
+            if not picked:
+                skip_reason = f"{label}: {csv_name} has no {engine} rows"
+                break
+            for row in picked:
+                combined.append(
+                    {
+                        "family": label,
+                        "source_engine": engine,
+                        "source_dir": str(directory),
+                        "model": row["model"],
+                        group_key: row[group_key],
+                        "systems": int(row["systems"]),
+                        "frames": int(row["frames"]),
+                        "energy_rmse_mev_per_atom": float(row["energy_rmse_mev_per_atom"]),
+                        "force_rmse_mev_per_angstrom": float(row["force_rmse_mev_per_angstrom"]),
+                    }
+                )
+        if skip_reason:
+            view_status[output_key] = f"skipped: {skip_reason}"
+            continue
+        _write_csv(output / csv_name, combined)
+        rendered = _render_rmse_summary(
+            output,
+            combined,
+            group_key=group_key,
+            group_order=group_order,
+            path_stem=stem,
+            output_key=output_key,
+            figure_height=height,
+            families=labels,
+            family_key="family",
+            members=members,
+        )
+        figures.update({name: str(path) for name, path in rendered.items()})
+        view_status[output_key] = "OK"
+
+    if not figures:
+        raise SafetyError(
+            "combine produced no figures; every run is missing its "
+            "*_rmse_by_group.csv -- run 'iface mlip-compare finalize' there first "
+            f"({view_status})"
+        )
+    payload = {
+        "schema_version": 1,
+        "status": "OK",
+        "output_root": str(output),
+        "families": [
+            {"label": label, "engine": engine, "source_dir": str(directory)}
+            for label, engine, directory in resolved
+        ],
+        "views": view_status,
+        "outputs": figures,
+    }
+    _write_json(output / "combined_manifest.json", payload)
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1408,7 +1616,31 @@ def main(argv: list[str] | None = None) -> int:
                 "--deepmd-arch", default="dpa2", choices=sorted(DEEPMD_DISPLAY)
             )
             command.add_argument("--force", action="store_true")
+    combine = commands.add_parser(
+        "combine",
+        help="overlay several finalized runs into one N-family RMSE figure set",
+    )
+    combine.add_argument("output_root")
+    combine.add_argument(
+        "--run",
+        action="append",
+        required=True,
+        metavar="LABEL[:ENGINE]=DIR",
+        help="a finalized mlip-compare output dir and the family label for it; "
+        "ENGINE (MACE|DPA2) defaults to MACE when LABEL starts with 'mace', else DPA2",
+    )
+    members = combine.add_mutually_exclusive_group()
+    members.add_argument("--members", action="store_true", default=None)
+    members.add_argument("--no-members", dest="members", action="store_false")
     args = parser.parse_args(argv)
+    if args.command == "combine":
+        payload = combine_comparisons(
+            [parse_combine_entry(item) for item in args.run],
+            args.output_root,
+            members=args.members,
+        )
+        print(json.dumps(payload, indent=2))
+        return 0
     if args.command == "prepare":
         payload = prepare_comparison(
             args.campaign_root,
