@@ -580,7 +580,9 @@ class TestMLIPComparison(unittest.TestCase):
                 / "synthetic_seed53_stagetwo.model"
             )
             missing.unlink()
-            with self.assertRaisesRegex(SafetyError, "No usable MACE model for seed 53"):
+            with self.assertRaisesRegex(
+                SafetyError, r"seed\(s\) \[53\].*--seeds 11 23 37"
+            ):
                 prepare_comparison(campaign)
 
     def test_prepare_accepts_single_stage_finetune_export_by_bare_name(self) -> None:
@@ -615,6 +617,27 @@ class TestMLIPComparison(unittest.TestCase):
             self.assertFalse(any("compiled" in p.name for p in paths))
             self.assertEqual(len(manifest["model_selection_notes"]), len(DEFAULT_SEEDS))
             self.assertIn("no stage-two export", manifest["model_selection_notes"][0])
+
+    def test_prepare_runs_a_partial_committee_with_seeds_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign = _campaign(Path(temporary))
+            ft_root = campaign / "models" / "mace_committee_520eV" / "mace_finetune_committee"
+            directory = ft_root / "seed_11" / "mace_model"
+            directory.mkdir(parents=True)
+            (directory / "periodic_mace_ft_seed11_stagetwo.model").write_text(
+                "placeholder\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(SafetyError, r"seed\(s\) \[23, 37, 53\].*--seeds 11"):
+                prepare_comparison(
+                    campaign, mace_models_root="mace_finetune_committee", force=True,
+                    output_root=campaign / "audit" / "x",
+                )
+            manifest = prepare_comparison(
+                campaign, mace_models_root="mace_finetune_committee", seeds=(11,),
+                force=True, output_root=campaign / "audit" / "mlip_compare_mace_ft",
+            )
+            self.assertEqual(len(manifest["models"]), 1)
+            self.assertEqual(manifest["models"][0]["seed"], 11)
 
     def test_prepare_reports_a_missing_committee_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

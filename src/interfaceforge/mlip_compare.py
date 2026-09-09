@@ -337,22 +337,45 @@ def _resolve_committee_root(campaign: Path, mace_models_root: str | Path | None)
     return matches[0].resolve()
 
 
+def _usable_seeds(root: Path) -> list[int]:
+    found = []
+    for seed_dir in root.glob("seed_*"):
+        suffix = seed_dir.name.removeprefix("seed_")
+        if not seed_dir.is_dir() or not suffix.isdigit():
+            continue
+        try:
+            _select_seed_model(seed_dir / "mace_model", int(suffix))
+        except SafetyError:
+            continue
+        found.append(int(suffix))
+    return sorted(found)
+
+
 def _discover_models(
     root: Path, seeds: tuple[int, ...]
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    seed_dirs = sorted(path.name for path in root.glob("seed_*") if path.is_dir())
-    if not any((root / f"seed_{seed}").is_dir() for seed in seeds):
-        raise SafetyError(
-            f"No seed directories for {list(seeds)} under {root}"
-            + (f"; found {seed_dirs}" if seed_dirs else " (it has no seed_* directories)")
-        )
-    rows, notes = [], []
+    rows, notes, missing = [], [], []
     for index, seed in enumerate(seeds):
-        chosen, note = _select_seed_model(root / f"seed_{seed}" / "mace_model", seed)
+        try:
+            chosen, note = _select_seed_model(root / f"seed_{seed}" / "mace_model", seed)
+        except SafetyError:
+            missing.append(seed)
+            continue
         if note:
             notes.append(note)
         rows.append(
             {"model": f"model_{index:03d}", "seed": seed, "model_path": str(chosen)}
+        )
+    if missing:
+        available = _usable_seeds(root)
+        raise SafetyError(
+            f"No usable MACE export for seed(s) {missing} under {root}. "
+            + (
+                f"Seeds with a usable export: {available}; re-run with "
+                f"--seeds {' '.join(map(str, available))}"
+                if available
+                else "No seed has a usable export here."
+            )
         )
     return rows, notes
 
