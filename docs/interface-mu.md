@@ -167,6 +167,54 @@ can only ever raise the N‑poor bound.
 > built without. A window reported alongside a non‑empty list is an upper limit,
 > not the answer.
 
+### The oxidation limit: μ_O for a phase that contains no O
+
+Asking for the Δμ_O *window* of TiN is the wrong question, and pymatgen cannot
+answer it — its range routine divides by the compound's amount of the open
+element, so an O-free compound raises `ZeroDivisionError`. The right question for
+the N/O ordering work is the **oxidation limit**: how O-rich the reservoir can get
+before the nitrides stop being the stable phases at all.
+
+`phases hull` detects this and switches method. The grand potential of an O-free
+phase is flat in μ_O while every O-bearing competitor's falls, so above some μ_O
+the compound is undercut and stays undercut — a monotone, one-sided bound, found
+by bisecting a `GrandPotentialPhaseDiagram`. The lower side is genuinely
+unbounded (`dmu_min_ev: null`): taking O away cannot destabilise a phase that
+contains none.
+
+```bash
+iface phases hull --anion O --compound TiN --compound Si3N4 \
+  --phase TiN=Wadh/TiN_mp492 --phase Si3N4=Wadh/Si3N4_mp988 \
+  --phase TiO2=Wadh/TiO2_mp2657 --phase SiO2=Wadh/SiO2_mp7000 \
+  --phase TiO=Wadh/TiO_mp2664 --phase Ti2O3=Wadh/Ti2O3_mp458 \
+  --phase N2=Wadh/N2_gas --phase O2=Wadh/O2_gas \
+  --phase Ti=Wadh/Ti_mp46 --phase Si=Wadh/Si_mp149
+```
+
+You get a limit per compound, the decomposition at that limit, and the binding
+one:
+
+```
+"method": "grand-potential-open-element",
+"dmu_max_ev": -5.25, "dmu_max_set_by": "TiN",
+"per_compound": [
+  {"compound": "TiN",   "dmu_limit_ev": -5.25, "decomposition_at_limit": ["N2", "TiO2"]},
+  {"compound": "Si3N4", "dmu_limit_ev": -5.00, "decomposition_at_limit": ["N2", "SiO2"]}
+]
+```
+
+Read that as: above Δμ_O = −5.25 eV, TiN gives way to TiO₂ + N₂, so **every
+substitutional-O configuration in the ordering study has to sit below the tighter
+of the two limits** — above it the interface is not an oxygen-doped nitride, it is
+an oxide. The values above are the toy numbers the tests pin, not your DFT.
+
+Two rules the dispatch enforces. A compound that is not stable even at
+Δμ = −15 eV is refused: at that point the reservoir is as poor as it can
+meaningfully get, so the problem is the phase, not the oxygen. And naming a
+compound that contains the anion together with one that does not is refused
+rather than half-answered — the first has a two-sided range, the second only an
+upper limit, so they are separate runs.
+
 ### `--phase` vs `--aux-phase`
 
 `--phase` is for the references the interface decomposes *into*: one compound per

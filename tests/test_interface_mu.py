@@ -21,6 +21,19 @@ from interfaceforge.phase_diagram import (
 from interfaceforge.regime import BULK, FREE_SURFACE, measure_regime
 from interfaceforge.separation_energy import EV_A2_TO_J_M2, _read_atoms, _structure_file
 
+#: A toy Ti-Si-N-O set with hand-checkable reaction energies. Per formula unit:
+#: TiN -18.5, Si3N4 -55.0, TiO2 -30.0, SiO2 -26.6667; mu0(N) = -8.0, mu0(O) = -4.5.
+_QUATERNARY = {
+    "TiN":   {"composition": {"Ti": 4, "N": 4}, "energy_ev": -74.0},
+    "Si3N4": {"composition": {"Si": 6, "N": 8}, "energy_ev": -110.0},
+    "TiO2":  {"composition": {"Ti": 2, "O": 4}, "energy_ev": -60.0},
+    "SiO2":  {"composition": {"Si": 3, "O": 6}, "energy_ev": -80.0},
+    "N2":    {"composition": {"N": 2},          "energy_ev": -16.0},
+    "O2":    {"composition": {"O": 2},          "energy_ev": -9.0},
+    "Ti":    {"composition": {"Ti": 2},         "energy_ev": -14.0},
+    "Si":    {"composition": {"Si": 2},         "energy_ev": -10.0},
+}
+
 _OUTCAR = (
     " energy  without entropy=     {e:.6f}  energy(sigma->0) =     {e:.6f}\n"
     " General timing and accounting informations for this job\n"
@@ -101,6 +114,69 @@ def _molecule(directory: Path, element: str, natoms: int, energy: float,
         chr(10).join(lines) + chr(10), encoding="utf-8"
     )
     return directory
+
+
+class OpenElementLimitTests(unittest.TestCase):
+    """The mu_O question for a nitride: not a window, an oxidation limit."""
+
+    def test_the_oxidation_limit_matches_the_hand_derived_reaction(self) -> None:
+        window = hull_report(_QUATERNARY, ["TiN", "Si3N4"], "O")[
+            "chemical_potential_window"
+        ]
+        self.assertEqual(window["method"], "grand-potential-open-element")
+        by_compound = {row["compound"]: row for row in window["per_compound"]}
+        # TiN + 2 O -> TiO2 + 1/2 N2:  dG = -30.0 + 0.5*(-16) + 18.5 - 2 mu_O = 0
+        #   -> mu_O = -9.75, and dmu_O = mu_O - (-4.5) = -5.25 eV
+        self.assertAlmostEqual(by_compound["TiN"]["dmu_limit_ev"], -5.25, places=3)
+        self.assertEqual(by_compound["TiN"]["decomposition_at_limit"], ["N2", "TiO2"])
+        # Si3N4 + 6 O -> 3 SiO2 + 2 N2: mu_O = -9.5 -> dmu_O = -5.0 eV
+        self.assertAlmostEqual(by_compound["Si3N4"]["dmu_limit_ev"], -5.0, places=3)
+        self.assertEqual(by_compound["Si3N4"]["decomposition_at_limit"], ["N2", "SiO2"])
+        # the binding limit is the lower of the two: TiN oxidises first
+        self.assertAlmostEqual(window["dmu_max_ev"], -5.25, places=3)
+        self.assertEqual(window["dmu_max_set_by"], "TiN")
+
+    def test_the_lower_side_is_reported_as_unbounded(self) -> None:
+        """Removing O cannot destabilise a phase that contains none."""
+
+        window = hull_report(_QUATERNARY, ["TiN", "Si3N4"], "O")[
+            "chemical_potential_window"
+        ]
+        self.assertIsNone(window["dmu_min_ev"])
+        self.assertIsNone(window["dmu_min_set_by"])
+        self.assertIn("lower side is unbounded", window["note"])
+
+    def test_a_nitride_with_no_oxide_to_decompose_into_is_unlimited(self) -> None:
+        phases = {k: v for k, v in _QUATERNARY.items() if k not in {"TiO2", "SiO2"}}
+        window = hull_report(phases, ["TiN", "Si3N4"], "O")[
+            "chemical_potential_window"
+        ]
+        rows = {row["compound"]: row for row in window["per_compound"]}
+        self.assertFalse(rows["TiN"]["limited"])
+        self.assertEqual(window["dmu_max_ev"], 0.0)
+        self.assertIn("nothing in this phase set oxidises it", rows["TiN"]["note"])
+
+    def test_mixing_a_compound_with_and_without_the_anion_is_refused(self) -> None:
+        with self.assertRaises(SafetyError) as caught:
+            hull_report(_QUATERNARY, ["TiN", "TiO2"], "O")
+        message = str(caught.exception)
+        self.assertIn("no common kind of bound", message)
+        self.assertIn("separate runs", message)
+
+    def test_a_compound_unstable_even_at_the_floor_is_refused(self) -> None:
+        phases = dict(_QUATERNARY)
+        phases["TiN"] = {"composition": {"Ti": 4, "N": 4}, "energy_ev": -60.0}
+        with self.assertRaises(SafetyError) as caught:
+            hull_report(phases, ["TiN"], "O")
+        self.assertIn("not stable even at dmu(O)", str(caught.exception))
+
+    def test_oxide_compounds_still_take_the_analytic_two_sided_route(self) -> None:
+        window = hull_report(_QUATERNARY, ["TiO2", "SiO2"], "O")[
+            "chemical_potential_window"
+        ]
+        self.assertEqual(window["method"], "convex-hull")
+        self.assertIsNotNone(window["dmu_min_ev"])
+        self.assertEqual(window["dmu_max_ev"], 0.0)
 
 
 class MolecularSpinTests(unittest.TestCase):

@@ -26,13 +26,18 @@ from .errors import DependencyError, SafetyError
 
 def _pymatgen() -> dict[str, Any]:
     try:
-        from pymatgen.analysis.phase_diagram import PDEntry, PhaseDiagram
+        from pymatgen.analysis.phase_diagram import (
+            GrandPotentialPhaseDiagram,
+            PDEntry,
+            PhaseDiagram,
+        )
         from pymatgen.core import Composition, Element
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised only without pymatgen
         raise DependencyError(
             "Phase-diagram support needs pymatgen; install interfaceforge[phases]"
         ) from exc
     return {
+        "GrandPotentialPhaseDiagram": GrandPotentialPhaseDiagram,
         "PDEntry": PDEntry,
         "PhaseDiagram": PhaseDiagram,
         "Composition": Composition,
@@ -103,11 +108,125 @@ def build_hull(phases: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "stable_phases": [row["phase"] for row in rows if row["stable"]],
         "unstable_phases": unstable,
         "diagram": diagram,
+        "entries": entries,
         "note": (
             "A reference phase that is above the hull is not a valid reservoir: it "
             "would decompose. Check the structure or the settings before using it."
             if unstable
             else "Every supplied reference phase lies on the convex hull."
+        ),
+    }
+
+
+DMU_FLOOR_EV = -15.0
+"""Lower bracket for the open-element bisection.
+
+Far below any oxide or nitride formation energy per anion, so a compound that is
+not stable even here is not a valid reservoir at all rather than merely oxidised.
+"""
+
+
+def _stable_under_open_element(
+    entries: Sequence[Any], element: Any, mu_absolute: float
+) -> set[str]:
+    """Names of the phases on the grand-potential hull at this open-element mu."""
+
+    api = _pymatgen()
+    grand = api["GrandPotentialPhaseDiagram"](entries, {element: mu_absolute})
+    return {
+        getattr(entry, "original_entry", entry).name for entry in grand.stable_entries
+    }
+
+
+def open_element_limit(
+    hull: Mapping[str, Any],
+    compounds: Sequence[str],
+    element: str,
+    *,
+    floor_ev: float = DMU_FLOOR_EV,
+    tolerance_ev: float = 1.0e-4,
+) -> dict[str, Any]:
+    """Highest ``dmu_element`` at which every named compound survives the reservoir.
+
+    For a compound that does not contain the open element -- TiN in a mu_O
+    reservoir -- the ordinary chemical-potential range is the wrong question and
+    pymatgen cannot answer it (its range routine divides by the compound's amount
+    of that element). The right question is the **oxidation limit**: the grand
+    potential of an O-free phase is flat in mu_O while every O-bearing competitor
+    falls, so above some mu_O the compound is undercut and stays undercut. That
+    monotonicity is what makes a bisection valid here, and it is why this is a
+    one-sided bound: removing O never destabilises a phase that contains none.
+    """
+
+    api = _pymatgen()
+    entries = hull["entries"]
+    el = api["Element"](element)
+    reference = float(hull["diagram"].el_refs[el].energy_per_atom)
+    at_floor = _stable_under_open_element(entries, el, reference + floor_ev)
+    at_reference = _stable_under_open_element(entries, el, reference)
+    per_compound: list[dict[str, Any]] = []
+    for name in compounds:
+        if name not in at_floor:
+            raise SafetyError(
+                f"compound {name!r} is not stable even at dmu({element}) = "
+                f"{floor_ev:.1f} eV, where the {element} reservoir is as poor as it "
+                "can meaningfully get. It is not a valid reservoir phase: check its "
+                "structure and that every energy came from the same settings."
+            )
+        if name in at_reference:
+            per_compound.append({
+                "compound": name,
+                "dmu_limit_ev": 0.0,
+                "limited": False,
+                "decomposition_at_limit": None,
+                "note": (
+                    f"{name} is still on the grand-potential hull at dmu({element}) "
+                    f"= 0, i.e. in contact with the elemental {element} reservoir "
+                    "itself; nothing in this phase set oxidises it"
+                ),
+            })
+            continue
+        low, high = floor_ev, 0.0  # stable at low, not stable at high
+        while high - low > tolerance_ev:
+            middle = 0.5 * (low + high)
+            if name in _stable_under_open_element(entries, el, reference + middle):
+                low = middle
+            else:
+                high = middle
+        grand = api["GrandPotentialPhaseDiagram"](entries, {el: reference + high})
+        composition = api["Composition"](
+            next(row["formula"] for row in hull["phases"] if row["phase"] == name)
+        )
+        products = sorted(
+            getattr(entry, "original_entry", entry).name
+            for entry in grand.get_decomposition(composition)
+        )
+        per_compound.append({
+            "compound": name,
+            "dmu_limit_ev": low,
+            "limited": True,
+            "decomposition_at_limit": products,
+            "note": f"above dmu({element}) = {low:.4f} eV, {name} -> {' + '.join(products)}",
+        })
+    binding = min(per_compound, key=lambda row: row["dmu_limit_ev"])
+    return {
+        "anion": element,
+        "method": "grand-potential-open-element",
+        "mu_anion_reference_ev": reference,
+        "dmu_min_ev": None,
+        "dmu_max_ev": binding["dmu_limit_ev"],
+        "dmu_min_set_by": None,
+        "dmu_max_set_by": binding["compound"],
+        "per_compound": per_compound,
+        "competing_stable_phases": sorted(
+            set().union(*(row["decomposition_at_limit"] or [] for row in per_compound))
+        ),
+        "note": (
+            f"None of {list(compounds)} contains {element}, so this is an oxidation "
+            f"limit rather than a two-sided window: the highest dmu({element}) at "
+            "which all of them stay on the grand-potential hull. The lower side is "
+            f"unbounded -- taking {element} away cannot destabilise a phase that "
+            f"contains none. Bound set by {binding['compound']}: {binding['note']}."
         ),
     }
 
@@ -128,6 +247,29 @@ def hull_chempot_window(
     api = _pymatgen()
     diagram = hull["diagram"]
     element = api["Element"](anion)
+    by_formula = {row["phase"]: row["formula"] for row in hull["phases"]}
+    contains = {
+        name: anion in {str(el) for el in api["Composition"](formula).elements}
+        for name, formula in by_formula.items()
+        if name in compounds
+    }
+    missing = [name for name in compounds if name not in by_formula]
+    if missing:
+        raise SafetyError(f"compound {missing[0]!r} is not among the supplied phases")
+    if not any(contains.values()):
+        # pymatgen's range routine divides by the compound's amount of this
+        # element, so an anion-free compound would raise ZeroDivisionError; the
+        # meaningful quantity there is the one-sided oxidation limit instead
+        return open_element_limit(hull, compounds, anion)
+    if not all(contains.values()):
+        with_anion = sorted(n for n, has in contains.items() if has)
+        without = sorted(n for n, has in contains.items() if not has)
+        raise SafetyError(
+            f"compounds {with_anion} contain {anion} and {without} do not, so they "
+            f"have no common kind of bound: a compound containing {anion} has a "
+            f"two-sided stability range in dmu({anion}), while one without it has "
+            "only an upper (oxidation) limit. Query them in separate runs."
+        )
     # pymatgen returns absolute chemical potentials; shift to dmu = mu - mu0 so
     # this matches interface_mu (0 at the elemental/molecular reference).
     reference = float(diagram.el_refs[element].energy_per_atom)
