@@ -6,7 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from interfaceforge.errors import SafetyError
-from interfaceforge.interface_mu import gamma_at, interface_mu
+from interfaceforge.interface_mu import gamma_at, interface_mu, write_reports
+from interfaceforge.phase_diagram import (
+    covered_subsystems,
+    hull_report,
+    missing_known_phases,
+)
 from interfaceforge.regime import BULK, FREE_SURFACE, measure_regime
 from interfaceforge.separation_energy import EV_A2_TO_J_M2, _read_atoms, _structure_file
 
@@ -119,6 +124,159 @@ class InterfaceMuTests(unittest.TestCase):
                 [("balanced", iface)], phases=phases, anion="N", n_interfaces=2,
             )["chemical_potential_window"]
             self.assertEqual(window["competing_stable_phases"], ["TiSi2"])
+
+    def test_hull_names_the_known_phases_it_was_not_given(self) -> None:
+        """An incomplete hull says so: its window is an upper limit, not the answer."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            window = interface_mu(
+                [("balanced", iface)], phases=_phases(root), anion="N", n_interfaces=2,
+            )["chemical_potential_window"]
+            # every Ti-N and Ti-Si phase of the system is absent from _phases()
+            self.assertIn("Ti2N (mp-8282)", window["missing_known_phases"])
+            self.assertIn("Ti5Si3 (mp-2108)", window["missing_known_phases"])
+            self.assertIn("TiSi2 (mp-2582)", window["missing_known_phases"])
+            self.assertIn("too wide", window["hull"]["completeness_note"])
+
+    def test_missing_known_phases_ignores_other_subsystems_and_polymorphs(self) -> None:
+        with tempfile.TemporaryDirectory():
+            # a Ti-N hull must not be scolded for lacking silicides
+            ti_n = [row["formula"] for row in missing_known_phases(["Ti", "N"], ["TiN", "Ti", "N2"])]
+            self.assertEqual(ti_n, ["Ti2N"])
+            # anatase counts as coverage of the TiO2 composition; rutile is the
+            # entry reported, so a supplied polymorph must silence it entirely
+            ti_o = [row["formula"] for row in missing_known_phases(
+                ["Ti", "O"], ["TiO2", "TiO", "Ti2O3", "Ti", "O2"]
+            )]
+            self.assertEqual(ti_o, [])
+
+    def test_a_complete_hull_says_nothing_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            phases = _phases(root)
+            small = (6.0, 6.0, 6.0)
+            # every Ti-N/Ti-Si phase supplied, priced above the hull so the window
+            # itself is untouched -- only the completeness claim changes. Ti2N is a
+            # competing nitride, not a constituent, so it goes in --aux-phase.
+            aux = {"Ti2N": _run(root / "Ti2N", [("Ti", 4), ("N", 2)], -30.0, box=small)}
+            phases["Ti5Si3"] = _run(root / "Ti5Si3", [("Ti", 5), ("Si", 3)], -50.0, box=small)
+            phases["Ti5Si4"] = _run(root / "Ti5Si4", [("Ti", 5), ("Si", 4)], -55.0, box=small)
+            phases["Ti3Si"] = _run(root / "Ti3Si", [("Ti", 3), ("Si", 1)], -26.0, box=small)
+            phases["TiSi"] = _run(root / "TiSi", [("Ti", 2), ("Si", 2)], -24.0, box=small)
+            phases["TiSi2"] = _run(root / "TiSi2", [("Ti", 2), ("Si", 4)], -34.0, box=small)
+            window = interface_mu(
+                [("balanced", iface)], phases=phases, auxiliary_phases=aux,
+                anion="N", n_interfaces=2,
+            )["chemical_potential_window"]
+            self.assertEqual(window["missing_known_phases"], [])
+            self.assertAlmostEqual(window["dmu_min_ev"], -2.0)
+            self.assertIn("every phase", window["hull"]["completeness_note"])
+
+    def test_a_competing_nitride_cuts_the_window_without_being_a_constituent(self) -> None:
+        """Ti2N is the phase TiN decomposes toward, not a phase the interface is made of."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            phases = _phases(root)
+            # E(Ti2N) = -28 eV/f.u. puts it below the Ti-TiN tie line, so the
+            # N-poor limit of TiN becomes 2 TiN -> Ti2N + N at dmu_N = -1.0 eV,
+            # tighter than the -2.0 eV that Si3N4 -> 3 Si + 2 N2 alone allows
+            aux = {"Ti2N": _run(root / "Ti2N", [("Ti", 4), ("N", 2)], -56.0, box=(6.0, 6.0, 6.0))}
+            payload = interface_mu(
+                [("balanced", iface)], phases=phases, auxiliary_phases=aux,
+                anion="N", n_interfaces=2,
+            )
+            window = payload["chemical_potential_window"]
+            self.assertAlmostEqual(window["dmu_min_ev"], -1.0, places=6)
+            self.assertEqual(window["binding_compound"], "TiN")
+            self.assertIn("Ti2N", window["competing_stable_phases"])
+            self.assertNotIn("Ti2N (mp-8282)", window["missing_known_phases"])
+            # and it stays out of the decomposition: the cell is still 4 TiN + 1 Si3N4
+            units = payload["interfaces"][0]["decomposition"]["formula_units"]
+            self.assertEqual(sorted(units), ["Si3N4", "TiN"])
+
+    def test_a_system_outside_the_built_in_list_says_it_was_not_checked(self) -> None:
+        """Silence from the completeness check must not read as a clean bill of health."""
+
+        self.assertEqual(covered_subsystems({"Ni", "O", "H"}), [])
+        report = hull_report(
+            {
+                "NiO": {"composition": {"Ni": 2, "O": 2}, "energy_ev": -20.0},
+                "Ni": {"composition": {"Ni": 2}, "energy_ev": -10.0},
+                "O2": {"composition": {"O": 2}, "energy_ev": -9.0},
+            },
+            ["NiO"],
+            "O",
+        )
+        self.assertEqual(report["missing_known_phases"], [])
+        self.assertIn("completeness NOT checked", report["completeness_note"])
+
+    def test_the_report_warns_that_an_incomplete_hull_gives_an_upper_limit(self) -> None:
+        """The markdown is what gets read; the warning cannot live only in the JSON."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            payload = interface_mu(
+                [("balanced", iface)], phases=_phases(root), anion="N", n_interfaces=2,
+            )
+            write_reports(payload, root / "out")
+            report = (root / "out" / "interface_mu.md").read_text(encoding="utf-8")
+            self.assertIn("upper limit, not the window", report)
+            self.assertIn("Ti5Si3 (mp-2108)", report)
+            self.assertTrue(report.isascii(), "the generated report must stay ASCII")
+
+    def test_two_compounds_sharing_a_cation_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            phases = _phases(root)
+            phases["Ti2N"] = _run(root / "Ti2N", [("Ti", 4), ("N", 2)], -56.0, box=(6.0, 6.0, 6.0))
+            with self.assertRaises(SafetyError) as caught:
+                interface_mu([("balanced", iface)], phases=phases, anion="N", n_interfaces=2)
+            self.assertIn("share the cation Ti", str(caught.exception))
+            self.assertIn("--aux-phase", str(caught.exception))
+
+    def test_a_phase_cannot_be_both_a_constituent_and_auxiliary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            phases = _phases(root)
+            with self.assertRaises(SafetyError) as caught:
+                interface_mu(
+                    [("balanced", iface)], phases=phases,
+                    auxiliary_phases={"TiN": phases["TiN"]}, anion="N", n_interfaces=2,
+                )
+            self.assertIn("both --phase and --aux-phase", str(caught.exception))
+
+    def test_the_anion_reference_cannot_be_demoted_to_auxiliary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            phases = _phases(root)
+            anion_reference = phases.pop("N2")
+            with self.assertRaises(SafetyError) as caught:
+                interface_mu(
+                    [("balanced", iface)], phases=phases,
+                    auxiliary_phases={"N2": anion_reference}, anion="N", n_interfaces=2,
+                )
+            self.assertIn("zero of the chemical-potential scale", str(caught.exception))
+
+    def test_two_elemental_references_for_one_element_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            phases = _phases(root)
+            # omega-Ti alongside hcp Ti: silently overwriting one would move
+            # every formation enthalpy that the N-poor bound is built from
+            phases["Ti_omega"] = _run(root / "Ti_w", [("Ti", 2)], -13.5, box=(6.0, 6.0, 6.0))
+            with self.assertRaises(SafetyError) as caught:
+                interface_mu([("balanced", iface)], phases=phases, anion="N", n_interfaces=2)
+            self.assertIn("two elemental Ti references", str(caught.exception))
 
     def test_balanced_cell_is_chemical_potential_independent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

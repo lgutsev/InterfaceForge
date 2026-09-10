@@ -18,7 +18,7 @@ discovery, ``iface phases hull`` does the thermodynamics on your own runs.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 from .errors import DependencyError, SafetyError
@@ -196,6 +196,10 @@ def hull_report(
 
     hull = build_hull(phases)
     window = hull_chempot_window(hull, compounds, anion)
+    missing = missing_known_phases(
+        hull["elements"], [row["formula"] for row in hull["phases"]]
+    )
+    checked = covered_subsystems(hull["elements"])
     return {
         "schema_version": 1,
         "elements": hull["elements"],
@@ -203,6 +207,23 @@ def hull_report(
         "stable_phases": hull["stable_phases"],
         "unstable_phases": hull["unstable_phases"],
         "hull_note": hull["note"],
+        "missing_known_phases": missing,
+        "completeness_note": (
+            "the hull was built without "
+            + ", ".join(f"{row['formula']} ({row['mp_id']})" for row in missing)
+            + ". An omitted stable phase can only make the window look too wide, "
+            "so treat these bounds as an upper limit until those phases are "
+            "computed at the campaign's settings and the hull re-run."
+            if missing
+            else "every phase the built-in list knows this system to form ({}) "
+            "was supplied.".format(", ".join(checked))
+            if checked
+            else "completeness NOT checked: no built-in phase list covers {}. "
+            "Verify against Materials Project that no stable phase of this system "
+            "is missing -- an omitted one would make the window look too wide.".format(
+                ", ".join(hull["elements"])
+            )
+        ),
         "chemical_potential_window": window,
     }
 
@@ -210,10 +231,15 @@ def hull_report(
 # ------------------------------------------------------------------ MP lookup
 
 #: Verified Materials Project ground states for this campaign's chemical system.
-#: Used to tell the user which phases to calculate when the MP API is unavailable.
+#: Used to tell the user which phases to calculate when the MP API is unavailable,
+#: and to warn when a hull was built without one of them (see
+#: :func:`missing_known_phases`). Where a composition has several polymorphs the
+#: **ground state must be listed first** -- the completeness check treats a
+#: composition as covered once any polymorph of it is supplied.
 KNOWN_PHASES = {
     "Ti-N": [
         ("TiN", "rocksalt B1", "Fm-3m (225)", "mp-492"),
+        ("Ti2N", "epsilon-Ti2N, tetragonal", "P4_2/mnm (136)", "mp-8282"),
         ("Ti", "hcp (alpha-Ti)", "P6_3/mmc (194)", "mp-46"),
     ],
     "Si-N": [
@@ -221,7 +247,11 @@ KNOWN_PHASES = {
         ("Si", "diamond", "Fd-3m (227)", "mp-149"),
     ],
     "Ti-Si": [
+        ("Ti5Si3", "hexagonal (Mn5Si3-type, D8_8)", "P6_3/mcm (193)", "mp-2108"),
         ("TiSi2", "C54", "Fddd (70)", "mp-2582"),
+        ("TiSi", "orthorhombic", "Pnma (62)", "mp-7092"),
+        ("Ti5Si4", "tetragonal", "P4_12_12 (92)", "mp-505527"),
+        ("Ti3Si", "tetragonal", "P4_2/n (86)", "mp-980420"),
     ],
     "Ti-O": [
         ("TiO2", "rutile", "P4_2/mnm (136)", "mp-2657"),
@@ -239,6 +269,55 @@ MOLECULAR_REFERENCES = {
     "O2": "triplet; ISPIN=2, MAGMOM=2*1.0, NUPDOWN=2, ISYM=0, >=12 A box, Gamma only",
 }
 
+#: Which element each molecular reference sets the potential for. Keyed explicitly
+#: rather than sliced off the name, so asking for Na does not pull in N2.
+MOLECULAR_ELEMENT = {"N2": "N", "O2": "O"}
+
+
+def covered_subsystems(elements: Collection[str]) -> list[str]:
+    """The built-in subsystems whose every element is present in ``elements``.
+
+    Empty means this chemical system is outside the built-in list, so silence
+    from the completeness check is ignorance rather than a clean bill of health.
+    """
+
+    wanted = set(elements)
+    return [system for system in KNOWN_PHASES if set(system.split("-")) <= wanted]
+
+
+def missing_known_phases(
+    elements: Sequence[str], supplied_formulas: Sequence[str]
+) -> list[dict[str, Any]]:
+    """Known ground states of these elements that were *not* handed to the hull.
+
+    A hull is only as complete as the phases fed to it, and the error is
+    one-sided: an omitted stable phase can only make the window look **too
+    wide**, never too narrow. So this is a warning rather than an error --
+    recompute the listed phases at the campaign's settings and re-run to see
+    whether they actually cut the window.
+
+    Only subsystems whose every element is present are considered, so a Ti-N
+    hull is not scolded for lacking silicides.
+    """
+
+    api = _pymatgen()
+    present = {api["Composition"](f).reduced_formula for f in supplied_formulas}
+    wanted = set(elements)
+    missing: dict[str, dict[str, Any]] = {}
+    for system in covered_subsystems(wanted):
+        for formula, structure, spacegroup, mp_id in KNOWN_PHASES[system]:
+            reduced = api["Composition"](formula).reduced_formula
+            if reduced in present or reduced in missing:
+                continue  # a polymorph of it was supplied, or already listed
+            missing[reduced] = {
+                "formula": formula,
+                "structure": structure,
+                "spacegroup": spacegroup,
+                "mp_id": mp_id,
+                "system": system,
+            }
+    return list(missing.values())
+
 
 def suggest_phases(elements: Sequence[str], api_key: str | None = None) -> dict[str, Any]:
     """Which phases to compute for a chemical system.
@@ -255,7 +334,7 @@ def suggest_phases(elements: Sequence[str], api_key: str | None = None) -> dict[
         "source": "built-in",
         "molecular_references": {
             name: note for name, note in MOLECULAR_REFERENCES.items()
-            if name[0] in wanted or name[:2] in wanted
+            if MOLECULAR_ELEMENT[name] in wanted
         },
         "warning": (
             "Recompute every phase with the campaign's own settings. Materials "

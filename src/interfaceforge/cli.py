@@ -481,6 +481,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
         payload = interface_mu(
             entries,
             phases=phases,
+            auxiliary_phases=dict(
+                parse_named_entry(item, "--aux-phase") for item in args.aux_phases
+            ),
             anion=args.anion,
             mace_models=args.mace_models,
             deepmd_models=args.deepmd_models,
@@ -1831,6 +1834,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reference phase run directory (repeat): one compound per cation "
         "(TiN, Si3N4), the elemental anion molecule (N2), and one elemental cation "
         "per compound (Ti, Si) to bound the chemical-potential window",
+    )
+    interface_mu_parser.add_argument(
+        "--aux-phase", action="append", default=[], dest="aux_phases",
+        metavar="NAME=DIR",
+        help="A competing phase that goes on the convex hull but is not an "
+        "interface constituent (repeat): a competing nitride (Ti2N), a reduced "
+        "oxide, a second polymorph. It can cut the chemical-potential window "
+        "without being decomposed into",
     )
     interface_mu_parser.add_argument("--anion", default="N", help="Shared anion (default N)")
     interface_mu_parser.add_argument(

@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from math import gcd
 from pathlib import Path
 from typing import Any
@@ -106,16 +106,37 @@ def _read_phase(name: str, directory: str | Path, *, allow_vacuum: bool) -> dict
     }
 
 
-def _classify_phases(phases: Mapping[str, dict[str, Any]], anion: str) -> dict[str, Any]:
-    """Split references into compounds, elemental cations, and the anion reference."""
+def _classify_phases(
+    phases: Mapping[str, dict[str, Any]],
+    anion: str,
+    auxiliary_names: Collection[str] = (),
+) -> dict[str, Any]:
+    """Split references into compounds, elemental cations, and the anion reference.
 
+    ``auxiliary_names`` forces a phase onto the hull without making it an
+    interface constituent. A competing nitride such as Ti2N contains the anion
+    and one cation, so it *looks* like a compound reference, but the interface is
+    not made of it: treating it as one would demand it coexist with TiN and would
+    double-count that cation in :func:`decompose`.
+    """
+
+    unknown = [name for name in auxiliary_names if name not in phases]
+    if unknown:
+        raise SafetyError(f"--aux-phase names a phase that was not supplied: {unknown}")
     compounds: dict[str, dict[str, Any]] = {}
     elemental: dict[str, dict[str, Any]] = {}
     auxiliary: dict[str, dict[str, Any]] = {}
     anion_ref: dict[str, Any] | None = None
     for name, phase in phases.items():
         elements = sorted(phase["composition"])
-        if elements == [anion]:
+        if name in auxiliary_names:
+            if elements == [anion]:
+                raise SafetyError(
+                    f"the elemental {anion} reference ({name!r}) cannot be auxiliary; "
+                    "it sets the zero of the chemical-potential scale"
+                )
+            auxiliary[name] = phase
+        elif elements == [anion]:
             if anion_ref is not None:
                 raise SafetyError(
                     f"two elemental {anion} references given "
@@ -123,6 +144,12 @@ def _classify_phases(phases: Mapping[str, dict[str, Any]], anion: str) -> dict[s
                 )
             anion_ref = phase
         elif len(elements) == 1:
+            if elements[0] in elemental:
+                raise SafetyError(
+                    f"two elemental {elements[0]} references given "
+                    f"({elemental[elements[0]]['name']!r} and {name!r}); keep the ground "
+                    "state as the reference and pass the other with --aux-phase"
+                )
             elemental[elements[0]] = phase
         elif anion in elements:
             cations = [el for el in elements if el != anion]
@@ -131,6 +158,19 @@ def _classify_phases(phases: Mapping[str, dict[str, Any]], anion: str) -> dict[s
                     f"reference compound {name!r} ({phase['formula']}) has "
                     f"{len(cations)} cation species; gamma(mu) needs one cation per "
                     "compound so its formula-unit count is determined"
+                )
+            clash = next(
+                (other for other, existing in compounds.items()
+                 if existing["cation"] == cations[0]), None
+            )
+            if clash is not None:
+                raise SafetyError(
+                    f"reference compounds {clash!r} and {name!r} share the cation "
+                    f"{cations[0]}; the interface cannot be decomposed into both "
+                    f"(every {cations[0]} atom would be counted twice). Keep the one "
+                    "the interface is made of and pass the competing phase with "
+                    "--aux-phase, which puts it on the hull without making it a "
+                    "constituent."
                 )
             compounds[name] = {**phase, "cation": cations[0]}
         else:
@@ -243,6 +283,11 @@ def _hull_window(
         "upper_bound_set_by": window["dmu_max_set_by"],
         "bounds": window["per_compound"],
         "competing_stable_phases": window["competing_stable_phases"],
+        # surfaced here as well as under "hull": an omitted stable phase widens
+        # the window, so it must not be a key the reader has to go looking for
+        "missing_known_phases": [
+            f"{row['formula']} ({row['mp_id']})" for row in report["missing_known_phases"]
+        ],
         "hull": {k: v for k, v in report.items() if k != "chemical_potential_window"},
         "note": window["note"],
     }
@@ -369,6 +414,7 @@ def interface_mu(
     entries: Sequence[tuple[str, str | Path]],
     *,
     phases: Mapping[str, str | Path],
+    auxiliary_phases: Mapping[str, str | Path] | None = None,
     anion: str = "N",
     mace_models: Sequence[str] = (),
     deepmd_models: Sequence[str] = (),
@@ -388,11 +434,15 @@ def interface_mu(
     if len(set(labels)) != len(labels):
         raise SafetyError(f"duplicate interface label: {labels}")
 
+    auxiliary_phases = dict(auxiliary_phases or {})
+    overlap = sorted(set(auxiliary_phases) & set(phases))
+    if overlap:
+        raise SafetyError(f"{overlap} given as both --phase and --aux-phase")
     read = {
         name: _read_phase(name, directory, allow_vacuum=allow_vacuum)
-        for name, directory in phases.items()
+        for name, directory in {**phases, **auxiliary_phases}.items()
     }
-    classified = _classify_phases(read, anion)
+    classified = _classify_phases(read, anion, auxiliary_names=auxiliary_phases)
     if window_method not in {"hull", "pairwise"}:
         raise SafetyError("window_method must be 'hull' or 'pairwise'")
     window_note = None
@@ -667,6 +717,20 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
         if low is not None
         else "Window: not bounded (no elemental cation reference was supplied)."
     )
+    competing = window.get("competing_stable_phases") or []
+    if competing:
+        window_line += " Competing phases on the hull: {}.".format(", ".join(competing))
+    missing = window.get("missing_known_phases") or []
+    # the warning has to be in the human-readable report, not only the JSON: the
+    # window above reads as an answer, and with a phase missing it is a bound
+    incomplete_line = (
+        "> **WARNING: upper limit, not the window.** The hull was built without {}. "
+        "An omitted stable phase can only make the window look too wide, so "
+        "compute these at the campaign's settings and re-run before quoting a "
+        "gamma at either end.".format(", ".join(missing))
+        if missing
+        else None
+    )
     lines = [
         "# Grand-canonical interfacial energy",
         "",
@@ -678,6 +742,7 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
         "",
         window_line,
         "",
+        *((incomplete_line, "") if incomplete_line else ()),
         f"| Interface | Source | dn({anion}) | gamma {anion}-rich | gamma {anion}-poor | slope | committee sigma | delta vs DFT |",
         "|---|---|---:|---:|---:|---:|---:|---:|",
     ]

@@ -84,13 +84,19 @@ interface is actually made of, naming the phase that binds each side.
 iface phases suggest Ti Si N
 
 # the hull and the window, from your own runs
-iface phases hull --anion N --compound TiN --compound Si3N4 \n  --phase TiN=bulk/TiN --phase Si3N4=bulk/Si3N4 \n  --phase N2=bulk/N2 --phase Ti=bulk/Ti_hcp --phase Si=bulk/Si_diamond \n  --phase TiSi2=bulk/TiSi2 --phase Ti5Si3=bulk/Ti5Si3
+iface phases hull --anion N --compound TiN --compound Si3N4 \
+  --phase TiN=bulk/TiN --phase Si3N4=bulk/Si3N4 \
+  --phase N2=bulk/N2 --phase Ti=bulk/Ti_hcp --phase Si=bulk/Si_diamond \
+  --phase Ti2N=bulk/Ti2N --phase TiSi2=bulk/TiSi2 --phase Ti5Si3=bulk/Ti5Si3
 ```
 
-`interface-mu` runs the same hull internally, so extra `--phase` entries that are
-neither a decomposition reference nor an elemental phase (TiSi₂, Ti₅Si₃, Ti₂N)
-are still accepted — they go on the hull as **auxiliary constraints** and can
-tighten the window. Their names appear under `competing_stable_phases`.
+`phases hull` puts every `--phase` on the hull and takes the interface's own
+constituents separately as `--compound`, so a competing phase is just another
+`--phase`. `interface-mu` infers the constituents instead, so there it needs
+`--aux-phase` to tell a competing phase apart from a reference — see
+[`--phase` vs `--aux-phase`](#--phase-vs---aux-phase). Either way the competing
+phases go on the hull as **auxiliary constraints**, can tighten the window, and
+appear by name under `competing_stable_phases`.
 
 Two hard rules the tooling enforces:
 
@@ -137,11 +143,56 @@ ambiguity.
 caveat that PBE overbinds N₂ by ~0.5 eV; if you want the window pinned to
 experiment, substitute the measured ΔH_f instead.)
 
-### Optional, tightens the N-poor bound
+### Competing phases, which tighten the N-poor bound
+
+None of these is a phase the interface is *made of* — each is a phase it could
+decompose *toward*, so they enter the hull through `--aux-phase` (see below) and
+can only ever raise the N‑poor bound.
 
 | Phase | Structure | Space group | MP ID | Role |
 |---|---|---|---|---|
+| **Ti₂N** | ε‑Ti₂N, tetragonal | P4₂/mnm (136) | [mp-8282](https://legacy.materialsproject.org/materials/mp-8282/) | sits between Ti and TiN: TiN plausibly decomposes to Ti₂N before elemental Ti |
+| **Ti₅Si₃** | hexagonal (Mn₅Si₃‑type, D8₈) | P6₃/mcm (193) | [mp-2108](https://legacy.materialsproject.org/materials/mp-2108/) | the most stable Ti silicide — TiSi₂ alone may not be the binding one |
 | TiSi₂ | C54 | Fddd (70) | [mp-2582](https://legacy.materialsproject.org/materials/mp-2582/) | Hao et al.'s N‑poor μ_Si bound |
+| TiSi | orthorhombic | Pnma (62) | [mp-7092](https://legacy.materialsproject.org/materials/mp-7092/) | Ti‑Si hull completeness |
+| Ti₅Si₄ | tetragonal | P4₁2₁2 (92) | [mp-505527](https://legacy.materialsproject.org/materials/mp-505527/) | Ti‑Si hull completeness |
+| Ti₃Si | tetragonal | P4₂/n (86) | [mp-980420](https://legacy.materialsproject.org/materials/mp-980420/) | Ti‑Si hull completeness |
+
+> The error here is **one‑sided**: an omitted stable phase can only make the
+> window look *too wide*, never too narrow. So this is safe to do incrementally
+> — add a phase, re‑run `phases hull`, and either the window tightens or the
+> phase comes out above the hull at your settings and nothing changes. Both
+> `iface phases hull` and `iface validate interface-mu --window hull` report
+> `missing_known_phases`: the phases of *your* chemical system that the hull was
+> built without. A window reported alongside a non‑empty list is an upper limit,
+> not the answer.
+
+### `--phase` vs `--aux-phase`
+
+`--phase` is for the references the interface decomposes *into*: one compound per
+cation (TiN, Si₃N₄), the elemental anion (N₂), one elemental cation each (Ti, Si).
+`--aux-phase` is for everything that merely competes — a competing nitride, a
+reduced oxide, a second polymorph. Auxiliary phases go on the convex hull and can
+cut the window, but are never decomposed into.
+
+The distinction is not cosmetic. Ti₂N contains the anion and one cation, so it
+*looks* like a compound reference; passing it as `--phase` would demand that it
+coexist with TiN and would count every Ti atom twice in the decomposition. That
+is refused with an error pointing here, rather than silently producing a wrong
+γ. The same applies to a second elemental reference (ω‑Ti next to hcp Ti).
+
+```bash
+iface validate interface-mu audit/mu \
+  MD_Period_1=interfaces/MD_Period_1 \
+  --phase TiN=phases/TiN_mp492 \
+  --phase Si3N4=phases/Si3N4_mp988 \
+  --phase N2=phases/N2_gas \
+  --phase Ti=phases/Ti_mp46 \
+  --phase Si=phases/Si_mp149 \
+  --aux-phase Ti2N=phases/Ti2N_mp8282 \
+  --aux-phase Ti5Si3=phases/Ti5Si3_mp2108 \
+  --aux-phase TiSi2=phases/TiSi2_mp2582
+```
 
 ### Needed for the oxide / N-O ordering work (paper 1, μ_O)
 
@@ -160,8 +211,12 @@ The same machinery runs with `--anion O`. For TiOₓN_y you will need:
 A non-spin-polarised O₂ is wrong by >1 eV and will corrupt the whole μ_O window.
 
 Bold rows are the minimum set. TiO₂ rutile is the stable Ti oxide and normally
-the binding bound; TiO and Ti₂O₃ matter only if your TiOₓN_y is reduced enough
-that they become the competing phase.
+the binding bound; anatase is a polymorph of the same composition, so pass it (if
+at all) as `--aux-phase` — at your settings it will almost certainly come out
+above the hull, which is correct physics, not an error. TiO and Ti₂O₃ matter only
+if your TiOₓN_y is reduced enough that they become the competing phase; if you go
+further into reduced TiOₓ you will also want the Magnéli phases (Ti₃O₅, Ti₄O₇) —
+their MP IDs are **not** in the built-in list, so look them up rather than guess.
 
 ### Already available
 
