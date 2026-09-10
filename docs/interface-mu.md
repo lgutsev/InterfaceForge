@@ -204,11 +204,25 @@ The same machinery runs with `--anion O`. For TiOₓN_y you will need:
 | TiO₂ anatase | anatase | I4₁/amd (141) | [mp-390](https://legacy.materialsproject.org/materials/mp-390/) |
 | **TiO** | rocksalt | Fm‑3m (225) | [mp-2664](https://legacy.materialsproject.org/materials/mp-2664/) |
 | Ti₂O₃ | corundum | R‑3c (167) | [mp-458](https://legacy.materialsproject.org/materials/mp-458/) |
+| Ti₃O₅ | monoclinic (Magnéli n=3) | C2/m (12) | [mp-1147](https://legacy.materialsproject.org/materials/mp-1147/) |
+| Ti₄O₇ | triclinic (Magnéli n=4) | P‑1 (2) | [mp-12205](https://legacy.materialsproject.org/materials/mp-12205/) |
 | **SiO₂ α‑quartz** | α‑quartz | P3₁21 (152) | [mp-7000](https://legacy.materialsproject.org/materials/mp-7000/) |
 | **O₂** | isolated molecule | — | *none — compute it* |
 
 **O₂ must be spin-polarised** (`ISPIN=2`, triplet ground state) in a ≥ 12 Å box.
 A non-spin-polarised O₂ is wrong by >1 eV and will corrupt the whole μ_O window.
+
+Bold rows are the minimum set. TiO₂ rutile is the stable Ti oxide and normally
+the binding bound; anatase is a polymorph of the same composition, so pass it (if
+at all) as `--aux-phase` — at your settings it will almost certainly come out
+above the hull, which is correct physics, not an error. TiO and Ti₂O₃ matter only
+if your TiOₓN_y is reduced enough that they become the competing phase; the same
+goes for the Magnéli phases Ti₃O₅ and Ti₄O₇, which the completeness check now
+asks for on any μ_O window. Ti₄O₇ is only 0.007 eV/atom
+above MP's own hull (it decomposes to TiO₂ + Ti₃O₅ there), so at 520 eV with
+`IVDW=11` it may land either side; `e_above_hull_ev_per_atom` decides, not the
+built-in list. Ti₃O₅ has several C2/m entries on MP — `mp-1147` is the stable
+one.
 
 ### The molecular references, in full
 
@@ -257,14 +271,6 @@ grep mag OUTCAR | tail -1        # O2 must show 2.00, N2 must show 0
 ```
 
 is no longer the thing standing between you and a 1 eV error in every γ.
-
-Bold rows are the minimum set. TiO₂ rutile is the stable Ti oxide and normally
-the binding bound; anatase is a polymorph of the same composition, so pass it (if
-at all) as `--aux-phase` — at your settings it will almost certainly come out
-above the hull, which is correct physics, not an error. TiO and Ti₂O₃ matter only
-if your TiOₓN_y is reduced enough that they become the competing phase; if you go
-further into reduced TiOₓ you will also want the Magnéli phases (Ti₃O₅, Ti₄O₇) —
-their MP IDs are **not** in the built-in list, so look them up rather than guess.
 
 ### Already available
 

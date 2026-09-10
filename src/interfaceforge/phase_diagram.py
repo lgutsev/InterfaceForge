@@ -215,8 +215,10 @@ def hull_report(
             "so treat these bounds as an upper limit until those phases are "
             "computed at the campaign's settings and the hull re-run."
             if missing
-            else "every phase the built-in list knows this system to form ({}) "
-            "was supplied.".format(", ".join(checked))
+            else "every phase in the built-in list for {} was supplied. That list "
+            "is curated for this campaign's chemical systems, not a proof of "
+            "exhaustiveness -- confirm against Materials Project if a window "
+            "bound is load-bearing.".format(", ".join(checked))
             if checked
             else "completeness NOT checked: no built-in phase list covers {}. "
             "Verify against Materials Project that no stable phase of this system "
@@ -258,6 +260,10 @@ KNOWN_PHASES = {
         ("TiO2", "anatase", "I4_1/amd (141)", "mp-390"),
         ("TiO", "rocksalt", "Fm-3m (225)", "mp-2664"),
         ("Ti2O3", "corundum", "R-3c (167)", "mp-458"),
+        ("Ti3O5", "monoclinic (Magneli n=3)", "C2/m (12)", "mp-1147"),
+        # borderline on MP itself (+0.007 eV/atom, -> TiO2 + Ti3O5), so at the
+        # campaign's own settings it may land either side; e_above_hull decides
+        ("Ti4O7", "triclinic (Magneli n=4)", "P-1 (2)", "mp-12205"),
     ],
     "Si-O": [
         ("SiO2", "alpha-quartz", "P3_121 (152)", "mp-7000"),

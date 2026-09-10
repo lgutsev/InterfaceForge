@@ -238,12 +238,18 @@ class InterfaceMuTests(unittest.TestCase):
             # a Ti-N hull must not be scolded for lacking silicides
             ti_n = [row["formula"] for row in missing_known_phases(["Ti", "N"], ["TiN", "Ti", "N2"])]
             self.assertEqual(ti_n, ["Ti2N"])
-            # anatase counts as coverage of the TiO2 composition; rutile is the
-            # entry reported, so a supplied polymorph must silence it entirely
+            # a polymorph counts as coverage of its composition: supplying only
+            # anatase must silence the rutile entry, not report TiO2 as missing
             ti_o = [row["formula"] for row in missing_known_phases(
-                ["Ti", "O"], ["TiO2", "TiO", "Ti2O3", "Ti", "O2"]
+                ["Ti", "O"], ["TiO2", "TiO", "Ti2O3", "Ti3O5", "Ti4O7", "Ti", "O2"]
             )]
             self.assertEqual(ti_o, [])
+            self.assertEqual(
+                [row["formula"] for row in missing_known_phases(
+                    ["Ti", "O"], ["TiO2", "TiO", "Ti2O3", "Ti", "O2"]
+                )],
+                ["Ti3O5", "Ti4O7"],  # the Magneli phases of the reduced branch
+            )
 
     def test_a_complete_hull_says_nothing_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
