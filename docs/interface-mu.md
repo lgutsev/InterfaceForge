@@ -210,6 +210,54 @@ The same machinery runs with `--anion O`. For TiOₓN_y you will need:
 **O₂ must be spin-polarised** (`ISPIN=2`, triplet ground state) in a ≥ 12 Å box.
 A non-spin-polarised O₂ is wrong by >1 eV and will corrupt the whole μ_O window.
 
+### The molecular references, in full
+
+Both are single molecules in a large box, Γ-point only, at the campaign's ENCUT.
+μ_X⁰ = E(X₂)/2.
+
+```
+# N2 -- closed-shell singlet
+SYSTEM = N2 molecule
+ENCUT  = 520
+ISPIN  = 1          # or ISPIN=2; it must converge to 0 muB
+ISMEAR = 0 ; SIGMA = 0.03
+IBRION = 2 ; NSW = 60 ; ISIF = 2     # relax the bond, not the box
+EDIFF  = 1E-7 ; EDIFFG = -1E-3
+LREAL  = .FALSE.
+```
+
+```
+# O2 -- triplet ground state; this is the one that goes wrong silently
+SYSTEM  = O2 molecule
+ENCUT   = 520
+ISPIN   = 2
+MAGMOM  = 2*1.0
+NUPDOWN = 2         # pins S=1: without it the SCF can fall into the singlet
+ISYM    = 0
+ISMEAR  = 0 ; SIGMA = 0.03
+IBRION  = 2 ; NSW = 60 ; ISIF = 2
+EDIFF   = 1E-7 ; EDIFFG = -1E-3
+LREAL   = .FALSE.
+```
+
+KPOINTS is Γ only for both, and the box must be ≥ 12 Å in every direction (a
+molecule is charge-neutral and non-polar, so no dipole correction is needed;
+`IDIPOL`/`LDIPOL` are not required).
+
+`interface-mu` checks this for you rather than trusting it. The total cell moment
+is read from the last SCF step of the reference's OUTCAR and compared with the
+molecule's ground-state multiplicity: an O₂ that is unpolarised, or below half
+the expected 2 μ_B, is **refused** — with `--allow-spin-mismatch` to override,
+which then stamps the warning across the report instead. An N₂ carrying a moment
+is flagged as `CHECK`. The measured value appears in the report and under
+`reference_phases.<name>.spin`, so the old manual check
+
+```bash
+grep mag OUTCAR | tail -1        # O2 must show 2.00, N2 must show 0
+```
+
+is no longer the thing standing between you and a 1 eV error in every γ.
+
 Bold rows are the minimum set. TiO₂ rutile is the stable Ti oxide and normally
 the binding bound; anatase is a polymorph of the same composition, so pass it (if
 at all) as `--aux-phase` — at your settings it will almost certainly come out

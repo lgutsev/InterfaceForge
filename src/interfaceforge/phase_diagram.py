@@ -273,6 +273,18 @@ MOLECULAR_REFERENCES = {
 #: rather than sliced off the name, so asking for Na does not pull in N2.
 MOLECULAR_ELEMENT = {"N2": "N", "O2": "O"}
 
+#: Total spin moment (muB) the diatomic molecular reference of each element must
+#: carry, per X2 unit. O2 is the one that bites: its ground state is a triplet,
+#: and a non-spin-polarised O2 is ~1 eV too high, which shifts mu_O and every
+#: gamma, formation enthalpy and window derived from it by that much.
+MOLECULAR_MOMENT_PER_PAIR = {
+    "N": 0.0,
+    "O": 2.0,
+    "H": 0.0,
+    "F": 0.0,
+    "Cl": 0.0,
+}
+
 
 def covered_subsystems(elements: Collection[str]) -> list[str]:
     """The built-in subsystems whose every element is present in ``elements``.

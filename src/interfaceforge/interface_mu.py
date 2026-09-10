@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from collections.abc import Collection, Mapping, Sequence
 from math import gcd
 from pathlib import Path
@@ -44,7 +45,11 @@ from typing import Any
 import numpy as np
 
 from .errors import DependencyError, SafetyError
-from .phase_diagram import hull_report
+from .phase_diagram import (
+    MOLECULAR_MOMENT_PER_PAIR,
+    MOLECULAR_REFERENCES,
+    hull_report,
+)
 from .regime import BULK, FREE_SURFACE, MLIP_DOMAIN, measure_regime, require_regime
 from .separation_energy import (
     EV_A2_TO_J_M2,
@@ -73,7 +78,118 @@ def _formula(composition: Mapping[str, int]) -> str:
     return "".join(f"{el}{composition[el]}" for el in sorted(composition))
 
 
-def _read_phase(name: str, directory: str | Path, *, allow_vacuum: bool) -> dict[str, Any]:
+#: VASP prints the electron count and, with ISPIN=2, the cell moment after it.
+#: With ISPIN=1 the line simply ends, which is what a missing match means.
+_OUTCAR_MOMENT = re.compile(
+    "number of electron[ ]+[-+0-9.Ee]+[ ]+magnetization[ ]+([-+]?[0-9][0-9.Ee+-]*)"
+)
+
+
+def total_magnetization(run: Path) -> float | None:
+    """Total cell moment (muB) from the last SCF step of an OUTCAR.
+
+    ``None`` means the run was not spin-polarised: with ISPIN=1 VASP prints the
+    electron count with no magnetization after it.
+    """
+
+    outcar = run / "OUTCAR"
+    if not outcar.is_file():
+        return None
+    found = _OUTCAR_MOMENT.findall(
+        outcar.read_text(encoding="utf-8", errors="ignore")
+    )
+    return float(found[-1]) if found else None
+
+
+def audit_molecular_spin(
+    name: str, run: Path, composition: Mapping[str, int], *, strict: bool = True
+) -> dict[str, Any]:
+    """Check a diatomic molecular reference carries its ground-state spin.
+
+    The failure this exists for is a non-spin-polarised O2: it costs ~1 eV in
+    mu_O, and because mu_O is the zero of the chemical-potential scale that error
+    lands on every gamma, formation enthalpy and window downstream without
+    anything else looking wrong.
+    """
+
+    element = next(iter(composition))
+    natoms = int(composition[element])
+    measured = total_magnetization(run)
+    per_pair = MOLECULAR_MOMENT_PER_PAIR.get(element)
+    row: dict[str, Any] = {
+        "phase": name,
+        "element": element,
+        "natoms": natoms,
+        "total_moment_mub": measured,
+        "spin_polarised": measured is not None,
+    }
+    if per_pair is None or natoms % 2 or natoms < 2:
+        return {
+            **row,
+            "status": "NOT_CHECKED",
+            "expected_moment_mub": None,
+            "note": (
+                f"no ground-state moment on record for an isolated {element} "
+                f"reference of {natoms} atom(s); check the multiplicity yourself"
+            ),
+        }
+    expected = per_pair * natoms / 2
+    row["expected_moment_mub"] = expected
+    if expected == 0.0:
+        status = "PASS" if measured is None or abs(measured) < 0.1 else "CHECK"
+        note = (
+            f"{element}2 is closed-shell, so ISPIN=1 (or ISPIN=2 converging to 0) "
+            "is correct"
+            if status == "PASS"
+            else f"{element}2 should be closed-shell but the cell carries "
+            f"{measured:.2f} muB; the singlet did not converge"
+        )
+        return {**row, "status": status, "note": note}
+    if measured is None or abs(measured) < 0.5 * expected:
+        message = (
+            f"molecular reference {name!r} in {run}: expected {expected:.1f} muB "
+            f"({element}2 is a triplet) but the run is "
+            + (
+                "not spin-polarised at all"
+                if measured is None
+                else f"at {measured:.2f} muB"
+            )
+            + f". A non-spin-polarised {element}2 is ~1 eV too high, and mu_{element}"
+            " is the zero of the chemical-potential scale, so that error lands on"
+            " every gamma and every window derived from it. Rerun with "
+            f"{MOLECULAR_REFERENCES.get(element + '2', 'ISPIN=2, NUPDOWN=2, ISYM=0')}."
+        )
+        if strict:
+            raise SafetyError(message)
+        return {
+            **row,
+            "status": "OVERRIDDEN",
+            "note": (
+                f"accepted under --allow-spin-mismatch: mu_{element} is ~1 eV too "
+                f"high, so every gamma and window below is shifted with it"
+            ),
+            "detail": message,
+        }
+    status = "PASS" if abs(abs(measured) - expected) < 0.1 else "CHECK"
+    return {
+        **row,
+        "status": status,
+        "note": (
+            f"{element}2 triplet converged to {measured:.2f} muB"
+            if status == "PASS"
+            else f"{element}2 should carry {expected:.1f} muB but converged to "
+            f"{measured:.2f}; the multiplicity is only partly resolved"
+        ),
+    }
+
+
+def _read_phase(
+    name: str,
+    directory: str | Path,
+    *,
+    allow_vacuum: bool,
+    strict_spin: bool = True,
+) -> dict[str, Any]:
     """Composition and total DFT energy of one reference phase run directory."""
 
     run = Path(directory).expanduser().resolve()
@@ -101,6 +217,11 @@ def _read_phase(name: str, directory: str | Path, *, allow_vacuum: bool) -> dict
         "natoms": int(sum(composition.values())),
         "energy_ev": float(energy),
         "molecular": molecular,
+        "spin": (
+            audit_molecular_spin(name, run, composition, strict=strict_spin)
+            if molecular
+            else None
+        ),
         "regime": regime,
         "atoms": atoms,
     }
@@ -422,6 +543,7 @@ def interface_mu(
     area_axis: str | None = None,
     device: str = "cpu",
     allow_vacuum: bool = False,
+    allow_spin_mismatch: bool = False,
     window_method: str = "hull",
 ) -> dict[str, Any]:
     """gamma(dmu_anion) for one or more vacuum-free periodic interface cells."""
@@ -439,7 +561,10 @@ def interface_mu(
     if overlap:
         raise SafetyError(f"{overlap} given as both --phase and --aux-phase")
     read = {
-        name: _read_phase(name, directory, allow_vacuum=allow_vacuum)
+        name: _read_phase(
+            name, directory,
+            allow_vacuum=allow_vacuum, strict_spin=not allow_spin_mismatch,
+        )
         for name, directory in {**phases, **auxiliary_phases}.items()
     }
     classified = _classify_phases(read, anion, auxiliary_names=auxiliary_phases)
@@ -720,6 +845,28 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
     competing = window.get("competing_stable_phases") or []
     if competing:
         window_line += " Competing phases on the hull: {}.".format(", ".join(competing))
+    spin = next(
+        (
+            phase["spin"] for phase in payload["reference_phases"].values()
+            if phase.get("spin") and phase["spin"]["element"] == anion
+        ),
+        None,
+    )
+    spin_line = (
+        "Anion reference {}: {} (expected {} muB) -- {}. {}".format(
+            spin["phase"],
+            "not spin-polarised" if spin["total_moment_mub"] is None
+            else "{:.2f} muB".format(spin["total_moment_mub"]),
+            "n/a" if spin["expected_moment_mub"] is None
+            else "{:.1f}".format(spin["expected_moment_mub"]),
+            spin["status"],
+            spin["note"],
+        )
+        if spin
+        else None
+    )
+    if spin and spin["status"] not in {"PASS", "NOT_CHECKED"}:
+        spin_line = "> **WARNING** " + spin_line
     missing = window.get("missing_known_phases") or []
     # the warning has to be in the human-readable report, not only the JSON: the
     # window above reads as an answer, and with a phase missing it is a bound
@@ -743,6 +890,7 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
         window_line,
         "",
         *((incomplete_line, "") if incomplete_line else ()),
+        *((spin_line, "") if spin_line else ()),
         f"| Interface | Source | dn({anion}) | gamma {anion}-rich | gamma {anion}-poor | slope | committee sigma | delta vs DFT |",
         "|---|---|---:|---:|---:|---:|---:|---:|",
     ]

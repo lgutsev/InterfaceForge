@@ -6,7 +6,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from interfaceforge.errors import SafetyError
-from interfaceforge.interface_mu import gamma_at, interface_mu, write_reports
+from interfaceforge.interface_mu import (
+    audit_molecular_spin,
+    gamma_at,
+    interface_mu,
+    total_magnetization,
+    write_reports,
+)
 from interfaceforge.phase_diagram import (
     covered_subsystems,
     hull_report,
@@ -71,6 +77,93 @@ class RegimeTests(unittest.TestCase):
             self.assertEqual(
                 measure_regime(_read_atoms(_structure_file(slab)))["regime"], FREE_SURFACE
             )
+
+
+def _molecule(directory: Path, element: str, natoms: int, energy: float,
+              moment: float | None) -> Path:
+    """A molecular reference run whose OUTCAR reports (or omits) a total moment."""
+
+    _run(directory, [(element, natoms)], energy, box=(12.0, 12.0, 12.0), vacuum=True)
+    lines = [f"   free energy    TOTEN  =      {energy:.6f} eV"]
+    for step in range(2):  # the audit must read the LAST SCF step, not the first
+        value = 0.0 if moment is None else (moment * 0.5 if step == 0 else moment)
+        lines.append(
+            f"      number of electron     12.0000000 magnetization     {value:.7f}"
+            if moment is not None
+            else "      number of electron     12.0000000 magnetization"
+        )
+    lines.append(
+        f" energy  without entropy=     {energy:.6f}  "
+        f"energy(sigma->0) =     {energy:.6f}"
+    )
+    lines.append(" General timing and accounting informations for this job")
+    (directory / "OUTCAR").write_text(
+        chr(10).join(lines) + chr(10), encoding="utf-8"
+    )
+    return directory
+
+
+class MolecularSpinTests(unittest.TestCase):
+    def test_an_unpolarised_o2_reference_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            o2 = _molecule(root / "O2", "O", 2, -9.9, None)
+            with self.assertRaises(SafetyError) as caught:
+                audit_molecular_spin("O2", o2, {"O": 2})
+            message = str(caught.exception)
+            self.assertIn("not spin-polarised at all", message)
+            self.assertIn("~1 eV too high", message)
+            self.assertIn("NUPDOWN=2", message)
+
+    def test_a_triplet_o2_reference_passes_and_reads_the_last_step(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            o2 = _molecule(root / "O2", "O", 2, -9.9, 2.0)
+            self.assertAlmostEqual(total_magnetization(o2), 2.0)
+            audit = audit_molecular_spin("O2", o2, {"O": 2})
+            self.assertEqual(audit["status"], "PASS")
+            self.assertAlmostEqual(audit["expected_moment_mub"], 2.0)
+
+    def test_a_half_converged_triplet_is_flagged_without_refusing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            o2 = _molecule(root / "O2", "O", 2, -9.9, 1.6)
+            audit = audit_molecular_spin("O2", o2, {"O": 2})
+            self.assertEqual(audit["status"], "CHECK")
+            self.assertIn("only partly resolved", audit["note"])
+
+    def test_an_unpolarised_n2_reference_is_correct(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            n2 = _molecule(root / "N2", "N", 2, -16.0, None)
+            audit = audit_molecular_spin("N2", n2, {"N": 2})
+            self.assertEqual(audit["status"], "PASS")
+            self.assertEqual(audit["expected_moment_mub"], 0.0)
+
+    def test_a_magnetised_n2_reference_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            n2 = _molecule(root / "N2", "N", 2, -16.0, 1.0)
+            audit = audit_molecular_spin("N2", n2, {"N": 2})
+            self.assertEqual(audit["status"], "CHECK")
+            self.assertIn("did not converge", audit["note"])
+
+    def test_an_element_with_no_recorded_multiplicity_is_not_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            se = _molecule(root / "Se", "Se", 2, -7.0, None)
+            audit = audit_molecular_spin("Se2", se, {"Se": 2})
+            self.assertEqual(audit["status"], "NOT_CHECKED")
+            self.assertIn("check the multiplicity yourself", audit["note"])
+
+    def test_the_override_records_what_it_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            o2 = _molecule(root / "O2", "O", 2, -9.9, None)
+            audit = audit_molecular_spin("O2", o2, {"O": 2}, strict=False)
+            self.assertEqual(audit["status"], "OVERRIDDEN")
+            self.assertIn("--allow-spin-mismatch", audit["note"])
+            self.assertIn("~1 eV too high", audit["detail"])
 
 
 class InterfaceMuTests(unittest.TestCase):
@@ -229,6 +322,19 @@ class InterfaceMuTests(unittest.TestCase):
             self.assertIn("upper limit, not the window", report)
             self.assertIn("Ti5Si3 (mp-2108)", report)
             self.assertTrue(report.isascii(), "the generated report must stay ASCII")
+
+    def test_the_report_states_the_anion_reference_spin_check(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            payload = interface_mu(
+                [("balanced", iface)], phases=_phases(root), anion="N", n_interfaces=2,
+            )
+            self.assertEqual(payload["reference_phases"]["N2"]["spin"]["status"], "PASS")
+            self.assertIsNone(payload["reference_phases"]["TiN"]["spin"])
+            write_reports(payload, root / "out")
+            report = (root / "out" / "interface_mu.md").read_text(encoding="utf-8")
+            self.assertIn("Anion reference N2: not spin-polarised (expected 0.0 muB)", report)
 
     def test_two_compounds_sharing_a_cation_are_refused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
