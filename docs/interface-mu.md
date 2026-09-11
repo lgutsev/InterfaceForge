@@ -167,6 +167,50 @@ can only ever raise the N‑poor bound.
 > built without. A window reported alongside a non‑empty list is an upper limit,
 > not the answer.
 
+### Files for later analysis: `--output`
+
+Without `--output`, `phases hull` prints JSON to stdout and nothing else. With it
+you get a directory you can come back to:
+
+```bash
+iface phases hull --anion N --compound TiN --compound Si3N4 --output audit/phases_N \
+  --phase TiN=Wadh/TiN_mp492 --phase Si3N4=Wadh/Si3N4_mp988 \
+  --phase N2=Wadh/N2_gas --phase Ti=Wadh/Ti_mp46 --phase Si=Wadh/Si_mp149 \
+  --phase Ti2N=Wadh/Ti2N_mp8282 --phase TiSi2=Wadh/TiSi2_mp2582
+```
+
+```
+audit/phases_N/
+  phases_hull.json                  # the full payload, every field below plus provenance
+  phases_hull.csv                   # one row per phase, for a spreadsheet or pandas
+  phases_hull.md                    # the window/limit table and the phase table
+  phases_hull.{png,svg,pdf}         # the convex hull itself
+  phases_chempot.{png,svg,pdf}      # the dmu axis, one bar per compound
+```
+
+**`phases_hull.csv`** has `phase, formula, role, natoms, energy_ev,
+energy_per_atom_ev, formation_energy_per_atom_ev, e_above_hull_ev_per_atom,
+stable`. `role` is `compound` (named with `--compound`), `elemental`, or
+`auxiliary` (a competing phase). `formation_energy_per_atom_ev` is referenced to
+the elemental phases **in that same set**, so it is directly comparable across
+rows and is the number to quote; `e_above_hull_ev_per_atom` is 0 for a valid
+reservoir and positive for a phase that would decompose.
+
+**`phases_hull.{png,svg,pdf}`** is the hull, projected by dimensionality: a
+formation-energy curve for a binary, a Gibbs triangle for a ternary (Ti-Si-N,
+where the TiN-Si3N4 tie line is the coexistence the interface sits on), and a
+tetrahedron with a numbered legend for a quaternary (Ti-Si-N-O). Phase labels are
+shrunk from pymatgen's default, which collides once a binary edge carries more
+than two compounds -- the Ti-Si edge carries five.
+
+**`phases_chempot.{png,svg,pdf}`** is the figure to read the result off: one
+horizontal bar per compound over its stable dmu range, the intersection shaded,
+and the binding bound as a solid line. For an oxidation limit the bars run off
+the left edge with an arrow, marked *unbounded below*, and each is annotated with
+what that compound decomposes into at its limit.
+
+SVG for figures you will relabel, PDF for a manuscript, PNG to glance at.
+
 ### The oxidation limit: μ_O for a phase that contains no O
 
 Asking for the Δμ_O *window* of TiN is the wrong question, and pymatgen cannot

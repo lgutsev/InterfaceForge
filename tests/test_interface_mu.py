@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,10 +15,12 @@ from interfaceforge.interface_mu import (
     write_reports,
 )
 from interfaceforge.phase_diagram import (
+    HULL_CSV_FIELDS,
     covered_subsystems,
     hull_report,
     missing_known_phases,
 )
+from interfaceforge.phase_diagram import write_reports as write_hull_reports
 from interfaceforge.regime import BULK, FREE_SURFACE, measure_regime
 from interfaceforge.separation_energy import EV_A2_TO_J_M2, _read_atoms, _structure_file
 
@@ -114,6 +117,77 @@ def _molecule(directory: Path, element: str, natoms: int, energy: float,
         chr(10).join(lines) + chr(10), encoding="utf-8"
     )
     return directory
+
+
+class HullReportTests(unittest.TestCase):
+    """phases hull --output: the tables and figures you analyse later."""
+
+    def test_a_two_sided_window_writes_tables_and_figures(self) -> None:
+        phases = {k: v for k, v in _QUATERNARY.items()
+                  if k in {"TiN", "Si3N4", "N2", "Ti", "Si"}}
+        payload = hull_report(phases, ["TiN", "Si3N4"], "N")
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary) / "phases_N"
+            outputs = write_hull_reports(payload, out, phases)
+            for name in ("phases_hull.json", "phases_hull.csv", "phases_hull.md"):
+                self.assertTrue((out / name).is_file(), name)
+            # the figures are optional (matplotlib may be absent) but must not
+            # fail silently: either every format lands or a reason is reported
+            if "figures" in outputs:
+                self.assertIn("skipped:", outputs["figures"])
+            else:
+                for stem in ("phases_hull", "phases_chempot"):
+                    for suffix in ("png", "svg", "pdf"):
+                        self.assertTrue((out / f"{stem}.{suffix}").is_file(),
+                                        f"{stem}.{suffix}")
+            report = (out / "phases_hull.md").read_text(encoding="utf-8")
+            self.assertIn("## Window in dmu(N)", report)
+            self.assertIn("-2.0000 <= dmu(N) <= 0.0000 eV", report)
+            self.assertIn("| TiN | TiN | compound |", report)
+            self.assertTrue(report.isascii(), "the generated report must stay ASCII")
+
+    def test_the_csv_carries_formation_energy_and_hull_distance(self) -> None:
+        phases = {k: v for k, v in _QUATERNARY.items()
+                  if k in {"TiN", "Si3N4", "N2", "Ti", "Si"}}
+        payload = hull_report(phases, ["TiN", "Si3N4"], "N")
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary) / "phases_N"
+            write_hull_reports(payload, out, phases)
+            with (out / "phases_hull.csv").open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+        self.assertEqual(list(rows[0]), list(HULL_CSV_FIELDS))
+        by_phase = {row["phase"]: row for row in rows}
+        # TiN: E = -74 eV for Ti4N4, refs -7.0/Ti and -8.0/N -> -3.5 per f.u.
+        self.assertAlmostEqual(
+            float(by_phase["TiN"]["formation_energy_per_atom_ev"]), -1.75, places=6
+        )
+        self.assertEqual(by_phase["Ti"]["role"], "elemental")
+        self.assertEqual(by_phase["TiN"]["stable"], "True")
+
+    def test_an_oxidation_limit_report_says_so_in_the_tables(self) -> None:
+        payload = hull_report(_QUATERNARY, ["TiN", "Si3N4"], "O")
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary) / "phases_O"
+            write_hull_reports(payload, out, _QUATERNARY)
+            report = (out / "phases_hull.md").read_text(encoding="utf-8")
+        self.assertIn("chemical-potential limit", report)
+        self.assertIn("## Oxidation limit in dmu(O)", report)
+        self.assertIn("| TiN | -5.2500 | N2 + TiO2 | yes |", report)
+        self.assertIn("set by TiN", report)
+        self.assertIn("lower side is unbounded", report)
+        self.assertTrue(report.isascii())
+
+    def test_an_incomplete_hull_warns_in_the_written_report(self) -> None:
+        phases = {k: v for k, v in _QUATERNARY.items()
+                  if k in {"TiN", "Si3N4", "N2", "Ti", "Si"}}
+        payload = hull_report(phases, ["TiN", "Si3N4"], "N")
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary) / "phases_N"
+            write_hull_reports(payload, out, phases)
+            report = (out / "phases_hull.md").read_text(encoding="utf-8")
+        self.assertIn("## Incomplete hull", report)
+        self.assertIn("Ti2N (mp-8282)", report)
+        self.assertIn("too wide", report)
 
 
 class OpenElementLimitTests(unittest.TestCase):

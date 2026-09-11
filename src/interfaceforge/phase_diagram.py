@@ -18,7 +18,10 @@ discovery, ``iface phases hull`` does the thermodynamics on your own runs.
 
 from __future__ import annotations
 
+import csv
+import json
 from collections.abc import Collection, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from .errors import DependencyError, SafetyError
@@ -96,7 +99,12 @@ def build_hull(phases: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             {
                 "phase": entry.name,
                 "formula": entry.composition.reduced_formula,
+                "natoms": int(entry.composition.num_atoms),
+                "energy_ev": float(entry.energy),
                 "energy_per_atom_ev": float(entry.energy_per_atom),
+                "formation_energy_per_atom_ev": float(
+                    diagram.get_form_energy_per_atom(entry)
+                ),
                 "e_above_hull_ev_per_atom": None if above is None else float(above),
                 "stable": bool(above is not None and above < 1.0e-6),
             }
@@ -342,6 +350,14 @@ def hull_report(
         hull["elements"], [row["formula"] for row in hull["phases"]]
     )
     checked = covered_subsystems(hull["elements"])
+    api = _pymatgen()
+    for row in hull["phases"]:
+        elements = api["Composition"](row["formula"]).elements
+        row["role"] = (
+            "compound" if row["phase"] in compounds
+            else "elemental" if len(elements) == 1
+            else "auxiliary"
+        )
     return {
         "schema_version": 1,
         "elements": hull["elements"],
@@ -534,3 +550,265 @@ def suggest_phases(elements: Sequence[str], api_key: str | None = None) -> dict[
         for doc in docs
     ]
     return payload
+
+
+# --------------------------------------------------------------- reports
+
+HULL_CSV_FIELDS = (
+    "phase", "formula", "role", "natoms", "energy_ev", "energy_per_atom_ev",
+    "formation_energy_per_atom_ev", "e_above_hull_ev_per_atom", "stable",
+)
+
+
+def _hull_markdown(payload: Mapping[str, Any]) -> str:
+    """Human-readable tables: the window or limit first, then every phase."""
+
+    window = payload["chemical_potential_window"]
+    anion = window["anion"]
+    limit = window["method"] == "grand-potential-open-element"
+    lines = [
+        "# Convex-hull phase diagram and chemical-potential "
+        + ("limit" if limit else "window"),
+        "",
+        "Elements: {}. Method: {}. mu0({}) = {:.4f} eV/atom.".format(
+            ", ".join(payload["elements"]), window["method"], anion,
+            window["mu_anion_reference_ev"],
+        ),
+        "",
+    ]
+    if limit:
+        compounds = ", ".join(row["compound"] for row in window["per_compound"])
+        lines += [
+            f"## Oxidation limit in dmu({anion})",
+            "",
+            f"No named compound contains {anion}, so the bound is one-sided: the "
+            f"lower side is unbounded, because taking {anion} away cannot "
+            "destabilise a phase that contains none.",
+            "",
+            "| Compound | dmu limit (eV) | Decomposes to | Bounded |",
+            "|---|---:|---|---|",
+        ]
+        for row in window["per_compound"]:
+            products = " + ".join(row["decomposition_at_limit"] or []) or "-"
+            lines.append("| {} | {:.4f} | {} | {} |".format(
+                row["compound"], row["dmu_limit_ev"], products,
+                "yes" if row["limited"] else "no (survives dmu = 0)",
+            ))
+        lines += [
+            "",
+            "**Binding limit: dmu({}) <= {:.4f} eV, set by {}.** Above it the "
+            "coexistence of {} no longer holds, so every configuration in a study "
+            "that assumes it has to sit below this value.".format(
+                anion, window["dmu_max_ev"], window["dmu_max_set_by"], compounds,
+            ),
+        ]
+    else:
+        lines += [
+            f"## Window in dmu({anion})",
+            "",
+            "| Compound | dmu min (eV) | dmu max (eV) |",
+            "|---|---:|---:|",
+        ]
+        for row in window["per_compound"]:
+            lines.append("| {} | {:.4f} | {:.4f} |".format(
+                row["compound"], row["dmu_min_ev"], row["dmu_max_ev"]
+            ))
+        lines += [
+            "",
+            "**{:.4f} <= dmu({}) <= {:.4f} eV**, lower bound set by {}, upper by "
+            "{}.".format(
+                window["dmu_min_ev"], anion, window["dmu_max_ev"],
+                window["dmu_min_set_by"], window["dmu_max_set_by"],
+            ),
+        ]
+    competing = window.get("competing_stable_phases") or []
+    lines += [
+        "",
+        "Competing phases on the hull: {}.".format(", ".join(competing) or "none"),
+        "",
+        "## Phases",
+        "",
+        "`Ef/atom` is the formation energy from the elemental references in this "
+        "same set. `Above hull` is 0 for a phase that is a valid reservoir; a "
+        "positive value means it would decompose.",
+        "",
+        "| Phase | Formula | Role | Ef/atom (eV) | Above hull (eV/atom) | On hull |",
+        "|---|---|---|---:|---:|---|",
+    ]
+    ordered = sorted(
+        payload["phases"],
+        key=lambda row: (not row["stable"], row["e_above_hull_ev_per_atom"] or 0.0),
+    )
+    for row in ordered:
+        above = row["e_above_hull_ev_per_atom"]
+        lines.append("| {} | {} | {} | {:.4f} | {} | {} |".format(
+            row["phase"], row["formula"], row["role"],
+            row["formation_energy_per_atom_ev"],
+            "-" if above is None else f"{above:.4f}",
+            "yes" if row["stable"] else "NO",
+        ))
+    missing = payload.get("missing_known_phases") or []
+    if missing:
+        named = ", ".join(f"{m['formula']} ({m['mp_id']})" for m in missing)
+        lines += [
+            "",
+            "## Incomplete hull",
+            "",
+            f"> **WARNING** built without {named}. An omitted stable phase can only "
+            "make the window look too wide, so the bounds above are an upper limit "
+            "until these are computed at the campaign's settings and the hull "
+            "re-run.",
+        ]
+    lines += ["", "Completeness: " + payload["completeness_note"]]
+    return "\n".join(lines) + "\n"
+
+
+def _write_hull_figures(
+    payload: Mapping[str, Any], phases: Mapping[str, Mapping[str, Any]], out: Path
+) -> dict[str, str]:
+    """The hull itself, plus a dmu axis showing which phase sets the bound."""
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.text as mtext
+        from pymatgen.analysis.phase_diagram import PDPlotter
+    except ModuleNotFoundError as exc:
+        raise DependencyError(
+            "Phase-diagram figures require matplotlib; install interfaceforge[report]"
+        ) from exc
+
+    window = payload["chemical_potential_window"]
+    anion = window["anion"]
+    limit = window["method"] == "grand-potential-open-element"
+    paths: dict[str, Path] = {}
+    style = {
+        "font.family": "sans-serif", "font.size": 8.0, "axes.titlesize": 9.0,
+        "axes.labelsize": 8.5, "xtick.labelsize": 7.5, "ytick.labelsize": 7.5,
+        "legend.fontsize": 7.5, "axes.linewidth": 0.7,
+        "pdf.fonttype": 42, "ps.fonttype": 42,
+    }
+
+    # 1. the hull: 2 elements -> formation-energy curve, 3 -> Gibbs triangle,
+    #    4 -> tetrahedron. pymatgen picks the projection from the dimensionality.
+    diagram = build_hull(phases)["diagram"]
+    with plt.rc_context(style):
+        axes = PDPlotter(diagram, show_unstable=0.2, backend="matplotlib").get_plot()
+        figure = axes.get_figure()
+        # PDPlotter hardcodes large phase labels, which collide as soon as a
+        # binary edge carries more than two compounds (Ti3Si/Ti5Si3/Ti5Si4/TiSi).
+        # They are not all in axes.texts -- the quaternary legend sits elsewhere
+        # in the tree -- so walk every Text artist, and title only afterwards.
+        for artist in (*axes.get_children(), *figure.get_children()):
+            if isinstance(artist, mtext.Text) and artist.get_text():
+                artist.set_fontsize(8.0)
+        figure.set_size_inches(7.0, 5.6)
+        # above the plot area, so it clears the apex label of a Gibbs triangle
+        figure.suptitle(
+            "{} convex hull".format("-".join(payload["elements"])),
+            fontsize=9.0, y=1.02,
+        )
+        for suffix in ("png", "svg", "pdf"):
+            path = out / ("phases_hull." + suffix)
+            figure.savefig(path, dpi=300, bbox_inches="tight")
+            paths["hull_" + suffix] = path
+        plt.close(figure)
+
+    # 2. the dmu axis: one bar per compound, so the binding phase is visible
+    rows = window["per_compound"]
+    with plt.rc_context(style):
+        figure, axis = plt.subplots(figsize=(5.6, 0.55 * len(rows) + 1.7))
+        if limit:
+            left = min(row["dmu_limit_ev"] for row in rows) - 2.0
+            for index, row in enumerate(rows):
+                axis.barh(index, row["dmu_limit_ev"] - left, left=left, height=0.45,
+                          color="#0072B2", alpha=0.55, edgecolor="#0072B2", lw=0.7)
+                products = " + ".join(row["decomposition_at_limit"] or [])
+                axis.annotate(
+                    "  -> " + (products or "no limit"),
+                    (row["dmu_limit_ev"], index), fontsize=7.0, va="center",
+                    ha="left", color="#111111",
+                )
+                # the bar runs off the left edge: nothing bounds it from below
+                axis.plot([left], [index], marker="<", markersize=4.5,
+                          color="#0072B2", clip_on=False)
+            axis.annotate(
+                "unbounded below", (left, len(rows) - 0.75), fontsize=7.0,
+                va="center", ha="left", color="#0072B2", style="italic",
+            )
+            axis.axvspan(left, window["dmu_max_ev"], color="#0072B2", alpha=0.10, lw=0)
+            axis.axvline(window["dmu_max_ev"], color="#111111", lw=1.0)
+            axis.set_title(
+                "dmu({}) oxidation limit: <= {:.3f} eV, set by {}".format(
+                    anion, window["dmu_max_ev"], window["dmu_max_set_by"]
+                )
+            )
+            axis.set_xlim(left, 0.9)
+        else:
+            left = min(row["dmu_min_ev"] for row in rows) - 0.4
+            for index, row in enumerate(rows):
+                axis.barh(index, row["dmu_max_ev"] - row["dmu_min_ev"],
+                          left=row["dmu_min_ev"], height=0.45, color="#0072B2",
+                          alpha=0.55, edgecolor="#0072B2", lw=0.7)
+            axis.axvspan(window["dmu_min_ev"], window["dmu_max_ev"],
+                         color="#0072B2", alpha=0.10, lw=0)
+            for bound in (window["dmu_min_ev"], window["dmu_max_ev"]):
+                axis.axvline(bound, color="#111111", lw=1.0)
+            axis.set_title(
+                "dmu({}) window: {:.3f} to {:.3f} eV, lower bound by {}".format(
+                    anion, window["dmu_min_ev"], window["dmu_max_ev"],
+                    window["dmu_min_set_by"],
+                )
+            )
+            axis.set_xlim(left, 0.4)
+        axis.axvline(0.0, color="#D55E00", lw=0.9, linestyle="--")
+        axis.annotate(
+            "elemental " + anion + " reference", (0.0, -0.9), fontsize=7.0,
+            rotation=90, va="bottom", ha="right", color="#D55E00",
+        )
+        axis.set_yticks(range(len(rows)))
+        axis.set_yticklabels([row["compound"] for row in rows])
+        axis.set_xlabel(
+            f"dmu({anion}) (eV), zero at the elemental reference"
+        )
+        axis.set_ylim(-1.05, len(rows) - 0.45)
+        axis.spines[["top", "right"]].set_visible(False)
+        for suffix in ("png", "svg", "pdf"):
+            path = out / ("phases_chempot." + suffix)
+            figure.savefig(path, dpi=300, bbox_inches="tight")
+            paths["chempot_" + suffix] = path
+        plt.close(figure)
+    return {key: str(value) for key, value in paths.items()}
+
+
+def write_reports(
+    payload: Mapping[str, Any],
+    output_dir: str | Path,
+    phases: Mapping[str, Mapping[str, Any]],
+) -> dict[str, str]:
+    """JSON, CSV, markdown tables and figures for one hull, into ``output_dir``."""
+
+    out = Path(output_dir).expanduser().resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "phases_hull.json").write_text(
+        json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8"
+    )
+    with (out / "phases_hull.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=HULL_CSV_FIELDS, extrasaction="ignore"
+        )
+        writer.writeheader()
+        writer.writerows(payload["phases"])
+    (out / "phases_hull.md").write_text(_hull_markdown(payload), encoding="utf-8")
+    outputs = {
+        "json": str(out / "phases_hull.json"),
+        "csv": str(out / "phases_hull.csv"),
+        "markdown": str(out / "phases_hull.md"),
+    }
+    try:
+        outputs.update(_write_hull_figures(payload, phases, out))
+    except (DependencyError, SafetyError) as exc:
+        outputs["figures"] = "skipped: " + str(exc)
+    return outputs

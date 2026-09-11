@@ -70,6 +70,7 @@ from .packaging import (
     verify_package,
 )
 from .phase_diagram import hull_report, suggest_phases
+from .phase_diagram import write_reports as write_phases_reports
 from .progress import mlip_progress
 from .progress import render as render_progress
 from .reference_import import (
@@ -541,7 +542,10 @@ def cmd_phases(args: argparse.Namespace) -> int:
             "composition": phase["composition"],
             "energy_ev": phase["energy_ev"],
         }
-    _json(hull_report(phases, args.compounds, args.anion))
+    payload = hull_report(phases, args.compounds, args.anion)
+    if args.output:
+        payload['outputs'] = write_phases_reports(payload, args.output, phases)
+    _json(payload)
     return 0
 
 
@@ -1649,6 +1653,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME", help="The phases the interface is made of (repeatable)",
     )
     phases_hull.add_argument("--anion", default="N")
+    phases_hull.add_argument(
+        "--output", metavar="DIR",
+        help="Also write phases_hull.{json,csv,md} plus the hull and dmu figures "
+        "(png/svg/pdf) into DIR. Without it only the JSON goes to stdout",
+    )
     phases_hull.set_defaults(func=cmd_phases)
 
     mlip_compare = commands.add_parser(
