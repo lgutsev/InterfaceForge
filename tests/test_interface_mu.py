@@ -810,6 +810,95 @@ class InterfaceMuTests(unittest.TestCase):
             )
             self.assertGreater(block["committee_spread_j_per_m2"], 0.0)
 
+    def test_per_structure_errors_attribute_the_gamma_offset(self) -> None:
+        """A small offset can hide two large errors that happened to cancel."""
+
+        def fake_mace(models, atoms_by_key, device):
+            # interface +1.6 eV (16 atoms -> +100 meV/atom) and TiN +0.8 eV
+            # (8 atoms -> +100 meV/atom). With x_TiN = 4 f.u. the reference term
+            # subtracts 4 * 0.2 = 0.8 eV, so gamma keeps only 1.6 - 0.8 = 0.8 eV
+            # -- half the offset a naive reading of the interface error implies.
+            return {
+                "only": {
+                    key: (
+                        -136.0 + 1.6 if key.startswith("iface::")
+                        else -74.0 + 0.8 if key == "phase::TiN"
+                        else -110.0
+                    )
+                    for key in atoms_by_key
+                }
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 9)], -136.0)
+            with patch("interfaceforge.interface_mu._mace_energies", fake_mace):
+                payload = interface_mu(
+                    [("n-rich", iface)], phases=_phases(root), anion="N",
+                    n_interfaces=2, mace_models=["only"],
+                )
+            block = payload["interfaces"][0]["mlip"]["mace"]
+            errors = block["per_structure_error"]
+            self.assertAlmostEqual(
+                errors["iface::n-rich"]["ensemble_error_mev_per_atom"], 100.0, places=6
+            )
+            self.assertAlmostEqual(
+                errors["phase::TiN"]["ensemble_error_mev_per_atom"], 100.0, places=6
+            )
+            self.assertAlmostEqual(
+                errors["phase::Si3N4"]["ensemble_error_mev_per_atom"], 0.0, places=6
+            )
+            # the reference error cancels part of the interface error, so gamma's
+            # offset is smaller than the interface error alone would suggest
+            self.assertAlmostEqual(
+                block["delta_vs_dft_j_per_m2"], 0.8 / 200.0 * EV_A2_TO_J_M2, places=6
+            )
+            self.assertLess(
+                abs(block["delta_vs_dft_j_per_m2"]), 1.6 / 200.0 * EV_A2_TO_J_M2
+            )
+            self.assertEqual(errors["iface::n-rich"]["natoms"], 16)
+            self.assertEqual(errors["phase::TiN"]["natoms"], 8)
+
+    def test_the_mlip_offset_does_not_depend_on_the_chemical_potential(self) -> None:
+        """gamma^MLIP - gamma^DFT is one number per interface, not a line.
+
+        Both lines are evaluated on the same structure, so they share Delta n
+        and the area, hence the slope; and mu0 enters both identically. So the
+        MLIP error is a constant offset, and the audit is insensitive to
+        everything the window does -- including which phase bounds it.
+        """
+
+        def fake_mace(models, atoms_by_key, device):
+            return {
+                "only": {
+                    key: (-136.0 + 0.5 if key.startswith("iface::")
+                          else {"phase::TiN": -74.0, "phase::Si3N4": -110.0}[key])
+                    for key in atoms_by_key
+                }
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 9)], -136.0)
+            with patch("interfaceforge.interface_mu._mace_energies", fake_mace):
+                payload = interface_mu(
+                    [("n-rich", iface)], phases=_phases(root), anion="N",
+                    n_interfaces=2, mace_models=["only"],
+                )
+            row = payload["interfaces"][0]
+            block = row["mlip"]["mace"]
+            dft = row["dft"]
+            mlip_line = {
+                "gamma0_j_per_m2": block["gamma0_ensemble_j_per_m2"],
+                "slope_j_per_m2_per_ev": block["slope_j_per_m2_per_ev"],
+            }
+            window = payload["chemical_potential_window"]
+            for dmu in (0.0, -0.5, window["dmu_min_ev"]):
+                self.assertAlmostEqual(
+                    gamma_at(mlip_line, dmu) - gamma_at(dft, dmu),
+                    block["delta_vs_dft_j_per_m2"], places=9,
+                )
+
     def test_mlip_is_never_evaluated_on_the_molecular_reference(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

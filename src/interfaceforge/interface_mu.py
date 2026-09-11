@@ -624,8 +624,17 @@ def _family_lines(
     denominators: Mapping[str, float],
     anion: str,
     dft_lines: Mapping[str, Mapping[str, float]],
+    dft_energies: Mapping[str, float],
+    natoms_by_key: Mapping[str, int],
 ) -> dict[str, Any]:
-    """Per-member gamma(dmu) lines for one MLIP family, plus committee statistics."""
+    """Per-member gamma(dmu) lines for one MLIP family, plus committee statistics.
+
+    ``delta_vs_dft_j_per_m2`` alone cannot say *where* a discrepancy comes from:
+    an error on the interface cell and an error on a bulk reference enter it with
+    opposite signs and can cancel or compound. The per-structure errors are
+    reported next to it so a large offset can be attributed, and a small one can
+    be distinguished from two large errors that happened to cancel.
+    """
 
     out: dict[str, Any] = {}
     for label in keys:
@@ -661,6 +670,34 @@ def _family_lines(
         }
         block["delta_vs_dft_j_per_m2"] = (
             block["gamma0_ensemble_j_per_m2"] - dft_lines[label]["gamma0_j_per_m2"]
+        )
+        keys = [f"iface::{label}"] + [
+            f"phase::{name}" for name in classified["compounds"]
+        ]
+        errors: dict[str, Any] = {}
+        for key in keys:
+            if key not in dft_energies:
+                continue
+            per_atom = np.asarray([
+                (energies[key] - dft_energies[key]) / natoms_by_key[key]
+                for energies in members.values()
+            ])
+            errors[key] = {
+                "natoms": natoms_by_key[key],
+                "ensemble_error_ev_per_atom": float(per_atom.mean()),
+                "ensemble_error_mev_per_atom": float(per_atom.mean()) * 1000.0,
+                "member_spread_mev_per_atom": (
+                    float(per_atom.std(ddof=1)) * 1000.0 if per_atom.size > 1 else 0.0
+                ),
+            }
+        block["per_structure_error"] = errors
+        block["per_structure_note"] = (
+            "MLIP minus DFT on each structure, in meV/atom. The interface cell is "
+            "the finite-temperature snapshot; the compound references are the "
+            "relaxed 0 K bulks, which a model trained only on MD may represent "
+            "less well. gamma's offset is the interface error minus the "
+            "reference errors weighted by formula-unit count, so check both "
+            "before reading delta_vs_dft_j_per_m2 as an interface error."
         )
         out[label] = block
     return out
@@ -793,16 +830,30 @@ def interface_mu(
             f"missing: {[row['label'] for row in rows if not row['dft']['ready']]}"
         )
     keys = {label: label for label in labels}
+    dft_energies: dict[str, float] = {
+        f"phase::{name}": float(phase["energy_ev"])
+        for name, phase in classified["compounds"].items()
+    }
+    natoms_by_key: dict[str, int] = {
+        f"phase::{name}": int(phase["natoms"])
+        for name, phase in classified["compounds"].items()
+    }
+    for row in rows:
+        if row["dft"].get("energy_ev") is not None:
+            dft_energies[f"iface::{row['label']}"] = float(row["dft"]["energy_ev"])
+        natoms_by_key[f"iface::{row['label']}"] = int(sum(row["composition"].values()))
     families: dict[str, dict[str, Any]] = {}
     if mace_models:
         families["mace"] = _family_lines(
             _mace_energies(mace_models, atoms_by_key, device),
             keys, decompositions, classified, window, denominators, anion, ready,
+            dft_energies, natoms_by_key,
         )
     if deepmd_models:
         families["deepmd"] = _family_lines(
             _deepmd_energies(deepmd_models, atoms_by_key),
             keys, decompositions, classified, window, denominators, anion, ready,
+            dft_energies, natoms_by_key,
         )
     for row in rows:
         for family, blocks in families.items():
