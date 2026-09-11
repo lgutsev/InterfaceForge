@@ -260,6 +260,19 @@ The same machinery runs with `--anion O`. For TiOₓN_y you will need:
 **O₂ must be spin-polarised** (`ISPIN=2`, triplet ground state) in a ≥ 12 Å box.
 A non-spin-polarised O₂ is wrong by >1 eV and will corrupt the whole μ_O window.
 
+**Every solid here runs `ISPIN=1`, including the reduced oxides.** Ti³⁺ is d¹, so
+Ti₂O₃, Ti₃O₅ and Ti₄O₇ look like candidates for a moment — they are not. MP's
+own workflow initialises MAGMOMs and runs `ISPIN=2`, and all three converge to
+non-magnetic: 0.003, 0.001 and 0.010 μ_B respectively, ordering `NM`. The d
+electrons spin-pair (Ti–Ti dimerisation along **c** in Ti₂O₃). So this is settled
+by calculation, not assumption, and needs no rerun. The one thing that would
+overturn it is **+U on Ti**, which localises the d electrons and can produce
+moments where plain GGA gives none; MP applies no U to Ti–O, so if this campaign
+does, re-check all three before trusting their hull positions.
+
+O₂ is not a counterexample to any of that: MP has no isolated-molecule entry, so
+its silence on O₂ says nothing. The triplet is real and you compute it yourself.
+
 Bold rows are the minimum set. TiO₂ rutile is the stable Ti oxide and normally
 the binding bound; anatase is a polymorph of the same composition, so pass it (if
 at all) as `--aux-phase` — at your settings it will almost certainly come out
