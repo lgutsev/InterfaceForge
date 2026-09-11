@@ -47,14 +47,15 @@ report = ["matplotlib>=3.7", "openpyxl>=3.1"]
 ai2kit = ["ai2-kit==1.0.9", "oh-my-batch==0.7.2", "ase>=3.23"]
 intermat = ["intermat>=2024.3.24", "spglib>=2.0"]
 regfgw = ["regfgw"]
-phases = ["pymatgen>=2024.1.1"]
-phases-mp = ["pymatgen>=2024.1.1", "mp-api>=0.41"]
-dev = ["ase>=3.23", "matplotlib>=3.7", "pymatgen>=2024.1.1", "pytest>=8", "ruff>=0.6"]
+phases = ["pymatgen>=2024.1.1", "scipy>=1.11"]
+phases-mp = ["pymatgen>=2024.1.1", "mp-api>=0.41", "scipy>=1.11"]
+dev = ["ase>=3.23", "matplotlib>=3.7", "pymatgen>=2024.1.1", "scipy>=1.11", "pytest>=8", "ruff>=0.6"]
 all = [
   "ase>=3.23",
   "matplotlib>=3.7",
   "openpyxl>=3.1",
   "pymatgen>=2024.1.1",
+  "scipy>=1.11",
 ]
 
 [project.scripts]

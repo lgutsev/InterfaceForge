@@ -293,6 +293,28 @@ whole nitrogen window. An infeasible slice is refused. The figures and tables
 record the fixed reservoir. Oxygen-substituted interface energies still require
 a two-reservoir energy expression; this option computes phase stability only.
 
+**How many slices you need.** The boundary is piecewise linear, so sampling it
+is cheap if you know the shape. Each oxide contributes one straight line in
+Δμ_N, with a slope fixed by its stoichiometry: oxidising TiN releases 1 N per
+2 O consumed, so d(Δμ_O)/d(Δμ_N) = 1/2, while Si₃N₄ releases 4 N per 6 O,
+giving 2/3. The bound is the lower envelope of those lines, which makes it
+**concave** and piecewise linear. Three consequences:
+
+- Two slices pin a segment **exactly** — no need to scan — as long as
+  `upper_bound_phases` is the same phase at both.
+- A different phase at the two ends means there is a **kink** between them,
+  where the binding oxide changes. Bisect on `upper_bound_phases` to place it.
+- Interpolating linearly between two slices always lands **at or below** the
+  true boundary, never above it. Coarse sampling is therefore conservative: it
+  can understate how oxygen-rich the reservoir may be, but it cannot let you
+  claim a configuration is accessible when it is not.
+
+Which nitride oxidises first can change inside the N window for exactly this
+reason, and the slopes say why: the phase with the steeper slope wins at the
+N-poor end.
+
+
+
 You get a limit per compound, the decomposition at that limit, and the binding
 one:
 

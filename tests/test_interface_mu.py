@@ -414,6 +414,39 @@ class InterfaceMuTests(unittest.TestCase):
         with self.assertRaisesRegex(SafetyError, "cannot coexist"):
             hull_report(_QUATERNARY, ["TiN", "Si3N4"], "O", fixed_dmu={"N": -3})
 
+    def test_the_oxygen_boundary_is_piecewise_linear_with_a_kink(self) -> None:
+        """How to sample it: straight segments, and kinks where the binder changes.
+
+        Each oxide contributes one straight line in dmu(N) -- oxidising TiN
+        releases 1 N per 2 O, so its slope is 1/2, while Si3N4 releases 4 N per
+        6 O, giving 2/3. The bound is their lower envelope, so it is concave and
+        piecewise linear: two slices pin a segment exactly, and a kink appears
+        only where the phase that sets the bound changes.
+        """
+
+        def limit(dmu_n: float) -> tuple[float, list[str]]:
+            window = hull_report(
+                _QUATERNARY, ["TiN", "Si3N4"], "O", fixed_dmu={"N": dmu_n}
+            )["chemical_potential_window"]
+            return window["dmu_max_ev"], window["upper_bound_phases"]
+
+        rich, rich_by = limit(0.0)
+        mid, mid_by = limit(-1.0)
+        kink, kink_by = limit(-1.5)
+        poor, poor_by = limit(-2.0)
+        # TiO2 sets it near the N-rich end, at 1 N released per 2 O
+        self.assertEqual(rich_by, ["TiO2"])
+        self.assertAlmostEqual((mid - rich) / -1.0, 0.5, places=6)
+        # SiO2 takes over below the crossing, at 4 N per 6 O
+        self.assertEqual(poor_by, ["SiO2"])
+        self.assertAlmostEqual((poor - kink) / -0.5, 2.0 / 3.0, places=6)
+        self.assertEqual(kink_by, ["SiO2"])
+        self.assertAlmostEqual(kink, -6.0, places=6)
+        # concave, so interpolating between two slices under-estimates the
+        # bound rather than over-estimating it: sampling coarsely is safe
+        interpolated = rich + (poor - rich) * (1.5 / 2.0)
+        self.assertLess(interpolated, kink)
+
     def test_interface_count_metadata_and_explicit_override(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

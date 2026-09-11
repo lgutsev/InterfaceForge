@@ -47,6 +47,26 @@ def _pymatgen() -> dict[str, Any]:
     }
 
 
+def _linprog() -> Any:
+    """scipy.optimize.linprog, with the guided error every optional import gets.
+
+    The joint-coexistence window is a linear program, so scipy is needed for the
+    default --window hull. Neither pymatgen nor this project used to declare
+    it, which made the default path depend on scipy arriving transitively.
+    """
+
+    try:
+        from scipy.optimize import linprog
+    except ModuleNotFoundError as exc:  # pragma: no cover - needs a scipy-free env
+        raise DependencyError(
+            "The joint-coexistence window is solved as a linear program and needs "
+            "scipy; install interfaceforge[phases]. (--window pairwise needs "
+            "neither scipy nor pymatgen, but is an explicit approximation: it only "
+            "asks whether each cation's elemental phase precipitates.)"
+        ) from exc
+    return linprog
+
+
 def entries_from_phases(phases: Mapping[str, Mapping[str, Any]]) -> list[Any]:
     """pymatgen ``PDEntry`` list from the reference-phase blocks interface-mu reads.
 
@@ -252,8 +272,8 @@ def hull_chempot_window(
     insufficient: their other chemical potentials need not agree.
     """
     import numpy as np
-    from scipy.optimize import linprog
 
+    linprog = _linprog()
     api = _pymatgen()
     elements = list(hull["elements"])
     entries = list(hull["entries"])
