@@ -353,7 +353,7 @@ class InterfaceMuTests(unittest.TestCase):
             # ternary it must reproduce the pairwise formation-enthalpy bound
             self.assertAlmostEqual(hull["dmu_min_ev"], pairwise["dmu_min_ev"], places=6)
             self.assertAlmostEqual(hull["dmu_max_ev"], pairwise["dmu_max_ev"], places=6)
-            self.assertEqual(hull["binding_compound"], pairwise["binding_compound"])
+            self.assertEqual(hull["binding_compound"], "Si")
             self.assertEqual(hull["hull"]["unstable_phases"], [])
             self.assertEqual(hull["competing_stable_phases"], [])
 
@@ -367,6 +367,74 @@ class InterfaceMuTests(unittest.TestCase):
                 [("balanced", iface)], phases=phases, anion="N", n_interfaces=2,
             )["chemical_potential_window"]
             self.assertEqual(window["competing_stable_phases"], ["TiSi2"])
+
+    def test_joint_silicide_constraint_is_tighter_than_individual_projections(self) -> None:
+        phases = {k: v for k, v in _QUATERNARY.items()
+                  if k in {"TiN", "Si3N4", "N2", "Ti", "Si"}}
+        phases["TiSi2"] = {"composition": {"Ti": 1, "Si": 2}, "energy_ev": -23.0}
+        window = hull_report(phases, ["TiN", "Si3N4"], "N")["chemical_potential_window"]
+        # TiN + 2/3 Si3N4 -> TiSi2 + 11/3 N; solve at equality.
+        self.assertAlmostEqual(window["dmu_min_ev"], -17 / 22, places=9)
+        self.assertEqual(window["lower_bound_phases"], ["TiSi2"])
+        self.assertEqual(window["upper_bound_phases"], ["N2"])
+        self.assertGreater(window["dmu_min_ev"], max(
+            row["dmu_min_ev"] for row in window["per_compound"]))
+        # Independent thermodynamic check at both returned endpoints.
+        refs = {"Ti": -7, "Si": -5, "N": -8}
+        for point in window["endpoint_dmu_ev"].values():
+            for name, phase in phases.items():
+                value = sum(n * (point[el] + refs[el]) for el, n in phase["composition"].items())
+                self.assertLessEqual(value, phase["energy_ev"] + 1e-8)
+                if name in {"TiN", "Si3N4"}:
+                    self.assertAlmostEqual(value, phase["energy_ev"], places=8)
+        scaled = {name: {"composition": {el: 7 * n for el, n in phase["composition"].items()},
+                         "energy_ev": 7 * phase["energy_ev"]} for name, phase in phases.items()}
+        other = hull_report(scaled, ["TiN", "Si3N4"], "N")["chemical_potential_window"]
+        self.assertAlmostEqual(other["dmu_min_ev"], window["dmu_min_ev"], places=9)
+
+    def test_individually_stable_compounds_can_have_no_joint_window(self) -> None:
+        phases = {k: v for k, v in _QUATERNARY.items()
+                  if k in {"TiN", "Si3N4", "N2", "Ti", "Si"}}
+        phases["TiSiN"] = {"composition": {"Ti": 1, "Si": 1, "N": 1}, "energy_ev": -30}
+        with self.assertRaisesRegex(SafetyError, "cannot coexist"):
+            hull_report(phases, ["TiN", "Si3N4"], "N")
+
+    def test_fixed_nitrogen_changes_oxygen_limit(self) -> None:
+        rich = hull_report(_QUATERNARY, ["TiN", "Si3N4"], "O", fixed_dmu={"N": 0})
+        poor = hull_report(_QUATERNARY, ["TiN", "Si3N4"], "O", fixed_dmu={"N": -1})
+        self.assertAlmostEqual(rich["chemical_potential_window"]["dmu_max_ev"], -5.25)
+        self.assertAlmostEqual(poor["chemical_potential_window"]["dmu_max_ev"], -5.75)
+        self.assertIsNone(poor["chemical_potential_window"]["dmu_min_ev"])
+        self.assertEqual(poor["chemical_potential_window"]["upper_bound_phases"], ["TiO2"])
+        with tempfile.TemporaryDirectory() as temporary:
+            outputs = write_hull_reports(poor, temporary, _QUATERNARY)
+            report = Path(outputs["markdown"]).read_text()
+            self.assertIn("-5.75", report)
+            self.assertIn("'N': -1", report)
+        with self.assertRaisesRegex(SafetyError, "cannot coexist"):
+            hull_report(_QUATERNARY, ["TiN", "Si3N4"], "O", fixed_dmu={"N": -3})
+
+    def test_interface_count_metadata_and_explicit_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 9)], -135)
+            phases = _phases(root)
+            meta = [{"match": "N-*", "n_interfaces": 2, "stacking_axis": "c",
+                     "interfaces_equivalent": False}]
+            payload = interface_mu([("N-rich", iface)], phases=phases, interface_metadata=meta)
+            row = payload["interfaces"][0]
+            self.assertEqual(row["n_interfaces"], 2)
+            self.assertEqual(row["normalization_area_ang2"], 200)
+            self.assertIn("average over interfaces", row["energy_interpretation"])
+            other = interface_mu([("N-rich", iface)], phases=phases, interface_metadata=meta,
+                                 n_interfaces=4, interfaces_equivalent=True)["interfaces"][0]
+            for key in ("gamma0_j_per_m2", "slope_j_per_m2_per_ev"):
+                self.assertAlmostEqual(other["dft"][key], row["dft"][key] / 2)
+            self.assertIn("equivalence declared", other["energy_interpretation"])
+            with self.assertRaisesRegex(SafetyError, "specify a positive --n-interfaces"):
+                interface_mu([("N-rich", iface)], phases=phases)
+            write_reports(payload, root / "report")
+            self.assertIn("average over interfaces", (root / "report/interface_mu.md").read_text())
 
     def test_hull_names_the_known_phases_it_was_not_given(self) -> None:
         """An incomplete hull says so: its window is an upper limit, not the answer."""
@@ -441,7 +509,7 @@ class InterfaceMuTests(unittest.TestCase):
             )
             window = payload["chemical_potential_window"]
             self.assertAlmostEqual(window["dmu_min_ev"], -1.0, places=6)
-            self.assertEqual(window["binding_compound"], "TiN")
+            self.assertEqual(window["binding_compound"], "Ti2N")
             self.assertIn("Ti2N", window["competing_stable_phases"])
             self.assertNotIn("Ti2N (mp-8282)", window["missing_known_phases"])
             # and it stays out of the decomposition: the cell is still 4 TiN + 1 Si3N4
@@ -587,7 +655,7 @@ class InterfaceMuTests(unittest.TestCase):
             root = Path(temporary)
             slab = _run(root / "slab", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0, vacuum=True)
             with self.assertRaisesRegex(SafetyError, "free-surface structure"):
-                interface_mu([("slab", slab)], phases=_phases(root), anion="N")
+                interface_mu([("slab", slab)], phases=_phases(root), anion="N", n_interfaces=2)
 
     def test_mlip_committee_shifts_the_intercept_not_the_slope(self) -> None:
         def fake_mace(models, atoms_by_key, device):

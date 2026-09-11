@@ -584,6 +584,8 @@ def _normalize_interface_metadata(interfaces: Any) -> list[dict[str, Any]]:
             clean["stacking_axis"] = axis
         if entry.get("n_interfaces") is not None:
             try:
+                if isinstance(entry["n_interfaces"], bool) or not isinstance(entry["n_interfaces"], (int, str)):
+                    raise ValueError("interface count must be an integer")
                 n_interfaces = int(entry["n_interfaces"])
             except (TypeError, ValueError) as exc:
                 raise ConfigurationError(
@@ -594,6 +596,12 @@ def _normalize_interface_metadata(interfaces: Any) -> list[dict[str, Any]]:
                     f"validation.interfaces[{index}].n_interfaces must be positive"
                 )
             clean["n_interfaces"] = n_interfaces
+        if "interfaces_equivalent" in entry:
+            if type(entry["interfaces_equivalent"]) is not bool:
+                raise ConfigurationError(
+                    f"validation.interfaces[{index}].interfaces_equivalent must be a boolean"
+                )
+            clean["interfaces_equivalent"] = entry["interfaces_equivalent"]
         if "polar_termination" in entry:
             if not isinstance(entry["polar_termination"], bool):
                 raise ConfigurationError(

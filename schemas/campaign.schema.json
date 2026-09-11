@@ -140,6 +140,7 @@
               "match": {"type": "string", "minLength": 1},
               "stacking_axis": {"enum": ["a", "b", "c"]},
               "n_interfaces": {"type": "integer", "minimum": 1},
+              "interfaces_equivalent": {"type": "boolean"},
               "polar_termination": {"type": "boolean"},
               "orientation": {"type": "string"},
               "termination": {"type": "string"},

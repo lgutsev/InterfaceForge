@@ -5,8 +5,7 @@ The pairwise bound ``dmu_X >= max_C dH_f(C)/b_C`` in :mod:`interfaceforge.interf
 only asks whether each cation's *elemental* phase precipitates. That is the right
 answer for a binary, but in a real Ti-Si-N system the window can instead be cut
 by a competing ternary or a silicide (Ti5Si3, TiSi2, Ti2N, ...). Building the
-convex hull and intersecting the stability ranges of the compounds that actually
-form the interface answers it properly, and names the phase that binds each side.
+convex hull and enforcing simultaneous equilibrium of its constituent compounds answers it properly, and names the phase that binds each side.
 
 Energies must all come from **one consistent set of calculations** -- the same
 functional, cutoff, dispersion and k-point density as the interface. Materials
@@ -243,96 +242,131 @@ def hull_chempot_window(
     hull: Mapping[str, Any],
     compounds: Sequence[str],
     anion: str,
+    *,
+    fixed_dmu: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
-    """``dmu_anion`` range over which every named compound stays on the hull.
+    """Project the *joint* coexistence polytope onto one chemical potential.
 
-    The interface is a coexistence of its constituent compounds, so the window is
-    the intersection of their individual stability ranges. Values are relative to
-    the elemental reference (``dmu = 0`` at the pure anion phase), matching
-    :func:`interfaceforge.interface_mu.chemical_potential_window`.
+    Every constituent satisfies n.mu = E simultaneously; every supplied phase
+    satisfies n.mu <= E. Intersecting separately projected stability ranges is
+    insufficient: their other chemical potentials need not agree.
     """
+    import numpy as np
+    from scipy.optimize import linprog
 
     api = _pymatgen()
-    diagram = hull["diagram"]
-    element = api["Element"](anion)
-    by_formula = {row["phase"]: row["formula"] for row in hull["phases"]}
-    contains = {
-        name: anion in {str(el) for el in api["Composition"](formula).elements}
-        for name, formula in by_formula.items()
-        if name in compounds
-    }
-    missing = [name for name in compounds if name not in by_formula]
+    elements = list(hull["elements"])
+    entries = list(hull["entries"])
+    by_name = {entry.name: i for i, entry in enumerate(entries)}
+    fixed = dict(fixed_dmu or {})
+    if not compounds:
+        raise SafetyError("at least one constituent compound is required")
+    missing = set(compounds) - set(by_name)
     if missing:
-        raise SafetyError(f"compound {missing[0]!r} is not among the supplied phases")
-    if not any(contains.values()):
-        # pymatgen's range routine divides by the compound's amount of this
-        # element, so an anion-free compound would raise ZeroDivisionError; the
-        # meaningful quantity there is the one-sided oxidation limit instead
-        return open_element_limit(hull, compounds, anion)
-    if not all(contains.values()):
-        with_anion = sorted(n for n, has in contains.items() if has)
-        without = sorted(n for n, has in contains.items() if not has)
-        raise SafetyError(
-            f"compounds {with_anion} contain {anion} and {without} do not, so they "
-            f"have no common kind of bound: a compound containing {anion} has a "
-            f"two-sided stability range in dmu({anion}), while one without it has "
-            "only an upper (oxidation) limit. Query them in separate runs."
+        raise SafetyError(f"compounds {sorted(missing)} are not among the supplied phases")
+    if anion not in elements:
+        raise SafetyError(f"no elemental reference for {anion}")
+    if anion in fixed or set(fixed) - set(elements):
+        raise SafetyError("fixed_dmu must name other elements present in the hull")
+    if not all(np.isfinite(value) for value in fixed.values()):
+        raise SafetyError("fixed chemical potentials must be finite")
+    contains = [entries[by_name[name]].composition[anion] > 0 for name in compounds]
+    if not any(contains) and not fixed:
+        result = open_element_limit(hull, compounds, anion)
+        result["note"] += (
+            " This is an individual-stability projection, not a fixed nitrogen "
+            "reservoir slice. Use --fixed-dmu N=VALUE for joint coexistence at "
+            "a specified nitrogen chemical potential."
         )
-    # pymatgen returns absolute chemical potentials; shift to dmu = mu - mu0 so
-    # this matches interface_mu (0 at the elemental/molecular reference).
-    reference = float(diagram.el_refs[element].energy_per_atom)
-    by_phase = {row["phase"]: row for row in hull["phases"]}
-    per_compound: list[dict[str, Any]] = []
-    low, high = float("-inf"), float("inf")
-    low_by = high_by = None
+        return result
+    if any(contains) and not all(contains) and not fixed:
+        raise SafetyError(
+            "compounds with and without the open element have no common kind of bound "
+            "in this report; query separate runs or specify another reservoir with --fixed-dmu"
+        )
     for name in compounds:
-        if name not in by_phase:
-            raise SafetyError(f"compound {name!r} is not among the supplied phases")
-        if not by_phase[name]["stable"]:
-            raise SafetyError(
-                f"compound {name!r} is above the convex hull "
-                f"(e_above_hull = {by_phase[name]['e_above_hull_ev_per_atom']:.4f} eV/atom); "
-                "it cannot bound a chemical-potential window"
-            )
-        composition = api["Composition"](by_phase[name]["formula"])
-        ranges = diagram.get_chempot_range_stability_phase(composition, element)
-        span = ranges.get(element)
-        if span is None:
-            raise SafetyError(f"no {anion} chemical-potential range returned for {name!r}")
-        lo, hi = float(min(span)) - reference, float(max(span)) - reference
-        per_compound.append({"compound": name, "dmu_min_ev": lo, "dmu_max_ev": hi})
-        if lo > low:
-            low, low_by = lo, name
-        if hi < high:
-            high, high_by = hi, name
-    if low > high:
-        raise SafetyError(
-            f"the supplied compounds have no common {anion} chemical potential: "
-            f"{per_compound}. They cannot coexist, so this interface is not in "
-            "equilibrium with both reservoirs."
+        row = next(row for row in hull["phases"] if row["phase"] == name)
+        if not row["stable"]:
+            raise SafetyError(f"compound {name!r} is above the convex hull; it cannot coexist")
+    refs = np.array([
+        hull["diagram"].el_refs[api["Element"](el)].energy_per_atom for el in elements
+    ])
+    # Normalize each constraint per atom, so supercell size cannot set tolerance.
+    matrix = np.array([
+        [entry.composition[el] / entry.composition.num_atoms for el in elements]
+        for entry in entries
+    ])
+    formation = np.array([entry.energy_per_atom for entry in entries]) - matrix @ refs
+    objective = np.zeros(len(elements))
+    objective[elements.index(anion)] = 1.0
+
+    def solve(names: Sequence[str], sign: float) -> tuple[float | None, list[str], dict[str, float]]:
+        equality = [matrix[by_name[name]] for name in names]
+        values = [formation[by_name[name]] for name in names]
+        for el, value in fixed.items():
+            vector = np.zeros(len(elements))
+            vector[elements.index(el)] = 1.0
+            equality.append(vector)
+            values.append(value)
+        result = linprog(
+            sign * objective, A_ub=matrix, b_ub=formation,
+            A_eq=np.array(equality), b_eq=np.array(values),
+            bounds=[(None, None)] * len(elements), method="highs",
         )
-    elemental = {
-        row["phase"] for row in hull["phases"]
-        if len(api["Composition"](row["formula"]).elements) == 1
-    }
+        if result.status == 3:
+            return None, [], {}
+        if result.status == 2:
+            raise SafetyError(
+                f"the supplied compounds {list(names)} have no common chemical potentials "
+                f"with fixed dmu {fixed}; they cannot coexist"
+            )
+        if not result.success:
+            raise SafetyError(f"chemical-potential optimization failed: {result.message}")
+        # Dual multipliers identify bound-setting constraints, excluding the
+        # constituent equalities which are active over the entire interval.
+        active = sorted(
+            entry.name for i, entry in enumerate(entries)
+            if entry.name not in names
+            and not {str(el) for el in entry.composition.elements}.issubset(fixed)
+            and abs(result.ineqlin.marginals[i]) > 1e-8
+        )
+        value = float(result.x[elements.index(anion)])
+        if abs(value) < 1e-10:
+            value = 0.0
+        return value, active, dict(zip(elements, map(float, result.x), strict=True))
+
+    low, low_by, low_mu = solve(compounds, 1.0)
+    high, high_by, high_mu = solve(compounds, -1.0)
+    per_compound = []
+    for name in compounds:
+        lo, _, _ = solve([name], 1.0)
+        hi, _, _ = solve([name], -1.0)
+        per_compound.append({"compound": name, "dmu_min_ev": lo, "dmu_max_ev": hi})
     competing = [
         row["phase"] for row in hull["phases"]
-        if row["stable"] and row["phase"] not in compounds and row["phase"] not in elemental
+        if row["stable"] and row["phase"] not in compounds
+        and len(api["Composition"](row["formula"]).elements) > 1
     ]
     return {
         "anion": anion,
         "method": "convex-hull",
-        "mu_anion_reference_ev": reference,
+        "solver": "joint-coexistence-linear-program",
+        "fixed_dmu_ev": fixed,
+        "mu_anion_reference_ev": float(refs[elements.index(anion)]),
         "dmu_min_ev": low,
         "dmu_max_ev": high,
-        "dmu_min_set_by": low_by,
-        "dmu_max_set_by": high_by,
+        "dmu_min_set_by": ", ".join(low_by) or None,
+        "dmu_max_set_by": ", ".join(high_by) or None,
+        "lower_bound_phases": low_by,
+        "upper_bound_phases": high_by,
+        "endpoint_dmu_ev": {"lower": low_mu, "upper": high_mu},
         "per_compound": per_compound,
         "competing_stable_phases": competing,
         "note": (
-            f"dmu({anion}) range over which {list(compounds)} are simultaneously on the "
-            "convex hull, relative to the elemental reference. Competing phases on the "
-            f"hull that could cut it further: {competing or 'none'}."
+            f"Joint coexistence of {list(compounds)}: all constituent equalities "
+            "and every supplied phase inequality are enforced simultaneously. "
+            "Individual ranges are diagnostic projections, not the joint window. "
+            f"Fixed dmu (eV/atom): {fixed or 'none'}."
         ),
     }
 
@@ -341,11 +375,13 @@ def hull_report(
     phases: Mapping[str, Mapping[str, Any]],
     compounds: Sequence[str],
     anion: str,
+    *,
+    fixed_dmu: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     """Hull + window, with the non-serialisable pymatgen object dropped."""
 
     hull = build_hull(phases)
-    window = hull_chempot_window(hull, compounds, anion)
+    window = hull_chempot_window(hull, compounds, anion, fixed_dmu=fixed_dmu)
     missing = missing_known_phases(
         hull["elements"], [row["formula"] for row in hull["phases"]]
     )
@@ -564,6 +600,9 @@ def _hull_markdown(payload: Mapping[str, Any]) -> str:
     """Human-readable tables: the window or limit first, then every phase."""
 
     window = payload["chemical_potential_window"]
+    def bound(value: float | None, side: str) -> str:
+        return ("-inf" if side == "lower" else "+inf") if value is None else f"{value:.4f}"
+
     anion = window["anion"]
     limit = window["method"] == "grand-potential-open-element"
     lines = [
@@ -597,8 +636,8 @@ def _hull_markdown(payload: Mapping[str, Any]) -> str:
         lines += [
             "",
             "**Binding limit: dmu({}) <= {:.4f} eV, set by {}.** Above it the "
-            "coexistence of {} no longer holds, so every configuration in a study "
-            "that assumes it has to sit below this value.".format(
+            "individual stability of {} no longer holds. This is a necessary, "
+            "not sufficient, condition for joint coexistence at fixed nitrogen potential.".format(
                 anion, window["dmu_max_ev"], window["dmu_max_set_by"], compounds,
             ),
         ]
@@ -610,17 +649,18 @@ def _hull_markdown(payload: Mapping[str, Any]) -> str:
             "|---|---:|---:|",
         ]
         for row in window["per_compound"]:
-            lines.append("| {} | {:.4f} | {:.4f} |".format(
-                row["compound"], row["dmu_min_ev"], row["dmu_max_ev"]
+            lines.append("| {} | {} | {} |".format(
+                row["compound"], bound(row["dmu_min_ev"], "lower"), bound(row["dmu_max_ev"], "upper")
             ))
         lines += [
             "",
-            "**{:.4f} <= dmu({}) <= {:.4f} eV**, lower bound set by {}, upper by "
+            "**{} <= dmu({}) <= {} eV**, lower bound set by {}, upper by "
             "{}.".format(
-                window["dmu_min_ev"], anion, window["dmu_max_ev"],
+                bound(window["dmu_min_ev"], "lower"), anion, bound(window["dmu_max_ev"], "upper"),
                 window["dmu_min_set_by"], window["dmu_max_set_by"],
             ),
         ]
+    lines += ["", window["note"]]
     competing = window.get("competing_stable_phases") or []
     lines += [
         "",
@@ -716,8 +756,32 @@ def _write_hull_figures(
             paths["hull_" + suffix] = path
         plt.close(figure)
 
+    if window.get("fixed_dmu_ev"):
+        with plt.rc_context(style):
+            figure, axis = plt.subplots(figsize=(6.0, 2.4))
+            high = window["dmu_max_ev"]
+            low = window["dmu_min_ev"]
+            left = high - 3.0 if low is None else low
+            axis.barh(0, high - left, left=left, height=0.4, color="#0072B2")
+            if low is None:
+                axis.plot(left, 0, marker="<", color="#0072B2")
+                axis.text(left, -0.35, "unbounded below", fontsize=7)
+            axis.set_yticks([0], ["Joint coexistence"])
+            axis.set_xlabel(f"dmu({anion}) (eV/atom)")
+            axis.set_title(f"Fixed dmu: {window['fixed_dmu_ev']}; upper: {window['dmu_max_set_by']}")
+            axis.set_ylim(-0.7, 0.7)
+            for suffix in ("png", "svg", "pdf"):
+                path = out / ("phases_chempot." + suffix)
+                figure.savefig(path, dpi=300, bbox_inches="tight")
+                paths["chempot_" + suffix] = path
+            plt.close(figure)
+        return {key: str(value) for key, value in paths.items()}
+
     # 2. the dmu axis: one bar per compound, so the binding phase is visible
-    rows = window["per_compound"]
+    rows = list(window["per_compound"])
+    if not limit:
+        rows.append({"compound": "Joint coexistence", "dmu_min_ev": window["dmu_min_ev"],
+                     "dmu_max_ev": window["dmu_max_ev"]})
     with plt.rc_context(style):
         figure, axis = plt.subplots(figsize=(5.6, 0.55 * len(rows) + 1.7))
         if limit:

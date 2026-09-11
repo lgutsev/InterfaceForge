@@ -12,8 +12,9 @@ x_C = n_cation(C) / a_C        formula units of compound C in the cell
 
 **The slope in Δμ is exactly the stoichiometric imbalance.** A compensated cell
 has `Δn = 0`, zero slope, and a single chemical-potential-independent γ. A polar
-cell with `Δn ≠ 0` is a straight line across the window, and where two
-terminations cross, the stable termination changes.
+cell with `Δn ≠ 0` is a straight line across the window. Crossings compare
+whole interface cells; a termination-specific interpretation requires equivalent
+interfaces in each cell.
 
 This is the treatment of **Hao, Delley, Veprek & Stampfl, PRL 97, 086102 (2006)**
 for this exact system (TiN(111)/Si₃N₄), with the μ ↔ (T, p) mapping of
@@ -56,7 +57,8 @@ Each `--phase NAME=DIR` is a finished VASP run. The tool classifies them:
 one **compound per cation** (TiN, Si₃N₄) sets the reference energies; the
 **elemental anion molecule** (N₂) sets μ_X⁰ = E(N₂)/2 and the anion-rich limit;
 one **elemental cation per compound** (Ti, Si) bounds the anion-poor limit via
-ΔH_f(C)/b_C. The binding compound is reported.
+ΔH_f(C)/b_C in pairwise mode. The default hull mode also enforces every
+competing phase and reports the precipitating phase that sets each bound.
 
 Outputs: `interface_mu.{json,csv,md,png,svg,pdf}` — a γ vs Δμ_X plot, one line
 per interface, DFT solid with the MLIP committee spread as a band.
@@ -70,14 +72,58 @@ identical for DFT and every MLIP — only the intercept moves.
 `--allow-vacuum` skips the regime guard. Use it only knowing the result then
 folds two free-surface energies into γ and is not comparable to a periodic one.
 
+## Periodic interface normalization
+
+Pass the actual count with `--n-interfaces 2`, or supply it in
+`validation.interfaces` in the campaign. There is no assumed count. For this
+command, `match` patterns apply to the **LABEL** in `LABEL=DIR`:
+
+```yaml
+validation:
+  interfaces:
+    - match: "N-term"
+      n_interfaces: 2
+      stacking_axis: c
+      interfaces_equivalent: false
+```
+
+Explicit `--n-interfaces` and `--area-axis` override metadata.
+`--interfaces-equivalent` / `--no-interfaces-equivalent` overrides the equivalence
+metadata. Equivalence is a user declaration, not inferred from a termination
+label or the absence of vacuum. With two inequivalent interfaces, dividing by
+`2A` gives their average; one total energy cannot resolve the two separately.
+Unknown equivalence is also reported as an average. JSON, CSV and Markdown
+record the count, area, and interpretation.
+
+The slope uses the **whole-cell** excess, `Δn_N = N_N - N_Ti - 4N_Si/3`.
+Consequently, a compensated periodic cell has zero slope even when its two local
+terminations differ. The existing molecular DFT reference remains shared by
+DFT and MLIP evaluations.
+
 ## Phase diagrams (pymatgen)
 
 The Δμ window is bounded by whatever phase decomposes first. The pairwise bound
 `Δμ ≥ max_C ΔH_f(C)/b_C` only asks about each cation's *elemental* phase — right
 for a binary, but in Ti–Si–N the window can instead be cut by a silicide or a
 ternary. `--window hull` (the **default**) builds the convex hull over every
-`--phase` you supply and intersects the stability ranges of the compounds the
-interface is actually made of, naming the phase that binds each side.
+`--phase` and `--aux-phase` you supply. A linear program enforces **all constituent
+bulk equalities simultaneously** and every competing-phase inequality:
+
+```
+n_C · μ = E_C     for each constituent C
+n_P · μ ≤ E_P     for every supplied phase P
+```
+
+It minimizes and maximizes the requested chemical potential over that joint
+region. Intersecting separately projected compound ranges is insufficient:
+those ranges can require incompatible values of the other chemical potentials.
+The JSON records the bound-setting phases and the full elemental Δμ vector at
+each endpoint. Individual compound bars remain diagnostic; the plot includes a
+separate **Joint coexistence** bar.
+
+`--window hull` requires `interfaceforge[phases]`; it no longer silently falls
+back to pairwise bounds if pymatgen is unavailable. `--window pairwise` remains
+an explicit approximation.
 
 ```bash
 # which phases exist in the system (MP IDs; energies are NOT taken from MP)
@@ -204,7 +250,8 @@ shrunk from pymatgen's default, which collides once a binary edge carries more
 than two compounds -- the Ti-Si edge carries five.
 
 **`phases_chempot.{png,svg,pdf}`** is the figure to read the result off: one
-horizontal bar per compound over its stable dmu range, the intersection shaded,
+horizontal bar per compound over its individually projected dmu range, the joint
+coexistence range in its own bar and shaded,
 and the binding bound as a solid line. For an oxidation limit the bars run off
 the left edge with an arrow, marked *unbounded below*, and each is annotated with
 what that compound decomposes into at its limit.
@@ -234,6 +281,17 @@ iface phases hull --anion O --compound TiN --compound Si3N4 \
   --phase N2=Wadh/N2_gas --phase O2=Wadh/O2_gas \
   --phase Ti=Wadh/Ti_mp46 --phase Si=Wadh/Si_mp149
 ```
+
+Without a fixed nitrogen reservoir, this is an individual-stability diagnostic,
+not the joint coexistence slice needed to vary nitrogen and oxygen together.
+For that slice, add **`--fixed-dmu N=-1.0`** to the same command (all values are
+in eV per atom relative to the corresponding elemental reference). This uses the
+joint constraint solver, keeps TiN and Si3N4 in simultaneous equilibrium, and
+returns the oxygen bound at that nitrogen potential. Repeat at other nitrogen
+potentials to sample the boundary; do not reuse a single oxygen cutoff over the
+whole nitrogen window. An infeasible slice is refused. The figures and tables
+record the fixed reservoir. Oxygen-substituted interface energies still require
+a two-reservoir energy expression; this option computes phase stability only.
 
 You get a limit per compound, the decomposition at that limit, and the binding
 one:

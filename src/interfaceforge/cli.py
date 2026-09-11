@@ -494,6 +494,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
             allow_vacuum=args.allow_vacuum,
             allow_spin_mismatch=args.allow_spin_mismatch,
             window_method=args.window,
+            interface_metadata=(validation or {}).get("interfaces"),
+            interfaces_equivalent=args.interfaces_equivalent,
         )
         payload["outputs"] = write_interface_mu_reports(payload, args.output)
     elif args.validation == "interface-energy":
@@ -542,7 +544,16 @@ def cmd_phases(args: argparse.Namespace) -> int:
             "composition": phase["composition"],
             "energy_ev": phase["energy_ev"],
         }
-    payload = hull_report(phases, args.compounds, args.anion)
+    fixed = {}
+    for item in args.fixed_dmu:
+        el, sep, value = item.partition("=")
+        if not sep or not el.strip() or el.strip() in fixed:
+            raise SafetyError("--fixed-dmu expects unique ELEMENT=VALUE entries")
+        try:
+            fixed[el.strip()] = float(value)
+        except ValueError as exc:
+            raise SafetyError("--fixed-dmu value must be a number in eV/atom") from exc
+    payload = hull_report(phases, args.compounds, args.anion, fixed_dmu=fixed)
     if args.output:
         payload['outputs'] = write_phases_reports(payload, args.output, phases)
     _json(payload)
@@ -1654,6 +1665,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     phases_hull.add_argument("--anion", default="N")
     phases_hull.add_argument(
+        "--fixed-dmu", action="append", default=[], metavar="ELEMENT=EV",
+        help="Fix another chemical potential relative to its elemental reference "
+        "(eV/atom); e.g. --anion O --fixed-dmu N=-1 for a nitrogen reservoir slice",
+    )
+    phases_hull.add_argument(
         "--output", metavar="DIR",
         help="Also write phases_hull.{json,csv,md} plus the hull and dmu figures "
         "(png/svg/pdf) into DIR. Without it only the JSON goes to stdout",
@@ -1866,7 +1882,15 @@ def build_parser() -> argparse.ArgumentParser:
         "phase diagram over every --phase (rigorous; a competing silicide or ternary "
         "can cut it) or 'pairwise' uses each compound's own formation enthalpy",
     )
-    interface_mu_parser.add_argument("--n-interfaces", type=int, default=2)
+    interface_mu_parser.add_argument(
+        "--n-interfaces", type=int, default=None,
+        help="Actual interface count; required unless supplied by campaign metadata",
+    )
+    interface_mu_parser.add_argument(
+        "--interfaces-equivalent", action=argparse.BooleanOptionalAction, default=None,
+        help="Declare whether the periodic interfaces are equivalent; otherwise "
+        "report their average without assigning individual termination energies",
+    )
     interface_mu_parser.add_argument("--area-axis", choices=("a", "b", "c"))
     interface_mu_parser.add_argument(
         "--mace-model", action="append", default=[], dest="mace_models")

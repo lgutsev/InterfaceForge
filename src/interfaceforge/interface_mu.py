@@ -44,6 +44,7 @@ from typing import Any
 
 import numpy as np
 
+from .config import merge_interface_metadata
 from .errors import DependencyError, SafetyError
 from .phase_diagram import (
     MOLECULAR_MOMENT_PER_PAIR,
@@ -403,6 +404,8 @@ def _hull_window(
         "binding_compound": window["dmu_min_set_by"],
         "upper_bound_set_by": window["dmu_max_set_by"],
         "bounds": window["per_compound"],
+        "solver": window.get("solver"),
+        "endpoint_dmu_ev": window.get("endpoint_dmu_ev"),
         "competing_stable_phases": window["competing_stable_phases"],
         # surfaced here as well as under "hull": an omitted stable phase widens
         # the window, so it must not be a key the reader has to go looking for
@@ -539,7 +542,9 @@ def interface_mu(
     anion: str = "N",
     mace_models: Sequence[str] = (),
     deepmd_models: Sequence[str] = (),
-    n_interfaces: int = 2,
+    n_interfaces: int | None = None,
+    interface_metadata: Sequence[Mapping[str, Any]] | None = None,
+    interfaces_equivalent: bool | None = None,
     area_axis: str | None = None,
     device: str = "cpu",
     allow_vacuum: bool = False,
@@ -550,8 +555,10 @@ def interface_mu(
 
     if not entries:
         raise SafetyError("interface-mu needs at least one (label, directory) entry")
-    if n_interfaces < 1:
+    if n_interfaces is not None and (type(n_interfaces) is not int or n_interfaces < 1):
         raise SafetyError("n_interfaces must be a positive integer")
+    if interfaces_equivalent is not None and type(interfaces_equivalent) is not bool:
+        raise SafetyError("interfaces_equivalent must be a boolean")
     labels = [label for label, _ in entries]
     if len(set(labels)) != len(labels):
         raise SafetyError(f"duplicate interface label: {labels}")
@@ -570,18 +577,11 @@ def interface_mu(
     classified = _classify_phases(read, anion, auxiliary_names=auxiliary_phases)
     if window_method not in {"hull", "pairwise"}:
         raise SafetyError("window_method must be 'hull' or 'pairwise'")
-    window_note = None
     if window_method == "hull":
-        try:
-            window = _hull_window(read, classified, anion)
-        except DependencyError as exc:
-            window = chemical_potential_window(classified, anion)
-            window_note = f"convex hull unavailable ({exc}); fell back to the pairwise bound"
+        window = _hull_window(read, classified, anion)
     else:
         window = chemical_potential_window(classified, anion)
     window.setdefault("method", "pairwise-formation-enthalpy")
-    if window_note:
-        window["fallback"] = window_note
 
     rows: list[dict[str, Any]] = []
     atoms_by_key: dict[str, Any] = {
@@ -594,13 +594,29 @@ def interface_mu(
     for label, directory in entries:
         run = Path(directory).expanduser().resolve()
         atoms = _read_atoms(_structure_file(run))
+        meta = merge_interface_metadata(interface_metadata, label)
+        count = n_interfaces if n_interfaces is not None else meta.get("n_interfaces")
+        if type(count) is not int or count < 1:
+            raise SafetyError(
+                f"interface {label!r}: specify a positive --n-interfaces or "
+                "validation.interfaces n_interfaces matched to the entry label"
+            )
+        effective_axis = area_axis or meta.get("stacking_axis")
+        equivalent = interfaces_equivalent if interfaces_equivalent is not None else meta.get("interfaces_equivalent")
+        if equivalent is not None and type(equivalent) is not bool:
+            raise SafetyError("interfaces_equivalent metadata must be a boolean")
+        interpretation = (
+            "single-interface energy" if count == 1 else
+            "per-interface energy (equivalence declared by user)" if equivalent else
+            "average over interfaces; individual termination energies are unresolved"
+        )
         regime = require_regime(
-            atoms, BULK, f"interface {label!r}", axis=area_axis or "auto",
+            atoms, BULK, f"interface {label!r}", axis=effective_axis or "auto",
             allow_mismatch=allow_vacuum,
         )
         composition = _composition(atoms)
-        area, axis = _plane_area(np.array(atoms.cell.array, dtype=float), area_axis)
-        denom = n_interfaces * area
+        area, axis = _plane_area(np.array(atoms.cell.array, dtype=float), effective_axis)
+        denom = count * area
         decomposition = decompose(composition, classified, anion)
         energy = _dft_energy(run)
         row: dict[str, Any] = {
@@ -610,7 +626,11 @@ def interface_mu(
             "formula": _formula(composition),
             "interface_area_ang2": area,
             "area_axis": axis,
-            "n_interfaces": n_interfaces,
+            "n_interfaces": count,
+            "n_interfaces_source": "explicit" if n_interfaces is not None else "campaign-metadata",
+            "interfaces_equivalent": equivalent,
+            "energy_interpretation": interpretation,
+            "normalization_area_ang2": denom,
             "regime": regime,
             "decomposition": decomposition,
             "dft": {"ready": energy is not None, "energy_ev": energy},
@@ -619,7 +639,7 @@ def interface_mu(
         if energy is not None:
             line = gamma_line(energy, decomposition, classified, window, denom, anion)
             row["dft"].update(line)
-            row["dft"]["gamma_anion_rich_j_per_m2"] = gamma_at(line, 0.0)
+            row["dft"]["gamma_anion_rich_j_per_m2"] = gamma_at(line, window["dmu_max_ev"])
             if window["dmu_min_ev"] is not None:
                 row["dft"]["gamma_anion_poor_j_per_m2"] = gamma_at(line, window["dmu_min_ev"])
             dft_lines[label] = line
@@ -686,6 +706,7 @@ def interface_mu(
 
 _CSV_FIELDS = (
     "interface", "formula", "source", "stoichiometric", "anion_excess",
+    "n_interfaces", "interface_area_ang2", "energy_interpretation",
     "gamma0_j_per_m2", "slope_j_per_m2_per_ev", "gamma_anion_rich_j_per_m2",
     "gamma_anion_poor_j_per_m2", "committee_spread_j_per_m2", "delta_vs_dft_j_per_m2",
 )
@@ -694,13 +715,14 @@ _SOURCE_COLORS = {"dft": "#111111", "mace": "#0072B2", "deepmd": "#D55E00"}
 
 
 def _rows_for_csv(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    low = payload["chemical_potential_window"]["dmu_min_ev"]
+    window = payload["chemical_potential_window"]
+    low = window["dmu_min_ev"]
 
     def _pair(line: Mapping[str, float]) -> dict[str, Any]:
         return {
             "gamma0_j_per_m2": line["gamma0_j_per_m2"],
             "slope_j_per_m2_per_ev": line["slope_j_per_m2_per_ev"],
-            "gamma_anion_rich_j_per_m2": gamma_at(line, 0.0),
+            "gamma_anion_rich_j_per_m2": gamma_at(line, window["dmu_max_ev"]),
             "gamma_anion_poor_j_per_m2": gamma_at(line, low) if low is not None else None,
         }
 
@@ -708,6 +730,9 @@ def _rows_for_csv(payload: dict[str, Any]) -> list[dict[str, Any]]:
     for row in payload["interfaces"]:
         base = {
             "interface": row["label"],
+            "n_interfaces": row["n_interfaces"],
+            "interface_area_ang2": row["interface_area_ang2"],
+            "energy_interpretation": row["energy_interpretation"],
             "formula": row["formula"],
             "stoichiometric": row["decomposition"]["stoichiometric"],
             "anion_excess": row["decomposition"]["anion_excess"],
@@ -749,7 +774,7 @@ def _write_figure(payload: dict[str, Any], out: Path) -> dict[str, str]:
     rows = [row for row in payload["interfaces"] if row["dft"]["ready"] or row["mlip"]]
     if not rows:
         raise SafetyError("no interface has a finished energy to plot")
-    grid = np.linspace(low, 0.0, 64)
+    grid = np.linspace(low, window["dmu_max_ev"], 64)
     styles = ["-", "--", "-.", ":"]
     seen: set[str] = set()
 
@@ -779,9 +804,9 @@ def _write_figure(payload: dict[str, Any], out: Path) -> dict[str, str]:
                 if spread:
                     ax.fill_between(grid, values - spread, values + spread,
                                     color=colour, alpha=0.16, lw=0, zorder=1)
-        ax.set_xlim(low, 0.0)
+        ax.set_xlim(low, window["dmu_max_ev"])
         ax.set_xlabel(r"$\Delta\mu_{\mathrm{" + anion + r"}}$ (eV)")
-        ax.set_ylabel(r"$\gamma_{\mathrm{int}}$ (J m$^{-2}$)")
+        ax.set_ylabel(r"Mean $\gamma_{\mathrm{int}}$ (J m$^{-2}$)")
         ax.set_title("Grand-canonical interfacial energy", loc="left", fontweight="bold")
         ax.grid(color="#D1D5DB", linewidth=0.45, alpha=0.75)
         ax.set_axisbelow(True)
@@ -791,7 +816,7 @@ def _write_figure(payload: dict[str, Any], out: Path) -> dict[str, str]:
         ax.annotate(poor, xy=(low, 0.0), xycoords=("data", "axes fraction"),
                     xytext=(5, 5), textcoords="offset points", fontsize=7,
                     color="#6B7280", ha="left", va="bottom")
-        ax.annotate(anion + "-rich", xy=(0.0, 0.0), xycoords=("data", "axes fraction"),
+        ax.annotate(anion + "-rich", xy=(window["dmu_max_ev"], 0.0), xycoords=("data", "axes fraction"),
                     xytext=(-5, 5), textcoords="offset points", fontsize=7,
                     color="#6B7280", ha="right", va="bottom")
         names = {"dft": "DFT", "mace": "MACE committee", "deepmd": "DeePMD committee"}
@@ -835,8 +860,8 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
     anion = payload["anion"]
     low = window["dmu_min_ev"]
     window_line = (
-        "Window: {:.3f} <= dmu({}) <= 0 eV, bounded by {}; mu0({}) = {:.4f} eV from {}.".format(
-            low, anion, window["binding_compound"], anion,
+        "Window: {:.3f} <= dmu({}) <= {:.3f} eV, lower bound by {}; mu0({}) = {:.4f} eV from {}.".format(
+            low, anion, window["dmu_max_ev"], window["binding_compound"], anion,
             window["mu_anion_reference_ev"], window["anion_reference"],
         )
         if low is not None
@@ -889,6 +914,10 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
         "",
         window_line,
         "",
+        *[f"{row['label']}: n_interfaces={row['n_interfaces']}, "
+          f"A={row['interface_area_ang2']:.4f} A^2; {row['energy_interpretation']}."
+          for row in payload["interfaces"]],
+        "",
         *((incomplete_line, "") if incomplete_line else ()),
         *((spin_line, "") if spin_line else ()),
         f"| Interface | Source | dn({anion}) | gamma {anion}-rich | gamma {anion}-poor | slope | committee sigma | delta vs DFT |",
@@ -914,7 +943,8 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
         lines += [
             "",
             "> Not stoichiometric, so gamma genuinely depends on dmu({}): {}. Compare these "
-            "over the whole window; where two lines cross, the preferred termination changes. "
+            "over the whole window. Crossings compare complete cells; assigning a preferred "
+            "individual termination requires equivalent interfaces in each cell. "
             "A cell with dn = 0 has zero slope and one well-defined gamma.".format(
                 anion, ", ".join(payload["chemical_potential_dependent"])
             ),

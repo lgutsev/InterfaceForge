@@ -31,7 +31,8 @@ validation:
   interfaces:
     - match: "interface/*/*/N_Term/*"   # fnmatch against the leaf / system id
       stacking_axis: c                  # area plane for interface-energy
-      n_interfaces: 2                    # equivalent interfaces per periodic cell
+      n_interfaces: 2                    # actual interfaces per periodic cell
+      interfaces_equivalent: true         # user-verified, not inferred from labels
       orientation: "Si3N4(0001)/TiN(111)"
       termination: N
       polar_termination: true            # skip in interface-energy (see below)
