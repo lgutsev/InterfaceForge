@@ -184,6 +184,137 @@ def audit_molecular_spin(
     }
 
 
+K_B_EV_PER_K = 8.617333262e-5
+"""Boltzmann constant, for estimating how much thermal energy a snapshot carries."""
+
+
+def audit_thermal_state(name: str, run: Path, natoms: int) -> dict[str, Any]:
+    """Is this a 0 K energy, or one snapshot of a finite-temperature trajectory?
+
+    ``gamma`` subtracts bulk reference energies from the interface energy, so the
+    two have to describe the same thermodynamic state. A relaxed reference is at
+    its 0 K minimum; an MD snapshot sits above its own minimum by roughly
+    ``(3/2) N k_B T`` (equipartition puts half the thermal energy in the
+    potential). Subtract one from the other and that whole offset lands in
+    ``gamma``, scaled by the cell size rather than by anything physical.
+    """
+
+    from .vasp import parse_incar
+
+    parsed = parse_incar(run / "INCAR")
+    ibrion = parsed.get("IBRION")
+    nsw = parsed.get("NSW")
+
+    def _int(value: str | None) -> int | None:
+        try:
+            return int(float(str(value).split()[0]))
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    def _float(value: str | None) -> float | None:
+        try:
+            return float(str(value).split()[0])
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    ibrion_value = _int(ibrion)
+    nsw_value = _int(nsw)
+    tebeg = _float(parsed.get("TEBEG"))
+    molecular_dynamics = ibrion_value == 0 and (nsw_value or 0) > 0
+    temperature = tebeg if molecular_dynamics else None
+    if molecular_dynamics:
+        state = "molecular-dynamics"
+    elif ibrion_value in {1, 2, 3} and (nsw_value or 0) > 0:
+        state = "relaxation"
+    elif ibrion_value == -1 or nsw_value in {0, None}:
+        state = "static"
+    else:
+        state = "unknown"
+    offset = (
+        1.5 * natoms * K_B_EV_PER_K * temperature
+        if molecular_dynamics and temperature
+        else None
+    )
+    return {
+        "name": name,
+        "state": state,
+        "ibrion": ibrion_value,
+        "nsw": nsw_value,
+        "tebeg_k": tebeg,
+        "thermostat": parsed.get("SMASS") or parsed.get("MDALGO"),
+        "zero_kelvin": state in {"static", "relaxation"},
+        "estimated_thermal_energy_ev": offset,
+        "note": (
+            f"IBRION=0 with NSW={nsw_value}: this is one frame of an MD "
+            f"trajectory at {temperature:.0f} K, carrying roughly "
+            f"{offset:.2f} eV of thermal energy above its own 0 K minimum "
+            f"((3/2) N k_B T for N={natoms})"
+            if molecular_dynamics and offset is not None
+            else f"{state} run: a 0 K energy"
+            if state in {"static", "relaxation"}
+            else f"could not tell the thermodynamic state from IBRION={ibrion!r}, "
+            f"NSW={nsw!r}; check it by hand"
+        ),
+    }
+
+
+def check_thermal_consistency(
+    interfaces: Sequence[Mapping[str, Any]],
+    references: Sequence[Mapping[str, Any]],
+    denominators: Mapping[str, float],
+    *,
+    strict: bool = True,
+) -> dict[str, Any]:
+    """Refuse an MD interface energy measured against 0 K bulk references."""
+
+    hot = [row for row in interfaces if row["state"] == "molecular-dynamics"]
+    cold_references = [row for row in references if row["zero_kelvin"]]
+    payload: dict[str, Any] = {
+        "interfaces": list(interfaces),
+        "reference_phases": list(references),
+        "consistent": not (hot and cold_references),
+    }
+    if not hot or not cold_references:
+        payload["note"] = (
+            "interface and reference energies describe the same thermodynamic "
+            "state"
+            if payload["consistent"]
+            else "could not establish the thermodynamic state of every run"
+        )
+        return payload
+    worst = []
+    for row in hot:
+        offset = row.get("estimated_thermal_energy_ev")
+        denominator = denominators.get(row["name"])
+        if offset is None or not denominator:
+            continue
+        worst.append((row["name"], offset / denominator * EV_A2_TO_J_M2))
+    estimate = (
+        "; ".join(f"{name}: about {value:.2f} J/m^2 of it" for name, value in worst)
+        if worst
+        else "magnitude not estimable"
+    )
+    message = (
+        "thermodynamic state mismatch: {} came from molecular dynamics while the "
+        "reference phases {} are 0 K energies. gamma subtracts one from the other, "
+        "so the snapshot's thermal energy lands in gamma as a spurious positive "
+        "offset that scales with cell size, not with the interface ({}). Either "
+        "use relaxed 0 K interface cells, or MD-average both sides consistently "
+        "with `iface validate interface-energy`. Pass allow_thermal_mismatch to "
+        "proceed anyway and keep the warning in the report.".format(
+            [row["name"] for row in hot],
+            [row["name"] for row in cold_references],
+            estimate,
+        )
+    )
+    if strict:
+        raise SafetyError(message)
+    payload["note"] = message
+    payload["status"] = "OVERRIDDEN"
+    payload["estimated_offset_j_per_m2"] = dict(worst)
+    return payload
+
+
 def _read_phase(
     name: str,
     directory: str | Path,
@@ -223,6 +354,7 @@ def _read_phase(
             if molecular
             else None
         ),
+        "thermal": audit_thermal_state(name, run, int(sum(composition.values()))),
         "regime": regime,
         "atoms": atoms,
     }
@@ -549,6 +681,7 @@ def interface_mu(
     device: str = "cpu",
     allow_vacuum: bool = False,
     allow_spin_mismatch: bool = False,
+    allow_thermal_mismatch: bool = False,
     window_method: str = "hull",
 ) -> dict[str, Any]:
     """gamma(dmu_anion) for one or more vacuum-free periodic interface cells."""
@@ -589,6 +722,7 @@ def interface_mu(
     }
     decompositions: dict[str, Any] = {}
     denominators: dict[str, float] = {}
+    thermal_states: dict[str, dict[str, Any]] = {}
     dft_lines: dict[str, dict[str, float]] = {}
 
     for label, directory in entries:
@@ -615,6 +749,9 @@ def interface_mu(
             allow_mismatch=allow_vacuum,
         )
         composition = _composition(atoms)
+        thermal_states[label] = audit_thermal_state(
+            label, run, int(sum(composition.values()))
+        )
         area, axis = _plane_area(np.array(atoms.cell.array, dtype=float), effective_axis)
         denom = count * area
         decomposition = decompose(composition, classified, anion)
@@ -630,6 +767,7 @@ def interface_mu(
             "n_interfaces_source": "explicit" if n_interfaces is not None else "campaign-metadata",
             "interfaces_equivalent": equivalent,
             "energy_interpretation": interpretation,
+            "thermal_state": thermal_states[label]["state"],
             "normalization_area_ang2": denom,
             "regime": regime,
             "decomposition": decomposition,
@@ -670,8 +808,15 @@ def interface_mu(
         for family, blocks in families.items():
             row["mlip"][family] = blocks[row["label"]]
 
+    thermal = check_thermal_consistency(
+        [thermal_states[row["label"]] for row in rows],
+        [phase["thermal"] for phase in read.values()],
+        denominators,
+        strict=not allow_thermal_mismatch,
+    )
     unbalanced = [row["label"] for row in rows if not row["decomposition"]["stoichiometric"]]
     return {
+        "thermal_consistency": thermal,
         "schema_version": 1,
         "quantity": QUANTITY,
         "regime": BULK,
@@ -706,7 +851,7 @@ def interface_mu(
 
 _CSV_FIELDS = (
     "interface", "formula", "source", "stoichiometric", "anion_excess",
-    "n_interfaces", "interface_area_ang2", "energy_interpretation",
+    "n_interfaces", "interface_area_ang2", "energy_interpretation", "thermal_state",
     "gamma0_j_per_m2", "slope_j_per_m2_per_ev", "gamma_anion_rich_j_per_m2",
     "gamma_anion_poor_j_per_m2", "committee_spread_j_per_m2", "delta_vs_dft_j_per_m2",
 )
@@ -733,6 +878,7 @@ def _rows_for_csv(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "n_interfaces": row["n_interfaces"],
             "interface_area_ang2": row["interface_area_ang2"],
             "energy_interpretation": row["energy_interpretation"],
+            "thermal_state": row["thermal_state"],
             "formula": row["formula"],
             "stoichiometric": row["decomposition"]["stoichiometric"],
             "anion_excess": row["decomposition"]["anion_excess"],

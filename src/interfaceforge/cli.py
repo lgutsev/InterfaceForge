@@ -493,6 +493,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             device=args.device,
             allow_vacuum=args.allow_vacuum,
             allow_spin_mismatch=args.allow_spin_mismatch,
+            allow_thermal_mismatch=args.allow_thermal_mismatch,
             window_method=args.window,
             interface_metadata=(validation or {}).get("interfaces"),
             interfaces_equivalent=args.interfaces_equivalent,
@@ -1874,6 +1875,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Accept a molecular reference whose spin state is wrong (an "
         "unpolarised O2). Off by default: a non-triplet O2 is ~1 eV too high and "
         "mu_O is the zero of the whole chemical-potential scale",
+    )
+    interface_mu_parser.add_argument(
+        "--allow-thermal-mismatch", action="store_true",
+        help="Accept interface energies from molecular dynamics measured against "
+        "0 K bulk references. Off by default: the snapshot's thermal energy "
+        "lands in gamma as an offset scaling with cell size. Prefer relaxed 0 K "
+        "cells, or MD-average both sides with `iface validate interface-energy`",
     )
     interface_mu_parser.add_argument("--anion", default="N", help="Shared anion (default N)")
     interface_mu_parser.add_argument(

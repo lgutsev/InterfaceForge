@@ -72,6 +72,45 @@ identical for DFT and every MLIP — only the intercept moves.
 `--allow-vacuum` skips the regime guard. Use it only knowing the result then
 folds two free-surface energies into γ and is not comparable to a periodic one.
 
+## Thermodynamic state: 0 K cells against 0 K references
+
+γ subtracts bulk reference energies from the interface energy, so both sides have
+to describe the same thermodynamic state. A reference relaxed with `ISIF=3` sits
+at its 0 K minimum. One frame of an MD trajectory sits **above** its own minimum
+by roughly `(3/2) N k_B T` — equipartition puts half the thermal energy into the
+potential. Subtract the first from the second and that entire offset lands in γ,
+scaled by how many atoms are in the cell rather than by anything about the
+interface.
+
+At 300 K that is 0.039 eV/atom, so a 500-atom cell with 2A = 300 Å² carries about
+**1 J/m² of spurious γ**. The offset is positive and roughly proportional to
+N/(2A), so it inflates every termination in a family by a similar amount: a
+*crossing* between two same-sized cells survives it, but no absolute γ does.
+
+`interface-mu` reads `IBRION`, `NSW` and `TEBEG` from each run and refuses the
+mixture, naming the estimated J/m² at stake:
+
+```
+thermodynamic state mismatch: ['N-term'] came from molecular dynamics while the
+reference phases ['TiN', 'Si3N4', ...] are 0 K energies ... about 1.04 J/m^2 of it
+```
+
+`--allow-thermal-mismatch` proceeds and keeps the warning in the report and the
+`thermal_state` column in the CSV. Two clean ways out instead:
+
+- **Relax the interface cells** (`IBRION=2`, `ISIF=2` to keep the MD cell shape,
+  or `ISIF=3` if you want the cell free) and use those energies here. This is
+  the route for a 0 K γ(Δμ) against these references.
+- **MD-average both sides** with `iface validate interface-energy`, which
+  averages interface and bulk trajectories consistently, so the thermal terms
+  cancel instead of accumulating.
+
+Watch for a second, quieter version of the same problem: an MD cell is usually
+held at a fixed lattice constant, while the references were relaxed. The elastic
+energy of both slabs at that fixed cell then sits in γ too. For a coherent
+interface that strain is physically real, but it belongs in the discussion as
+its own term, not silently inside γ_int.
+
 ## Periodic interface normalization
 
 Pass the actual count with `--n-interfaces 2`, or supply it in

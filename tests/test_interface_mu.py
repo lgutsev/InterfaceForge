@@ -9,6 +9,7 @@ from unittest.mock import patch
 from interfaceforge.errors import SafetyError
 from interfaceforge.interface_mu import (
     audit_molecular_spin,
+    audit_thermal_state,
     gamma_at,
     interface_mu,
     total_magnetization,
@@ -251,6 +252,92 @@ class OpenElementLimitTests(unittest.TestCase):
         self.assertEqual(window["method"], "convex-hull")
         self.assertIsNotNone(window["dmu_min_ev"])
         self.assertEqual(window["dmu_max_ev"], 0.0)
+
+
+class ThermalStateTests(unittest.TestCase):
+    """An MD snapshot and a relaxed bulk are not the same thermodynamic state."""
+
+    @staticmethod
+    def _as_md(run: Path, temperature: float = 300.0, steps: int = 2000) -> Path:
+        (run / "INCAR").write_text(
+            f"IBRION = 0\nNSW = {steps}\nTEBEG = {temperature}\nSMASS = -1\nPOTIM = 1.0\n",
+            encoding="utf-8",
+        )
+        return run
+
+    def test_an_md_interface_against_relaxed_references_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = self._as_md(
+                _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            )
+            with self.assertRaises(SafetyError) as caught:
+                interface_mu(
+                    [("md", iface)], phases=_phases(root), anion="N", n_interfaces=2,
+                )
+            message = str(caught.exception)
+            self.assertIn("thermodynamic state mismatch", message)
+            self.assertIn("molecular dynamics", message)
+            self.assertIn("J/m^2", message)          # says how much it is worth
+            self.assertIn("interface-energy", message)  # and what to use instead
+
+    def test_the_estimate_scales_with_atom_count_and_temperature(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cold = audit_thermal_state(
+                "static", _run(root / "static", [("Ti", 4), ("N", 4)], -74.0), 8
+            )
+            self.assertEqual(cold["state"], "static")
+            self.assertTrue(cold["zero_kelvin"])
+            self.assertIsNone(cold["estimated_thermal_energy_ev"])
+            hot = audit_thermal_state(
+                "md", self._as_md(_run(root / "md", [("Ti", 4), ("N", 4)], -74.0)), 300
+            )
+            self.assertEqual(hot["state"], "molecular-dynamics")
+            self.assertFalse(hot["zero_kelvin"])
+            self.assertEqual(hot["tebeg_k"], 300.0)
+            # (3/2) N k_B T = 1.5 * 300 * 8.617e-5 * 300 K
+            self.assertAlmostEqual(
+                hot["estimated_thermal_energy_ev"], 1.5 * 300 * 8.617333262e-5 * 300.0,
+                places=6,
+            )
+            twice = audit_thermal_state(
+                "hotter",
+                self._as_md(_run(root / "hotter", [("Ti", 4), ("N", 4)], -74.0), 600.0),
+                300,
+            )
+            self.assertAlmostEqual(
+                twice["estimated_thermal_energy_ev"],
+                2 * hot["estimated_thermal_energy_ev"], places=6,
+            )
+
+    def test_a_relaxation_counts_as_zero_kelvin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = _run(root / "relax", [("Ti", 4), ("N", 4)], -74.0)
+            (run / "INCAR").write_text(
+                "IBRION = 2\nNSW = 60\nISIF = 3\n", encoding="utf-8"
+            )
+            audit = audit_thermal_state("relax", run, 8)
+            self.assertEqual(audit["state"], "relaxation")
+            self.assertTrue(audit["zero_kelvin"])
+
+    def test_the_override_keeps_the_warning_and_the_estimate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            iface = self._as_md(
+                _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 8)], -128.0)
+            )
+            payload = interface_mu(
+                [("md", iface)], phases=_phases(root), anion="N", n_interfaces=2,
+                allow_thermal_mismatch=True,
+            )
+            thermal = payload["thermal_consistency"]
+            self.assertFalse(thermal["consistent"])
+            self.assertEqual(thermal["status"], "OVERRIDDEN")
+            self.assertGreater(thermal["estimated_offset_j_per_m2"]["md"], 0.0)
+            self.assertEqual(payload["interfaces"][0]["thermal_state"],
+                             "molecular-dynamics")
 
 
 class MolecularSpinTests(unittest.TestCase):
