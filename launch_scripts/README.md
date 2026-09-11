@@ -54,6 +54,20 @@ environment paths, wall time, job name, executable, and resource counts before r
   and write backend-neutral JSON partials. The DeePMD job prefers each member's
   frozen export but can evaluate a valid PyTorch `model.ckpt.pt` directly when
   export has not completed.
+- `interface_mu_deepmd.sbatch`: gamma(dmu_N) for **vacuum-free periodic**
+  interface cells, DFT against a DeePMD committee. The vacuum-branch counterpart
+  is `separation_energy_deepmd.sbatch`; the two branches refuse each other's
+  structures, so pick by whether the cell has a free surface. Batch-only because
+  deepmd-kit lives inside the module's Apptainer image and every build on this
+  system is `-gpu`, so gpu2 with `--gres=gpu:1` is the only route. Driven by
+  `IFACE_MU_ENTRIES_FILE` / `IFACE_MU_PHASES_FILE` / `IFACE_MU_AUX_FILE` lists of
+  `NAME=DIR` lines; it resolves each against the campaign root, requires a
+  readable `OUTCAR`, rejects training checkpoints, binds every filesystem root
+  the container needs, and prints a per-structure meV/atom breakdown at the end.
+  If the container lacks pymatgen/scipy, `IFACE_MU_EXTRA="--window pairwise"`
+  gives a bit-identical MLIP audit -- `gamma0` and `delta_vs_dft_j_per_m2` do not
+  depend on the window -- and the real window comes from a login-node
+  `iface phases hull`.
 - `freeze_missing_deepmd_dpa2.sbatch`: idempotent four-member array job that
   exports missing DPA-2 `frozen_model.pth` files and validates each through
   DeePMD's inference API; existing exports are not overwritten.
