@@ -54,6 +54,17 @@ environment paths, wall time, job name, executable, and resource counts before r
   and write backend-neutral JSON partials. The DeePMD job prefers each member's
   frozen export but can evaluate a valid PyTorch `model.ckpt.pt` directly when
   export has not completed.
+- `submit_interface_mu.sh`: login-node submitter and preflight for the
+  gamma(dmu) MLIP audit. Derives the checkout from its own location, so there is
+  no `INTERFACEFORGE_ROOT` to set or get wrong -- invoke it by path from the
+  campaign root. `--dry-run` runs the *same* `ifmu_inputs` preflight the job
+  runs (shared via `interface_mu_common.sh`), so a pass is not a weaker check:
+  it resolves every `NAME=DIR`, requires a readable `OUTCAR`, rejects training
+  checkpoints, and refuses a phase list too short to carry one compound per
+  cation. It also notes -- without blocking -- an MD interface cell and an
+  unstated `--n-interfaces`.
+- `interface_mu_common.sh`: `ifmu_read_pairs` / `ifmu_committee` /
+  `ifmu_inputs`, shared by the submitter and the job.
 - `interface_mu_deepmd.sbatch`: gamma(dmu_N) for **vacuum-free periodic**
   interface cells, DFT against a DeePMD committee. The vacuum-branch counterpart
   is `separation_energy_deepmd.sbatch`; the two branches refuse each other's

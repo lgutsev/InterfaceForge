@@ -44,6 +44,7 @@ set -euo pipefail
 CAMP="${INTERFACE_MU_CAMPAIGN_ROOT:-${SLURM_SUBMIT_DIR:?Submit this script with sbatch}}"
 REPO_ROOT="${INTERFACEFORGE_ROOT:?Set INTERFACEFORGE_ROOT to the InterfaceForge checkout}"
 source "$REPO_ROOT/launch_scripts/separation_energy_common.sh"
+source "$REPO_ROOT/launch_scripts/interface_mu_common.sh"
 BOOTSTRAP="$REPO_ROOT/launch_scripts/run_interfaceforge_module.py"
 sep_file "$BOOTSTRAP"
 CAMP="$(cd -- "$CAMP" && pwd -P)"
@@ -53,70 +54,10 @@ ANION="${IFACE_MU_ANION:-N}"
 N_INTERFACES="${IFACE_MU_N_INTERFACES:-2}"
 DEEPMD_MODULE="${DEEPMD_MODULE:-deepmd-kit/r9.3-deepmd3.2.0.b.0-gpu}"
 
-# --- read the NAME=DIR / LABEL=DIR lists, resolving and checking every dir ---
-# Populates the named array plus PATHS_SEEN, which feeds APPTAINER_BIND.
-PATHS_SEEN=()
-# Populates the global PAIRS array; callers copy it. Deliberately not a
-# nameref (local -n): that needs bash 4.3, and RHEL7 login nodes ship 4.2.
-read_pairs() {
-    local file="$1" flag="$2" line name dir
-    PAIRS=()
-    sep_file "$file" || return 2
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ -n "${line//[[:space:]]/}" ]] || continue
-        [[ "$line" != \#* ]] || continue
-        name="${line%%=*}"
-        dir="${line#*=}"
-        [[ "$name" != "$line" && -n "$name" && -n "$dir" ]] || {
-            echo "ERROR: $file: expected NAME=DIR, got: $line" >&2
-            return 2
-        }
-        [[ "$dir" = /* ]] || dir="$CAMP/$dir"
-        [[ -d "$dir" ]] || { echo "ERROR: $file: no such directory: $dir" >&2; return 2; }
-        dir="$(cd -- "$dir" && pwd -P)"
-        sep_file "$dir/OUTCAR" || {
-            echo "  ($name has no readable OUTCAR; interface-mu needs finished runs)" >&2
-            return 2
-        }
-        PATHS_SEEN+=("$dir")
-        if [[ -n "$flag" ]]; then PAIRS+=("$flag" "$name=$dir"); else PAIRS+=("$name=$dir"); fi
-    done < "$file"
-    (( ${#PAIRS[@]} )) || { echo "ERROR: $file has no entries" >&2; return 2; }
-}
-
-read_pairs "${IFACE_MU_ENTRIES_FILE:?Set IFACE_MU_ENTRIES_FILE}" ""
-ENTRY_ARGS=("${PAIRS[@]}")
-read_pairs "${IFACE_MU_PHASES_FILE:?Set IFACE_MU_PHASES_FILE}" --phase
-PHASE_ARGS=("${PAIRS[@]}")
-AUX_ARGS=()
-if [[ -n "${IFACE_MU_AUX_FILE:-}" ]]; then
-    read_pairs "$IFACE_MU_AUX_FILE" --aux-phase
-    AUX_ARGS=("${PAIRS[@]}")
-fi
-
-# --- the committee: frozen inference exports only, never checkpoints ---
-COMMITTEE_ROOT="${DEEPMD_COMMITTEE_ROOT:-$CAMP/models/deepmd/dpa2_ft}"
-[[ "$COMMITTEE_ROOT" = /* ]] || COMMITTEE_ROOT="$CAMP/$COMMITTEE_ROOT"
-[[ -d "$COMMITTEE_ROOT" ]] || { echo "ERROR: no committee at $COMMITTEE_ROOT" >&2; exit 2; }
-COMMITTEE_ROOT="$(cd -- "$COMMITTEE_ROOT" && pwd -P)"
-MODEL_ARGS=()
-failed=0
-for member in ${DEEPMD_COMMITTEE_MEMBERS:-000 001 002 003}; do
-    model="$COMMITTEE_ROOT/model_$member/frozen_model.pth"
-    if ! sep_file "$model"; then
-        echo "ERROR: member $member is not a frozen inference export: $model" >&2
-        failed=1
-        continue
-    fi
-    PATHS_SEEN+=("$model")
-    MODEL_ARGS+=(--deepmd-model "$model")
-done
-(( ! failed )) || {
-    echo "Freeze the missing members before auditing; a training checkpoint is not deployable." >&2
-    exit 2
-}
-echo "Committee: ${#MODEL_ARGS[@]} members from $COMMITTEE_ROOT" >&2
-(( ${#MODEL_ARGS[@]} >= 2 )) || echo "WARNING: fewer than two members: committee_spread will be 0" >&2
+# The input preflight lives in interface_mu_common.sh so submit_interface_mu.sh
+# --dry-run validates exactly what this job will do, rather than a weaker copy.
+ifmu_inputs
+echo "Committee: ${#MODEL_ARGS[@]} model args from $IFMU_COMMITTEE_ROOT" >&2
 
 EXTRA=()
 [[ -z "${IFACE_MU_AREA_AXIS:-}" ]] || EXTRA+=(--area-axis "$IFACE_MU_AREA_AXIS")
@@ -134,7 +75,7 @@ export APPTAINERENV_PYTHONPATH="$PYTHONPATH"
 export SINGULARITYENV_PYTHONPATH="$PYTHONPATH"
 export APPTAINERENV_PYTHONUNBUFFERED=1
 export SINGULARITYENV_PYTHONUNBUFFERED=1
-BIND_ROOTS="$(sep_bind_roots "$REPO_ROOT" "$CAMP" "$OUTPUT" "${PATHS_SEEN[@]}")"
+BIND_ROOTS="$(sep_bind_roots "$REPO_ROOT" "$CAMP" "$OUTPUT" "${IFMU_PATHS[@]}")"
 if [[ -n "$BIND_ROOTS" ]]; then
     export APPTAINER_BIND="${APPTAINER_BIND:+$APPTAINER_BIND,}$BIND_ROOTS"
     export SINGULARITY_BIND="${SINGULARITY_BIND:+$SINGULARITY_BIND,}$BIND_ROOTS"
