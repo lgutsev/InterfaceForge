@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import re
 from collections.abc import Collection, Mapping, Sequence
 from math import gcd
@@ -315,6 +316,140 @@ def check_thermal_consistency(
     return payload
 
 
+CANCELLATION_WARN = 0.5
+"""Below this, |offset| is small only because larger terms cancelled."""
+
+
+def summarize_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """One place to read the verdict, and an ordered cascade of what to do.
+
+    Built from the payload alone, so a downstream step derives its message from
+    this object rather than restating the diagnosis. Hints are ordered
+    most-specific-cause-first and each names a concrete next action; a passing
+    run still gets its evidence published, and an unrun check reports
+    NOT_CHECKED rather than being elided into PASS.
+    """
+
+    checks: dict[str, str] = {}
+    hints: list[str] = []
+
+    thermal = payload.get("thermal_consistency") or {}
+    if thermal.get("status") == "OVERRIDDEN":
+        checks["thermal_state"] = "OVERRIDDEN"
+        offsets = thermal.get("estimated_offset_j_per_m2") or {}
+        worst = max(offsets.values()) if offsets else None
+        hints.append(
+            "An MD interface energy was accepted against 0 K references"
+            + (f" (about {worst:.2f} J/m^2 of spurious gamma)" if worst else "")
+            + ". The MLIP offset below is unaffected -- both legs are evaluated "
+            "on the same structure -- but no ABSOLUTE gamma from this run is "
+            "publishable. Relax the cells, or MD-average both sides with "
+            "`iface validate interface-energy`."
+        )
+    elif thermal:
+        checks["thermal_state"] = "PASS" if thermal.get("consistent") else "CHECK"
+
+    spins = [
+        phase["spin"] for phase in payload.get("reference_phases", {}).values()
+        if phase.get("spin")
+    ]
+    if spins:
+        worst_spin = next(
+            (row for row in spins if row["status"] not in {"PASS", "NOT_CHECKED"}),
+            None,
+        )
+        checks["molecular_reference_spin"] = (
+            worst_spin["status"] if worst_spin
+            else ("NOT_CHECKED" if all(r["status"] == "NOT_CHECKED" for r in spins)
+                  else "PASS")
+        )
+        if worst_spin:
+            hints.append(
+                f"The {worst_spin['element']} reference is {worst_spin['status']}: "
+                f"{worst_spin['note']} mu0 is the zero of the chemical-potential "
+                "scale, so this shifts every gamma and the whole window with it."
+            )
+    else:
+        checks["molecular_reference_spin"] = "NOT_CHECKED"
+
+    missing = (payload.get("chemical_potential_window") or {}).get(
+        "missing_known_phases"
+    ) or []
+    checks["hull_completeness"] = "CHECK" if missing else "PASS"
+    if missing:
+        hints.append(
+            f"The hull was built without {list(missing)}, so the window is an "
+            "upper limit rather than the window. This does not touch the MLIP "
+            "offset, which is independent of the window."
+        )
+
+    families = 0
+    for row in payload.get("interfaces", []):
+        for family, block in (row.get("mlip") or {}).items():
+            families += 1
+            label = row["label"]
+            reconstruction = block.get("offset_reconstruction") or {}
+            ratio = reconstruction.get("cancellation_ratio")
+            terms = reconstruction.get("terms") or []
+            dominant = terms[0] if terms else None
+            spread = block.get("committee_spread_j_per_m2") or 0.0
+            delta = abs(block.get("delta_vs_dft_j_per_m2") or 0.0)
+            if ratio is not None and ratio < CANCELLATION_WARN and dominant:
+                hints.append(
+                    f"{label}/{family}: delta_vs_dft is small only because the "
+                    f"terms cancelled (cancellation_ratio {ratio:.2f}). The "
+                    f"largest single error is {dominant['error_mev_per_atom']:+.1f} "
+                    f"meV/atom on {dominant['structure']}, worth "
+                    f"{dominant['contribution_j_per_m2']:+.3f} J/m^2 on its own. "
+                    "Read the per-structure errors, not the offset."
+                )
+            elif dominant and dominant["role"] == "reference":
+                hints.append(
+                    f"{label}/{family}: the offset is driven by a bulk reference "
+                    f"({dominant['structure']}, "
+                    f"{dominant['error_mev_per_atom']:+.1f} meV/atom), not by the "
+                    "interface cell. The references are relaxed 0 K bulks, which "
+                    "a model fine-tuned on MD frames may represent worst -- this "
+                    "is a training-coverage signal, not an interface error."
+                )
+            if spread > 0.0 and delta <= spread:
+                hints.append(
+                    f"{label}/{family}: |delta_vs_dft| = {delta:.3f} J/m^2 sits "
+                    f"inside the committee's own spread ({spread:.3f}), so the "
+                    "families disagree with each other as much as with DFT. "
+                    "Treat the offset as unresolved rather than as a measured bias."
+                )
+    checks["mlip_comparison"] = "PASS" if families else "NOT_CHECKED"
+    if not families:
+        hints.append(
+            "No MLIP was evaluated. Pass --mace-model / --deepmd-model to turn "
+            "this into an audit; the DFT gamma(dmu) above stands on its own."
+        )
+
+    order = {"OVERRIDDEN": 3, "CHECK": 2, "NOT_CHECKED": 1, "PASS": 0}
+    worst = max(checks.values(), key=lambda value: order.get(value, 0))
+    status = worst if worst != "NOT_CHECKED" else (
+        "PASS" if all(v in {"PASS", "NOT_CHECKED"} for v in checks.values())
+        else worst
+    )
+    return {
+        "status": status,
+        "checks": checks,
+        "hints": hints or [
+            "No inconsistency found: the exact identities hold, the references "
+            "are in the state they claim, and nothing about the MLIP offset "
+            "needs qualifying."
+        ],
+        "note": (
+            "status is the worst of `checks`. NOT_CHECKED means a check did not "
+            "run, which is ignorance and not a clean bill of health. The exact "
+            "identities (slope, offset reconstruction) are not listed here: they "
+            "raise rather than downgrade a status, because a violation is a data "
+            "inconsistency and not a finding."
+        ),
+    }
+
+
 def _read_phase(
     name: str,
     directory: str | Path,
@@ -447,14 +582,20 @@ def _classify_phases(
     }
 
 
+def cell_formula_units(composition: Mapping[str, int]) -> int:
+    """How many formula units of the reduced formula this cell holds."""
+
+    divisor = 0
+    for value in composition.values():
+        divisor = gcd(divisor, value)
+    return divisor or 1
+
+
 def _units(phase: Mapping[str, Any], anion: str) -> tuple[float, float, float]:
     """(cations per f.u., anions per f.u., energy per f.u.) for a compound phase."""
 
     composition = phase["composition"]
-    divisor = 0
-    for value in composition.values():
-        divisor = gcd(divisor, value)
-    divisor = divisor or 1
+    divisor = cell_formula_units(composition)
     return (
         composition[phase["cation"]] / divisor,
         composition[anion] / divisor,
@@ -636,8 +777,42 @@ def _family_lines(
     be distinguished from two large errors that happened to cancel.
     """
 
+    if not members:
+        raise SafetyError(
+            "an MLIP family was requested with no committee members; there is "
+            "nothing to compare against DFT. Pass at least one --mace-model or "
+            "--deepmd-model, and two or more for a committee spread."
+        )
     out: dict[str, Any] = {}
     for label in keys:
+        # A missing key would surface as a bare KeyError with no context, and a
+        # NaN from a calculator -- an element outside the DeePMD type_map, a
+        # broken export -- would propagate silently into gamma0 and the spread.
+        wanted = [f"iface::{label}"] + [
+            f"phase::{name}" for name in classified["compounds"]
+        ]
+        for member, energies in members.items():
+            absent = [key for key in wanted if key not in energies]
+            if absent:
+                raise SafetyError(
+                    f"committee member {member!r} returned no energy for {absent}. "
+                    f"It was asked for {sorted(wanted)}. A member that cannot "
+                    "evaluate one of these structures cannot contribute to "
+                    "gamma; check the model covers every element in the cell."
+                )
+            unusable = {
+                key: energies[key] for key in wanted
+                if not isinstance(energies[key], (int, float))
+                or not math.isfinite(float(energies[key]))
+            }
+            if unusable:
+                raise SafetyError(
+                    f"committee member {member!r} returned a non-finite energy: "
+                    f"{unusable}. This would propagate into gamma0, the committee "
+                    "spread and every per-structure error without any of them "
+                    "looking wrong. Usual cause: an element outside the model's "
+                    "type_map, or a corrupt export."
+                )
         per_member = {}
         for member, energies in members.items():
             solid = {
@@ -671,11 +846,14 @@ def _family_lines(
         block["delta_vs_dft_j_per_m2"] = (
             block["gamma0_ensemble_j_per_m2"] - dft_lines[label]["gamma0_j_per_m2"]
         )
-        keys = [f"iface::{label}"] + [
+        # NOT `keys`: that is this function's own parameter, and the loop above
+        # is iterating it. Rebinding it worked only because the dict iterator
+        # already existed, and would silently mislead anything added later.
+        structure_keys = [f"iface::{label}"] + [
             f"phase::{name}" for name in classified["compounds"]
         ]
         errors: dict[str, Any] = {}
-        for key in keys:
+        for key in structure_keys:
             if key not in dft_energies:
                 continue
             per_atom = np.asarray([
@@ -691,6 +869,102 @@ def _family_lines(
                 ),
             }
         block["per_structure_error"] = errors
+
+        # EXACT IDENTITY 1 -- the slope is purely structural (anion excess and
+        # area), so every member and DFT must agree bit-for-bit. Equal only by
+        # construction today, because _family_lines reuses the same
+        # decomposition and denominator objects for the MLIP legs as for DFT;
+        # this makes that reliance explicit instead of implicit.
+        dft_slope = float(dft_lines[label]["slope_j_per_m2_per_ev"])
+        slope_deltas = {
+            name: float(line["slope_j_per_m2_per_ev"]) - dft_slope
+            for name, line in per_member.items()
+        }
+        worst_slope = max(abs(value) for value in slope_deltas.values())
+        if worst_slope > 1.0e-12:
+            raise SafetyError(
+                f"the gamma(dmu) slope differs between DFT and the MLIP for "
+                f"{label!r} by up to {worst_slope:.3e} J/m^2/eV. The slope is "
+                "-dn/(n_interfaces*A): composition and area only, no energy. "
+                "Differing means the two legs were not evaluated on the same "
+                f"structure. Per-member deltas: {slope_deltas}."
+            )
+        block["slope_identity"] = {
+            "status": "PASS",
+            "dft_slope_j_per_m2_per_ev": dft_slope,
+            "max_abs_delta_j_per_m2_per_ev": worst_slope,
+            "note": (
+                "the slope is structural, so DFT and every committee member must "
+                "share it exactly; published whether or not it tripped"
+            ),
+        }
+
+        # EXACT IDENTITY 2 -- gamma's offset IS the interface error minus the
+        # reference errors weighted by formula-unit count. Summing the terms
+        # that are already computed turns the static prose caveat into a ranked
+        # attribution, and the residual catches any plumbing error between them.
+        denom = float(denominators[label])
+        scale = EV_A2_TO_J_M2 / denom
+        terms: list[dict[str, Any]] = []
+        iface_key = f"iface::{label}"
+        if iface_key in errors:
+            contribution = errors[iface_key]["ensemble_error_ev_per_atom"] * \
+                errors[iface_key]["natoms"] * scale
+            terms.append({
+                "structure": iface_key,
+                "role": "interface",
+                "weight_formula_units": 1.0,
+                "error_mev_per_atom": errors[iface_key]["ensemble_error_mev_per_atom"],
+                "contribution_j_per_m2": contribution,
+            })
+        for name, phase in classified["compounds"].items():
+            key = f"phase::{name}"
+            if key not in errors:
+                continue
+            units = float(decompositions[label]["formula_units"].get(name, 0.0))
+            per_cell_units = cell_formula_units(phase["composition"])
+            contribution = -(
+                units * errors[key]["ensemble_error_ev_per_atom"]
+                * errors[key]["natoms"] / per_cell_units
+            ) * scale
+            terms.append({
+                "structure": key,
+                "role": "reference",
+                "weight_formula_units": units,
+                "error_mev_per_atom": errors[key]["ensemble_error_mev_per_atom"],
+                "contribution_j_per_m2": contribution,
+            })
+        reconstructed = sum(term["contribution_j_per_m2"] for term in terms)
+        residual = reconstructed - block["delta_vs_dft_j_per_m2"]
+        if abs(residual) > 1.0e-9:
+            raise SafetyError(
+                f"the per-structure errors for {label!r} do not reconstruct "
+                f"delta_vs_dft_j_per_m2: summed to {reconstructed:.9f} against a "
+                f"reported {block['delta_vs_dft_j_per_m2']:.9f} J/m^2, residual "
+                f"{residual:.3e}. These are the same numbers by construction, so "
+                "a difference means the decomposition, the formula-unit divisor "
+                "or the normalisation area disagree between the two paths."
+            )
+        ranked = sorted(terms, key=lambda t: -abs(t["contribution_j_per_m2"]))
+        block["offset_reconstruction"] = {
+            "status": "PASS",
+            "terms": ranked,
+            "reconstructed_j_per_m2": reconstructed,
+            "residual_j_per_m2": residual,
+            "dominant_term": ranked[0]["structure"] if ranked else None,
+            "cancellation_ratio": (
+                abs(reconstructed) / sum(abs(t["contribution_j_per_m2"]) for t in terms)
+                if terms and sum(abs(t["contribution_j_per_m2"]) for t in terms) > 0
+                else None
+            ),
+            "note": (
+                "delta_vs_dft is the interface error minus the reference errors "
+                "weighted by formula-unit count, so the terms carry opposite "
+                "signs. cancellation_ratio near 0 means large errors nearly "
+                "cancelled and a small offset is hiding them; near 1 means the "
+                "offset is what the dominant term says it is."
+            ),
+        }
         block["per_structure_note"] = (
             "MLIP minus DFT on each structure, in meV/atom. The interface cell is "
             "the finite-temperature snapshot; the compound references are the "
@@ -859,6 +1133,7 @@ def interface_mu(
         for family, blocks in families.items():
             row["mlip"][family] = blocks[row["label"]]
 
+    payload: dict[str, Any]
     thermal = check_thermal_consistency(
         [thermal_states[row["label"]] for row in rows],
         [phase["thermal"] for phase in read.values()],
@@ -866,7 +1141,7 @@ def interface_mu(
         strict=not allow_thermal_mismatch,
     )
     unbalanced = [row["label"] for row in rows if not row["decomposition"]["stoichiometric"]]
-    return {
+    payload = {
         "thermal_consistency": thermal,
         "schema_version": 1,
         "quantity": QUANTITY,
@@ -898,6 +1173,8 @@ def interface_mu(
         "chemical_potential_dependent": sorted(unbalanced),
         "interfaces": rows,
     }
+    payload["audit"] = summarize_audit(payload)
+    return payload
 
 
 _CSV_FIELDS = (
@@ -1146,6 +1423,56 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
                 anion, ", ".join(payload["chemical_potential_dependent"])
             ),
         ]
+    audit = payload.get("audit")
+    if audit:
+        lines += ["", f"## Audit: {audit['status']}", ""]
+        lines += [
+            "| Check | Status |", "|---|---|",
+            *(f"| {name} | {value} |" for name, value in audit["checks"].items()),
+            "",
+        ]
+        lines += [f"{index}. {hint}" for index, hint in enumerate(audit["hints"], 1)]
+
+    attributed = [
+        (row, family, block)
+        for row in payload["interfaces"]
+        for family, block in (row.get("mlip") or {}).items()
+        if block.get("offset_reconstruction")
+    ]
+    if attributed:
+        lines += [
+            "", "## Where the MLIP offset comes from", "",
+            "Each row is one structure's committee-mean error and what it "
+            "contributes to gamma. Interface and reference terms carry opposite "
+            "signs, so they can cancel: `cancellation_ratio` near 0 means a "
+            "small offset is hiding larger errors.", "",
+            "| Interface | Family | Structure | Role | f.u. | Error (meV/atom) "
+            "| Contribution (J/m^2) |",
+            "|---|---|---|---|---:|---:|---:|",
+        ]
+        for row, family, block in attributed:
+            for term in block["offset_reconstruction"]["terms"]:
+                lines.append(
+                    "| {} | {} | {} | {} | {:.3f} | {:+.2f} | {:+.4f} |".format(
+                        row["label"], family, term["structure"], term["role"],
+                        term["weight_formula_units"], term["error_mev_per_atom"],
+                        term["contribution_j_per_m2"],
+                    )
+                )
+        for row, family, block in attributed:
+            reconstruction = block["offset_reconstruction"]
+            ratio = reconstruction["cancellation_ratio"]
+            lines += [
+                "",
+                "{}/{}: total {:+.4f} J/m^2, residual {:.1e}{}.".format(
+                    row["label"], family,
+                    reconstruction["reconstructed_j_per_m2"],
+                    reconstruction["residual_j_per_m2"],
+                    "" if ratio is None else
+                    f", cancellation_ratio {ratio:.2f}",
+                ),
+            ]
+
     lines += ["", "MLIP note: " + payload["mlip_note"]]
     (out / "interface_mu.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 

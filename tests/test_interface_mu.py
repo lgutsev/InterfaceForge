@@ -254,6 +254,175 @@ class OpenElementLimitTests(unittest.TestCase):
         self.assertEqual(window["dmu_max_ev"], 0.0)
 
 
+class MlipConsistencyTests(unittest.TestCase):
+    """Exact identities raise; magnitude questions become a status and hints."""
+
+    @staticmethod
+    def _iface(root: Path):
+        return _run(root / "iface", [("Ti", 4), ("Si", 3), ("N", 9)], -136.0)
+
+    @staticmethod
+    def _committee(iface_error=1.6, tin_error=0.8, members=4, broken=None):
+        def fake(models, atoms_by_key, device=None):
+            out = {}
+            for i in range(members):
+                energies = {}
+                for key in atoms_by_key:
+                    if key.startswith("iface::"):
+                        energies[key] = -136.0 + iface_error + 0.02 * i
+                    elif key == "phase::TiN":
+                        energies[key] = -74.0 + tin_error
+                    else:
+                        energies[key] = -110.0
+                out[f"m{i}"] = energies
+            if broken:
+                out["m0"].update(broken)
+            return out
+        return fake
+
+    def test_the_offset_reconstruction_is_exact_and_ranks_the_terms(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch("interfaceforge.interface_mu._mace_energies", self._committee()):
+                payload = interface_mu(
+                    [("x", self._iface(root))], phases=_phases(root), anion="N",
+                    n_interfaces=2, mace_models=["a", "b", "c", "d"],
+                )
+            block = payload["interfaces"][0]["mlip"]["mace"]
+            reconstruction = block["offset_reconstruction"]
+            self.assertEqual(reconstruction["status"], "PASS")
+            self.assertAlmostEqual(
+                reconstruction["reconstructed_j_per_m2"],
+                block["delta_vs_dft_j_per_m2"], places=12,
+            )
+            self.assertLess(abs(reconstruction["residual_j_per_m2"]), 1.0e-9)
+            # ranked by |contribution|, and the reference term is negative:
+            # gamma subtracts the references, so their errors enter oppositely
+            terms = reconstruction["terms"]
+            self.assertEqual(terms[0]["structure"], "iface::x")
+            self.assertGreater(terms[0]["contribution_j_per_m2"], 0.0)
+            reference = next(t for t in terms if t["structure"] == "phase::TiN")
+            self.assertLess(reference["contribution_j_per_m2"], 0.0)
+            self.assertAlmostEqual(reference["weight_formula_units"], 4.0)
+
+    def test_cancellation_is_flagged_when_a_small_offset_hides_large_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            # tuned so the reference term nearly annihilates the interface term
+            with patch("interfaceforge.interface_mu._mace_energies",
+                       self._committee(iface_error=1.6, tin_error=1.55, members=1)):
+                payload = interface_mu(
+                    [("x", self._iface(root))], phases=_phases(root), anion="N",
+                    n_interfaces=2, mace_models=["a"],
+                )
+            block = payload["interfaces"][0]["mlip"]["mace"]
+            ratio = block["offset_reconstruction"]["cancellation_ratio"]
+            self.assertLess(ratio, 0.5)
+            # the offset alone would read as near-perfect agreement
+            self.assertLess(abs(block["delta_vs_dft_j_per_m2"]), 0.05)
+            hints = " ".join(payload["audit"]["hints"])
+            self.assertIn("only because the terms cancelled", hints)
+            self.assertIn("Read the per-structure errors", hints)
+
+    def test_a_slope_that_differs_from_dft_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch("interfaceforge.interface_mu._mace_energies", self._committee()):
+                payload = interface_mu(
+                    [("x", self._iface(root))], phases=_phases(root), anion="N",
+                    n_interfaces=2, mace_models=["a", "b"],
+                )
+            block = payload["interfaces"][0]["mlip"]["mace"]
+            # the identity holds by construction, and is published either way
+            self.assertEqual(block["slope_identity"]["status"], "PASS")
+            self.assertEqual(block["slope_identity"]["max_abs_delta_j_per_m2_per_ev"], 0.0)
+
+    def test_a_non_finite_energy_is_refused_with_the_member_named(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            broken = self._committee(broken={"phase::TiN": float("nan")})
+            with patch("interfaceforge.interface_mu._mace_energies", broken):
+                with self.assertRaises(SafetyError) as caught:
+                    interface_mu(
+                        [("x", self._iface(root))], phases=_phases(root), anion="N",
+                        n_interfaces=2, mace_models=["a", "b"],
+                    )
+            message = str(caught.exception)
+            self.assertIn("'m0'", message)
+            self.assertIn("non-finite", message)
+            self.assertIn("type_map", message)
+
+    def test_a_member_missing_a_structure_is_refused(self) -> None:
+        def partial(models, atoms_by_key, device=None):
+            full = {k: (-136.0 if k.startswith("iface::") else
+                        {"phase::TiN": -74.0, "phase::Si3N4": -110.0}[k])
+                    for k in atoms_by_key}
+            return {"good": full, "partial": {k: v for k, v in full.items()
+                                              if k != "phase::Si3N4"}}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch("interfaceforge.interface_mu._mace_energies", partial):
+                with self.assertRaises(SafetyError) as caught:
+                    interface_mu(
+                        [("x", self._iface(root))], phases=_phases(root), anion="N",
+                        n_interfaces=2, mace_models=["a", "b"],
+                    )
+            self.assertIn("'partial'", str(caught.exception))
+            self.assertIn("phase::Si3N4", str(caught.exception))
+
+    def test_an_offset_inside_the_committee_spread_is_called_unresolved(self) -> None:
+        def noisy(models, atoms_by_key, device=None):
+            # a tiny mean offset with a large member-to-member scatter
+            return {
+                f"m{i}": {k: (-136.0 + (0.6 if i % 2 else -0.6)
+                              if k.startswith("iface::")
+                              else {"phase::TiN": -74.0, "phase::Si3N4": -110.0}[k])
+                          for k in atoms_by_key}
+                for i in range(4)
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch("interfaceforge.interface_mu._mace_energies", noisy):
+                payload = interface_mu(
+                    [("x", self._iface(root))], phases=_phases(root), anion="N",
+                    n_interfaces=2, mace_models=["a", "b", "c", "d"],
+                )
+            block = payload["interfaces"][0]["mlip"]["mace"]
+            self.assertGreater(block["committee_spread_j_per_m2"],
+                               abs(block["delta_vs_dft_j_per_m2"]))
+            self.assertIn("unresolved", " ".join(payload["audit"]["hints"]))
+
+    def test_an_unrun_check_reports_not_checked_rather_than_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = interface_mu(
+                [("x", self._iface(root))], phases=_phases(root), anion="N",
+                n_interfaces=2,
+            )
+            audit = payload["audit"]
+            self.assertEqual(audit["checks"]["mlip_comparison"], "NOT_CHECKED")
+            self.assertIn("No MLIP was evaluated", " ".join(audit["hints"]))
+            self.assertIn("ignorance", audit["note"])
+
+    def test_the_attribution_and_verdict_reach_the_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch("interfaceforge.interface_mu._mace_energies", self._committee()):
+                payload = interface_mu(
+                    [("x", self._iface(root))], phases=_phases(root), anion="N",
+                    n_interfaces=2, mace_models=["a", "b"],
+                )
+            write_reports(payload, root / "out")
+            report = (root / "out" / "interface_mu.md").read_text(encoding="utf-8")
+            self.assertIn("## Audit:", report)
+            self.assertIn("| mlip_comparison | PASS |", report)
+            self.assertIn("## Where the MLIP offset comes from", report)
+            self.assertIn("| iface::x | interface |", report.replace(" mace | ", " "))
+            self.assertTrue(report.isascii())
+
+
 class ThermalStateTests(unittest.TestCase):
     """An MD snapshot and a relaxed bulk are not the same thermodynamic state."""
 
