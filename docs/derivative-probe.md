@@ -79,6 +79,8 @@ iface validate derivative-probe prepare derivative_probe \
 ```
 
 The template must contain non-empty `INCAR`, `KPOINTS`, and `POTCAR`.
+One prepared tree can use one template; prepare separate trees when the sources
+need different species blocks, POTCAR datasets, or k-point meshes.
 InterfaceForge first verifies that POTCAR's VRHFIN order matches the source
 POSCAR species blocks. It then copies the same KPOINTS/POTCAR into every probe and converts the
 INCAR to a static protocol:
@@ -103,7 +105,7 @@ After the VASP single points have written their `OUTCAR` files:
 iface validate derivative-probe evaluate derivative_probe \
   --mace-model /models/mace/seed11.model \
   --mace-model /models/mace/seed23.model \
-  --device cuda
+  --device cuda --output-stem mace
 ```
 
 Run DeePMD/DPA models in their own compatible environment if necessary:
@@ -111,16 +113,21 @@ Run DeePMD/DPA models in their own compatible environment if necessary:
 ```bash
 iface validate derivative-probe evaluate derivative_probe \
   --deepmd-model /models/dpa3/000/frozen_model.pth \
-  --deepmd-model /models/dpa3/001/frozen_model.pth
+  --deepmd-model /models/dpa3/001/frozen_model.pth \
+  --output-stem dpa3
 ```
 
 The evaluator writes:
 
-- `predictions.csv`: energy, force norms, and stress (when implemented) for
-  every backend/structure;
-- `responses.csv`: energy- and force-derived directional curvatures for every
-  symmetric pair;
-- `derivative_probe_results.json`: per-model comparison with DFT.
+- `<stem>_predictions.csv`: energy, force norms, and stress (when implemented)
+  for every backend/structure;
+- `<stem>_responses.csv`: energy- and force-derived directional curvatures
+  for every symmetric pair;
+- `<stem>_results.json`: per-model comparison with DFT.
+
+The default stem is `derivative_probe`. Set a different `--output-stem` for
+each backend-isolated run so a DeePMD environment does not overwrite MACE
+results from the same probe tree.
 
 Energy comparison uses each source's unstrained center as its zero, then
 reports relative-energy errors in meV/atom. This removes arbitrary

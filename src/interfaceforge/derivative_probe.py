@@ -513,10 +513,15 @@ def evaluate_derivative_probe(
     mace_models: Sequence[str | Path] = (),
     deepmd_models: Sequence[str | Path] = (),
     device: str = "cpu",
+    output_stem: str = "derivative_probe",
     _test_calculators: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Collect completed DFT points and evaluate MLIPs on the identical probe set."""
 
+    if not output_stem or not _LABEL.fullmatch(output_stem):
+        raise ValueError(
+            "--output-stem must use only letters, numbers, '.', '_' or '-'"
+        )
     probe_root = Path(root).expanduser().resolve()
     manifest_path = probe_root / "manifest.json"
     try:
@@ -753,8 +758,11 @@ def evaluate_derivative_probe(
             writer.writeheader()
             writer.writerows(records)
 
-    write_csv(probe_root / "predictions.csv", prediction_rows)
-    write_csv(probe_root / "responses.csv", response_rows)
+    predictions_path = probe_root / f"{output_stem}_predictions.csv"
+    responses_path = probe_root / f"{output_stem}_responses.csv"
+    results_path = probe_root / f"{output_stem}_results.json"
+    write_csv(predictions_path, prediction_rows)
+    write_csv(responses_path, response_rows)
     status = "COMPLETE" if dft_completed == len(rows) else "INCOMPLETE"
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -767,11 +775,12 @@ def evaluate_derivative_probe(
         "summaries": summaries,
         "warnings": warnings,
         "citation": PAPER,
+        "output_stem": output_stem,
         "outputs": {
-            "predictions": str(probe_root / "predictions.csv"),
-            "responses": str(probe_root / "responses.csv"),
-            "summary": str(probe_root / "derivative_probe_results.json"),
+            "predictions": str(predictions_path),
+            "responses": str(responses_path),
+            "summary": str(results_path),
         },
     }
-    _json_write(probe_root / "derivative_probe_results.json", payload)
+    _json_write(results_path, payload)
     return payload

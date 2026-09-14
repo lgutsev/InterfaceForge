@@ -195,7 +195,7 @@ class DerivativeProbeTests(unittest.TestCase):
         self.assertEqual(result["status"], "INCOMPLETE")
         self.assertEqual(result["dft_completed"], 0)
         self.assertEqual(result["models"], ["harmonic"])
-        with (root / "responses.csv").open(encoding="utf-8") as handle:
+        with Path(result["outputs"]["responses"]).open(encoding="utf-8") as handle:
             responses = list(csv.DictReader(handle))
         self.assertEqual(len(responses), 3)
         for row in responses:

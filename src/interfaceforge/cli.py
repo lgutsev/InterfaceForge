@@ -442,6 +442,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 mace_models=args.mace_models,
                 deepmd_models=args.deepmd_models,
                 device=args.device,
+                output_stem=args.output_stem,
             )
     elif args.validation == "parity":
         payload = parity_from_csv(
@@ -2058,6 +2059,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--deepmd-model", action="append", default=[], dest="deepmd_models"
     )
     derivative_evaluate.add_argument("--device", default="cpu")
+    derivative_evaluate.add_argument(
+        "--output-stem",
+        default="derivative_probe",
+        help="Distinct result filename stem for backend-isolated runs",
+    )
     derivative_evaluate.set_defaults(func=cmd_validate)
 
     reference = commands.add_parser(
