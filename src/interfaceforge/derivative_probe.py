@@ -52,7 +52,7 @@ _REMOVE_INCAR = {
 }
 _LABEL = re.compile(r"^[A-Za-z0-9_.-]+$")
 _INCAR_TAG = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*=")
-_POTCAR_ELEMENT = re.compile(r"VRHFIN\\s*=\\s*([A-Z][a-z]?)\\s*:")
+_POTCAR_ELEMENT = re.compile(r"VRHFIN\s*=\s*([A-Z][a-z]?)\s*:")
 
 
 def _ase_io() -> tuple[Any, Any]:
@@ -547,14 +547,16 @@ def evaluate_derivative_probe(
         if outcar.is_file() and outcar.stat().st_size:
             try:
                 dft_atoms = read(str(outcar), index=-1)
+                try:
+                    dft_stress = np.asarray(
+                        dft_atoms.get_stress(voigt=True), dtype=float
+                    )
+                except (NotImplementedError, RuntimeError, ValueError):
+                    dft_stress = None
                 sources["DFT"] = (
                     float(dft_atoms.get_potential_energy()),
                     np.asarray(dft_atoms.get_forces(), dtype=float),
-                    (
-                        np.asarray(dft_atoms.get_stress(voigt=True), dtype=float)
-                        if hasattr(dft_atoms, "get_stress")
-                        else None
-                    ),
+                    dft_stress,
                 )
                 dft_completed += 1
             except Exception as exc:
@@ -702,9 +704,11 @@ def evaluate_derivative_probe(
                 if dft["stress"] is not None and pred["stress"] is not None:
                     dft_stress.extend(dft["stress"])
                     model_stress.extend(pred["stress"])
+            if not dft_energy_delta:
+                continue
             summary: dict[str, Any] = {
                 "model": model,
-                "matched_structures": len(common),
+                "matched_structures": len(dft_energy_delta),
                 "relative_energy_mev_atom": {
                     key: value * 1000.0
                     for key, value in _metrics(
