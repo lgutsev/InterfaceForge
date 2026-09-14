@@ -29,6 +29,7 @@ from .campaign import build_plan, prepare_campaign, submit_campaign
 from .committee import collect_committee, verify_committee_bundle
 from .config import load_campaign, merge_interface_metadata, references_for
 from .data import collect_dataset
+from .derivative_probe import evaluate_derivative_probe, prepare_derivative_probe
 from .errors import InterfaceForgeError, SafetyError
 from .exploration import generate_exploration
 from .geometry import (
@@ -421,7 +422,29 @@ def cmd_select(args: argparse.Namespace) -> int:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    if args.validation == "parity":
+    if args.validation == "derivative-probe":
+        if args.derivative_probe_command == "prepare":
+            payload = prepare_derivative_probe(
+                args.entries,
+                args.output,
+                displacement_a=args.displacement,
+                strains=args.strain,
+                rattles=args.rattles,
+                seed=args.seed,
+                paired=args.paired,
+                strain_mode=args.strain_mode,
+                vasp_template=args.vasp_template,
+                force=args.force,
+            )
+        else:
+            payload = evaluate_derivative_probe(
+                args.root,
+                mace_models=args.mace_models,
+                deepmd_models=args.deepmd_models,
+                device=args.device,
+                output_stem=args.output_stem,
+            )
+    elif args.validation == "parity":
         payload = parity_from_csv(
             args.source,
             args.output,
@@ -1966,6 +1989,82 @@ def build_parser() -> argparse.ArgumentParser:
         "low-coordination cutoff (default: 10)",
     )
     stratified.set_defaults(func=cmd_validate)
+
+    derivative_probe = validation.add_parser(
+        "derivative-probe",
+        help="Prepare or evaluate displacement/strain probes of PES derivatives",
+    )
+    derivative_probe_commands = derivative_probe.add_subparsers(
+        dest="derivative_probe_command", required=True
+    )
+    derivative_prepare = derivative_probe_commands.add_parser(
+        "prepare",
+        help="Generate strained centers and deterministic paired rattles",
+    )
+    derivative_prepare.add_argument("output")
+    derivative_prepare.add_argument(
+        "entries",
+        nargs="+",
+        metavar="[LABEL=]STRUCTURE",
+        help="Structure file or VASP directory; labels must be unique",
+    )
+    derivative_prepare.add_argument(
+        "--displacement",
+        type=float,
+        default=0.03,
+        help="Cartesian rattle standard deviation in Angstrom (default: 0.03)",
+    )
+    derivative_prepare.add_argument(
+        "--strain",
+        type=float,
+        nargs="+",
+        default=[-0.01, 0.0, 0.01],
+        help="Homogeneous fractional strains (default: -0.01 0 0.01)",
+    )
+    derivative_prepare.add_argument(
+        "--strain-mode",
+        choices=("volume", "linear"),
+        default="volume",
+        help="Interpret --strain as volume or lattice-vector strain (default: volume)",
+    )
+    derivative_prepare.add_argument(
+        "--rattles",
+        type=int,
+        default=1,
+        help="Independent displacement vectors per strain and source (default: 1)",
+    )
+    derivative_prepare.add_argument("--seed", type=int, default=2026)
+    derivative_prepare.add_argument(
+        "--paired",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write +/- central-displacement pairs (default: enabled)",
+    )
+    derivative_prepare.add_argument(
+        "--vasp-template",
+        help="Directory with INCAR/KPOINTS/POTCAR to make static DFT run directories",
+    )
+    derivative_prepare.add_argument("--force", action="store_true")
+    derivative_prepare.set_defaults(func=cmd_validate)
+
+    derivative_evaluate = derivative_probe_commands.add_parser(
+        "evaluate",
+        help="Collect available DFT results and evaluate MACE/DeePMD on identical probes",
+    )
+    derivative_evaluate.add_argument("root", help="Prepared derivative-probe directory")
+    derivative_evaluate.add_argument(
+        "--mace-model", action="append", default=[], dest="mace_models"
+    )
+    derivative_evaluate.add_argument(
+        "--deepmd-model", action="append", default=[], dest="deepmd_models"
+    )
+    derivative_evaluate.add_argument("--device", default="cpu")
+    derivative_evaluate.add_argument(
+        "--output-stem",
+        default="derivative_probe",
+        help="Distinct result filename stem for backend-isolated runs",
+    )
+    derivative_evaluate.set_defaults(func=cmd_validate)
 
     reference = commands.add_parser(
         "reference",
