@@ -126,14 +126,31 @@ def _plane_area(cell: np.ndarray, axis: str | None) -> tuple[float, str]:
     return area, axes[stack]
 
 
-def _dft_energy(run: Path) -> float | None:
+def _dft_record(run: Path) -> dict[str, Any]:
+    """Retain audit evidence even when no completed energy is available."""
     if not (run / "OUTCAR").is_file():
-        return None
+        return {"energy_ev": None, "status": "NOT_CHECKED", "health": None,
+                "warnings": "OUTCAR missing", "opt_converged": None}
     row = audit_run(run, run)
-    if not row.get("finished_normally"):
-        return None
-    energy = row.get("sigma0_energy_ev_last")
-    return float(energy) if energy is not None else None
+    energy = row.get("sigma0_energy_ev_last") if row.get("finished_normally") else None
+    if energy is not None and not np.isfinite(float(energy)):
+        energy = None
+    result = {key: row.get(key) for key in (
+        "health", "warnings", "opt_converged", "finished_normally", "run_kind", "next_action"
+    )}
+    result["energy_ev"] = float(energy) if energy is not None else None
+    healthy = {"static calculation finished", "converged", "completed; average behavior reported"}
+    result["status"] = "CHECK" if (
+        energy is None or row.get("warnings") or row.get("oom_or_killed")
+        or row.get("health") not in healthy
+        or (row.get("run_kind") == "opt" and not row.get("opt_converged"))
+    ) else "PASS"
+    return result
+
+
+def _dft_energy(run: Path) -> float | None:
+    """Compatibility wrapper; report-producing callers retain the full record."""
+    return _dft_record(run)["energy_ev"]
 
 
 # --------------------------------------------------------------- MLIP back-ends
@@ -347,7 +364,8 @@ def separation_energy(
         area, axis = _plane_area(cell, area_axis)
         denom = n_interfaces * area
 
-        dft_energies = {part: _dft_energy(runs[part]) for part in _PARTS}
+        dft_records = {part: _dft_record(runs[part]) for part in _PARTS}
+        dft_energies = {part: record["energy_ev"] for part, record in dft_records.items()}
         dft_ready = all(value is not None for value in dft_energies.values())
         dft_gamma = (
             _gamma({k: float(v) for k, v in dft_energies.items()}, denom)
@@ -369,6 +387,7 @@ def separation_energy(
             "dft": {
                 "ready": dft_ready,
                 "energies_ev": dft_energies,
+                "evidence": dft_records,
                 "gamma_sep_j_per_m2": dft_gamma,
             },
             "mlip": {},
@@ -455,6 +474,10 @@ def _merge_dft(base: dict[str, Any], incoming: Mapping[str, Any], spec: str) -> 
                     f"DFT energy mismatch for {spec} {part}: {left} vs {right}; "
                     "the partials do not describe the same completed calculation"
                 )
+    if base.get("evidence") and incoming.get("evidence") and base["evidence"] != incoming["evidence"]:
+        raise SafetyError(f"DFT audit evidence mismatch for {spec}; regenerate partials from the same inputs")
+    if incoming.get("evidence") and not base.get("evidence"):
+        base = {**base, "evidence": copy.deepcopy(incoming["evidence"])}
     return base
 
 

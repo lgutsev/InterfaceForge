@@ -46,6 +46,7 @@ from typing import Any
 import numpy as np
 
 from .config import merge_interface_metadata
+from .dft_evidence import audit_provenance, structure_evidence
 from .errors import DependencyError, SafetyError
 from .phase_diagram import (
     MOLECULAR_MOMENT_PER_PAIR,
@@ -57,7 +58,7 @@ from .separation_energy import (
     EV_A2_TO_J_M2,
     _composition,
     _deepmd_energies,
-    _dft_energy,
+    _dft_record,
     _mace_energies,
     _plane_area,
     _read_atoms,
@@ -333,6 +334,18 @@ def summarize_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
     checks: dict[str, str] = {}
     hints: list[str] = []
 
+    evidence = [phase.get("dft_evidence", {}) for phase in payload.get("reference_phases", {}).values()]
+    evidence += [row.get("dft_evidence", {}) for row in payload.get("interfaces", [])]
+    for key, component in (("dft_run_health", "run"), ("outcar_composition", "composition")):
+        states = [item.get(component, {}).get("status", "NOT_CHECKED") for item in evidence]
+        checks[key] = "CHECK" if "CHECK" in states else "NOT_CHECKED" if not states or "NOT_CHECKED" in states else "PASS"
+    provenance = payload.get("vasp_provenance_audit") or {}
+    checks["vasp_provenance"] = provenance.get("status", "NOT_CHECKED")
+    if any(checks[key] != "PASS" for key in checks):
+        hints.append("DFT evidence needs review before attributing an offset to MLIP training: "
+                     "inspect each structure's dft_evidence and vasp_provenance_audit.")
+        hints.extend(provenance.get("issues", []))
+
     thermal = payload.get("thermal_consistency") or {}
     if thermal.get("status") == "OVERRIDDEN":
         checks["thermal_state"] = "OVERRIDDEN"
@@ -410,7 +423,7 @@ def summarize_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
                     f"{dominant['error_mev_per_atom']:+.1f} meV/atom), not by the "
                     "interface cell. The references are relaxed 0 K bulks, which "
                     "a model fine-tuned on MD frames may represent worst -- this "
-                    "is a training-coverage signal, not an interface error."
+                    "may indicate training coverage only after the DFT evidence checks pass."
                 )
             if spread > 0.0 and delta <= spread:
                 hints.append(
@@ -428,10 +441,7 @@ def summarize_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     order = {"OVERRIDDEN": 3, "CHECK": 2, "NOT_CHECKED": 1, "PASS": 0}
     worst = max(checks.values(), key=lambda value: order.get(value, 0))
-    status = worst if worst != "NOT_CHECKED" else (
-        "PASS" if all(v in {"PASS", "NOT_CHECKED"} for v in checks.values())
-        else worst
-    )
+    status = worst
     return {
         "status": status,
         "checks": checks,
@@ -462,7 +472,9 @@ def _read_phase(
     run = Path(directory).expanduser().resolve()
     atoms = _read_atoms(_structure_file(run))
     composition = _composition(atoms)
-    energy = _dft_energy(run)
+    dft_record = _dft_record(run)
+    evidence = structure_evidence(run, composition)
+    energy = dft_record["energy_ev"]
     if energy is None:
         raise SafetyError(
             f"reference phase {name!r}: no finished DFT energy in {run} "
@@ -483,6 +495,7 @@ def _read_phase(
         "formula": _formula(composition),
         "natoms": int(sum(composition.values())),
         "energy_ev": float(energy),
+        "dft_evidence": {**evidence, "run": dft_record},
         "molecular": molecular,
         "spin": (
             audit_molecular_spin(name, run, composition, strict=strict_spin)
@@ -1066,7 +1079,9 @@ def interface_mu(
         area, axis = _plane_area(np.array(atoms.cell.array, dtype=float), effective_axis)
         denom = count * area
         decomposition = decompose(composition, classified, anion)
-        energy = _dft_energy(run)
+        dft_record = _dft_record(run)
+        evidence = structure_evidence(run, composition)
+        energy = dft_record["energy_ev"]
         row: dict[str, Any] = {
             "label": label,
             "directory": str(run),
@@ -1083,6 +1098,7 @@ def interface_mu(
             "regime": regime,
             "decomposition": decomposition,
             "dft": {"ready": energy is not None, "energy_ev": energy},
+            "dft_evidence": {**evidence, "run": dft_record},
             "mlip": {},
         }
         if energy is not None:
@@ -1173,6 +1189,9 @@ def interface_mu(
         "chemical_potential_dependent": sorted(unbalanced),
         "interfaces": rows,
     }
+    all_evidence = {f"phase::{name}": phase["dft_evidence"] for name, phase in read.items()}
+    all_evidence.update({f"iface::{row['label']}": row["dft_evidence"] for row in rows})
+    payload["vasp_provenance_audit"] = audit_provenance(all_evidence)
     payload["audit"] = summarize_audit(payload)
     return payload
 
@@ -1432,6 +1451,21 @@ def write_reports(payload: dict[str, Any], output_dir: str | Path) -> dict[str, 
             "",
         ]
         lines += [f"{index}. {hint}" for index, hint in enumerate(audit["hints"], 1)]
+
+    evidence_rows = [(f"phase::{name}", phase.get("dft_evidence", {}))
+                     for name, phase in payload["reference_phases"].items()]
+    evidence_rows += [(f"iface::{row['label']}", row.get("dft_evidence", {}))
+                      for row in payload["interfaces"]]
+    lines += ["", "## DFT evidence", "", "| Structure | Run | Composition | Health / warnings |",
+              "|---|---|---|---|"]
+    for name, evidence in evidence_rows:
+        run = evidence.get("run", {})
+        detail = f"{run.get('health') or 'unknown'}; {run.get('warnings') or ''}"
+        detail = detail.replace("|", "/").replace("\n", " ")
+        lines.append(f"| {name} | {run.get('status', 'NOT_CHECKED')} | "
+                     f"{evidence.get('composition', {}).get('status', 'NOT_CHECKED')} | {detail} |")
+    provenance = payload.get("vasp_provenance_audit", {})
+    lines += ["", *[f"- {item}" for item in provenance.get("missing_evidence", [])]]
 
     attributed = [
         (row, family, block)
