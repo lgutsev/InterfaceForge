@@ -76,7 +76,8 @@ run for each engine, version, chemistry, and cluster environment.
 | Compare MACE and DeePMD on identical frames | [MLIP comparison](docs/mlip-comparison.md) |
 | Archive committees/datasets or package for Hugging Face | [Packaging](docs/packaging.md) |
 | Build reactive magnetic oxide campaigns | [Reactive surfaces](docs/reactive-surfaces.md) |
-| Validate adhesion or separation energetics | [Interface energy](docs/interface-energy.md) and [separation energy](docs/separation-energy.md) |\n| Probe MLIP force/curvature response near minima | [Derivative-sensitive validation](docs/derivative-probe.md) |
+| Validate adhesion or separation energetics | [Interface energy](docs/interface-energy.md) and [separation energy](docs/separation-energy.md) |
+| Probe MLIP force/curvature response near minima | [Derivative-sensitive validation](docs/derivative-probe.md) |
 | Search N/O ordering at fixed composition, and verify it with DFT | [Swap Monte Carlo](docs/swap-mc.md) |
 
 The complete topic index is in **[Documentation](docs/README.md)**.

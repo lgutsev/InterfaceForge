@@ -79,7 +79,8 @@ iface validate derivative-probe prepare derivative_probe \
 ```
 
 The template must contain non-empty `INCAR`, `KPOINTS`, and `POTCAR`.
-InterfaceForge first verifies that POTCAR's VRHFIN order matches the source\nPOSCAR species blocks. It then copies the same KPOINTS/POTCAR into every probe and converts the
+InterfaceForge first verifies that POTCAR's VRHFIN order matches the source
+POSCAR species blocks. It then copies the same KPOINTS/POTCAR into every probe and converts the
 INCAR to a static protocol:
 
 - `IBRION=-1`, `NSW=0`, and `ISYM=0`;
