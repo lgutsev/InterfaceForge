@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import math
 import re
 import shutil
 from collections.abc import Mapping, Sequence
@@ -53,6 +52,7 @@ _REMOVE_INCAR = {
 }
 _LABEL = re.compile(r"^[A-Za-z0-9_.-]+$")
 _INCAR_TAG = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*=")
+_POTCAR_ELEMENT = re.compile(r"VRHFIN\\s*=\\s*([A-Z][a-z]?)\\s*:")
 
 
 def _ase_io() -> tuple[Any, Any]:
@@ -160,11 +160,18 @@ def _template_payload(template: str | Path | None) -> dict[str, Any] | None:
         raise SafetyError(
             f"VASP template {root} is missing non-empty files: {', '.join(missing)}"
         )
+    potcar = (root / "POTCAR").read_bytes()
+    potcar_elements = _POTCAR_ELEMENT.findall(
+        potcar.decode("utf-8", errors="ignore")
+    )
+    if not potcar_elements:
+        raise SafetyError(f"Could not read VRHFIN species order from {root / 'POTCAR'}")
     return {
         "root": root,
         "incar": _static_incar(root / "INCAR"),
         "kpoints": (root / "KPOINTS").read_bytes(),
-        "potcar": (root / "POTCAR").read_bytes(),
+        "potcar": potcar,
+        "potcar_elements": potcar_elements,
         "launcher": next(
             (
                 root / name
@@ -254,6 +261,18 @@ def prepare_derivative_probe(
         cell = np.asarray(base.cell.array, dtype=float)
         if len(base) == 0 or cell.shape != (3, 3) or abs(float(np.linalg.det(cell))) < 1e-10:
             raise SafetyError(f"Derivative probes require a non-empty periodic cell: {source}")
+        if template is not None:
+            symbols = base.get_chemical_symbols()
+            species_blocks = [
+                symbol
+                for index, symbol in enumerate(symbols)
+                if index == 0 or symbol != symbols[index - 1]
+            ]
+            if species_blocks != template["potcar_elements"]:
+                raise SafetyError(
+                    f"POTCAR order {template['potcar_elements']} does not match "
+                    f"POSCAR species blocks {species_blocks} for {label}"
+                )
         source_hash = _sha256(source)
 
         for strain in unique_strains:
