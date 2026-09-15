@@ -605,9 +605,41 @@ class SearchResult:
     best_energy: float
     acceptance_rate: float
     screen_converged_rate: float
+    rejected_nonfinite: int
     n_evaluated: int
     trajectory: list[dict[str, Any]]
     warnings: list[str]
+
+
+def energy_is_usable(energy: Any) -> bool:
+    """Can this relaxation energy be compared, ranked, or exponentiated?
+
+    A NaN or infinite energy is not merely a bad number here, it is an
+    *invisible* one. ``delta <= 0`` is False for NaN and ``exp(-nan/kT)`` is
+    NaN, so ``rng.random() < nan`` is False and the move is silently rejected
+    with no error. Worse, Python's sort gives NaN no defined order: whether a
+    NaN record becomes ``ranked[0]`` -- the reported ground state -- depends on
+    where it happens to sit in the candidate dict. And -inf sorts first every
+    time, so a blown-up relaxation is reported as the ground state.
+    """
+
+    try:
+        return math.isfinite(float(energy))
+    except (TypeError, ValueError):
+        return False
+
+
+def _nonfinite_message(where: str, energy: Any, occupation: Sequence[int]) -> str:
+    return (
+        f"{where}: the relaxer returned a non-finite energy ({energy!r}) for "
+        f"occupation {sorted(int(i) for i in occupation)}. Such an energy cannot "
+        "be compared or ranked: NaN makes the Metropolis test silently reject, "
+        "and NaN or -inf can take the top of the candidate ranking and be "
+        "reported as the ground state. Usual causes are an exploded geometry, a "
+        "species outside the model's training domain, or a committee member "
+        "that failed to load. Check the relaxation trajectory for this "
+        "occupation before trusting any energy from this run."
+    )
 
 
 def _key(occupation: frozenset[int]) -> tuple[int, ...]:
@@ -623,6 +655,10 @@ def _record(
     seed: int,
     role: str,
 ) -> CandidateRecord:
+    if not energy_is_usable(outcome.energy):
+        # Defence in depth: callers screen these out, but a record that reaches
+        # the archive poisons the ranking, so the funnel refuses them too.
+        raise SafetyError(_nonfinite_message(f"seed {seed} step {step}", outcome.energy, occupation))
     key = _key(occupation)
     record = candidates.get(key)
     if record is None:
@@ -675,6 +711,13 @@ def run_search(
 
     current = initial_occupation(sites, mode=start_mode, introduce=introduce, seed=seed)
     current_outcome = relaxer.relax(_apply_occupation(atoms, sites, current), screen)
+    if not energy_is_usable(current_outcome.energy):
+        # Unrecoverable: with no finite reference every subsequent delta is NaN,
+        # every move is rejected, and the walk reports a confident acceptance
+        # rate of 0 over a chain that never moved.
+        raise SafetyError(
+            _nonfinite_message(f"seed {seed} initial configuration", current_outcome.energy, current)
+        )
     current_energy = current_outcome.energy
     initial_energy = current_energy
     _record(candidates, current, current_outcome, step=-1, seed=seed, role="initial")
@@ -682,6 +725,7 @@ def run_search(
     best = current
     best_energy = current_energy
     accepted = 0
+    rejected_nonfinite = 0
     converged_hits = int(current_outcome.converged)
     accepted_keys: set[tuple[int, ...]] = {_key(current)}
     trajectory: list[dict[str, Any]] = []
@@ -691,6 +735,17 @@ def run_search(
         trial = frozenset((current - {s}) | {h})
         outcome = relaxer.relax(_apply_occupation(atoms, sites, trial), screen)
         converged_hits += int(outcome.converged)
+        if not energy_is_usable(outcome.energy):
+            # Reject explicitly and keep it out of the archive, rather than
+            # letting NaN reach the Metropolis test and reject it invisibly.
+            rejected_nonfinite += 1
+            trajectory.append({
+                "seed": seed, "step": step, "sub_site": s, "host_site": h, "move": mode,
+                "delta_ev": None, "accepted": False, "energy_current_ev": current_energy,
+                "energy_best_ev": best_energy, "screen_converged": bool(outcome.converged),
+                "rejected_nonfinite": True,
+            })
+            continue
         delta = outcome.energy - current_energy
         accept = delta <= 0.0 or rng.random() < math.exp(-delta / kt_ev)
         _record(candidates, trial, outcome, step=step, seed=seed, role="sampled")
@@ -724,10 +779,19 @@ def run_search(
         for key in sorted(accepted_keys, key=lambda k: candidates[k].energy_screen):
             if key not in refine_keys:
                 refine_keys.append(key)
-    for key in refine_keys[: max(1, refine_cap)]:
+    refine_limit = max(1, refine_cap)
+    refine_dropped = max(0, len(refine_keys) - refine_limit)
+    warnings_nonfinite_refine: list[str] = []
+    for key in refine_keys[:refine_limit]:
         record = candidates[key]
         source = record.atoms if record.atoms is not None else _apply_occupation(atoms, sites, frozenset(key))
         outcome = relaxer.relax(source, refine)
+        if not energy_is_usable(outcome.energy):
+            # Keep the screen energy rather than overwrite it with a number that
+            # cannot be ranked; say so instead of silently preferring the screen.
+            record.roles.add("refine-failed")
+            warnings_nonfinite_refine.append(_cand_id(key))
+            continue
         if record.energy_refine is None or outcome.energy < record.energy_refine:
             record.energy_refine = outcome.energy
             record.refine_converged = outcome.converged
@@ -741,6 +805,29 @@ def run_search(
     best_record = candidates[_key(best)]
     best_record.roles.add("best")
     warnings = list(CAVEATS)
+    if refine_dropped:
+        warnings.append(
+            f"refine_cap={refine_limit} left {refine_dropped} accepted arrangement(s) "
+            "with screen energies only; they are ranked against strictly refined ones, "
+            "so raise --refine-cap before comparing them"
+        )
+    if warnings_nonfinite_refine:
+        warnings.append(
+            f"strict refinement returned a non-finite energy for "
+            f"{len(warnings_nonfinite_refine)} candidate(s) ({', '.join(warnings_nonfinite_refine)}); "
+            "their screen energies were kept, so they are not comparable with the refined ones"
+        )
+    if rejected_nonfinite:
+        share = rejected_nonfinite / steps
+        warnings.append(
+            f"{rejected_nonfinite}/{steps} proposals ({share:.0%}) returned a non-finite "
+            "energy and were rejected without entering the archive"
+            + (
+                "; at this rate the walk is exploring geometries the potential cannot "
+                "evaluate and the search is not meaningful"
+                if share > 0.2 else ""
+            )
+        )
     conv_rate = converged_hits / (steps + 1)
     if conv_rate < 0.5:
         warnings.append(
@@ -754,6 +841,7 @@ def run_search(
         best_occupation=_key(best),
         best_energy=best_record.energy,
         acceptance_rate=accepted / steps,
+        rejected_nonfinite=rejected_nonfinite,
         screen_converged_rate=conv_rate,
         n_evaluated=steps + 1,
         trajectory=trajectory,
@@ -785,6 +873,8 @@ def run_searches(
         raise SafetyError("run_searches needs at least one seed")
     candidates: dict[tuple[int, ...], CandidateRecord] = {}
     per_seed: list[SearchResult] = []
+    baseline_shortfall = 0
+    baseline_nonfinite = 0
     for seed in seeds:
         if progress:
             progress(f"--- search seed {seed} ---")
@@ -811,14 +901,27 @@ def run_searches(
         if progress:
             progress(f"--- random baseline ({random_baseline}) ---")
         n_sub = len(per_seed[0].best_occupation)
-        for occ in random_configurations(sites, count=random_baseline, seed=baseline_seed, n_substituent=n_sub):
+        drawn = random_configurations(sites, count=random_baseline, seed=baseline_seed, n_substituent=n_sub)
+        if len(drawn) < random_baseline:
+            baseline_shortfall = random_baseline - len(drawn)
+        for occ in drawn:
             outcome = relaxer.relax(_apply_occupation(atoms, sites, occ), refine)
+            if not energy_is_usable(outcome.energy):
+                baseline_nonfinite += 1
+                continue
             record = _record(candidates, occ, outcome, step=-1, seed=baseline_seed, role="random-baseline")
             record.energy_refine = outcome.energy
             record.refine_converged = outcome.converged
             record.atoms = outcome.atoms
             record.force_std_ev_ang = relaxer.uncertainty(outcome.atoms)
 
+    unusable = [rec for rec in candidates.values() if not energy_is_usable(rec.energy)]
+    if unusable:
+        raise SafetyError(
+            f"{len(unusable)} archived candidate(s) carry a non-finite energy; the "
+            "ranking that picks the consensus ground state has no defined order over "
+            "them and -inf would win it outright. This should be unreachable -- report it."
+        )
     ranked = sorted(candidates.values(), key=lambda rec: rec.energy)
     consensus = ranked[0]
     seed_bests = {res.seed: res.best_occupation for res in per_seed}
@@ -845,6 +948,10 @@ def run_searches(
         },
         "seed_best_energies_ev": {str(res.seed): res.best_energy for res in per_seed},
         "seed_best_pairwise_hamming": pairwise,
+        "rejected_nonfinite": sum(res.rejected_nonfinite for res in per_seed),
+        "random_baseline_requested": random_baseline,
+        "random_baseline_shortfall": baseline_shortfall,
+        "random_baseline_nonfinite": baseline_nonfinite,
         "acceptance_rate": float(np.mean([res.acceptance_rate for res in per_seed])),
         "screen_converged_rate": float(np.mean([res.screen_converged_rate for res in per_seed])),
     }

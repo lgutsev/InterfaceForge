@@ -19,6 +19,8 @@ from interfaceforge.swap_mc import (
     RelaxOutcome,
     RelaxTier,
     _build_calculator,
+    _record,
+    energy_is_usable,
     export_candidates,
     initial_occupation,
     propose_swap,
@@ -473,3 +475,122 @@ def test_cli_run_without_backend_errors(tmp_path):
 def test_mlip_relaxer_requires_models():
     with pytest.raises(SafetyError):
         MlipRelaxer("mace", [])
+
+
+class _FlakyRelaxer(_FakeRelaxer):
+    """A relaxer that returns a non-finite energy on chosen calls.
+
+    Exactly what an MLIP does when a swap drives the geometry outside the
+    training domain, or when one committee member fails to load.
+    """
+
+    def __init__(self, *args, bad_calls=(), bad_value=float("nan"), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.bad_calls = set(bad_calls)
+        self.bad_value = bad_value
+
+    def relax(self, atoms, tier):
+        outcome = super().relax(atoms, tier)
+        if self.calls in self.bad_calls:
+            return RelaxOutcome(
+                atoms=outcome.atoms, energy=self.bad_value, converged=outcome.converged,
+                steps=outcome.steps, max_force=outcome.max_force,
+            )
+        return outcome
+
+
+def _search_kwargs(**over):
+    base = dict(
+        steps=40, kt_ev=0.05, seed=3,
+        screen=RelaxTier(0.1, 20, "screen"), refine=RelaxTier(0.01, 200, "refine"),
+    )
+    base.update(over)
+    return base
+
+
+def test_a_non_finite_initial_energy_is_refused_not_walked(tmp_path):
+    """With no finite reference every delta is NaN and every move rejects."""
+
+    atoms = _interface(tmp_path / "iface.vasp", n_oxygen=5)
+    sites = _sites(atoms)
+    relaxer = _FlakyRelaxer(sites.eligible, sites.layer_of, bad_calls={1})
+
+    with pytest.raises(SafetyError) as caught:
+        run_search(atoms, sites, relaxer, **_search_kwargs())
+    message = str(caught.value)
+    assert "initial configuration" in message
+    assert "non-finite" in message
+    assert "silently reject" in message or "Metropolis" in message
+
+
+def test_a_non_finite_trial_is_rejected_explicitly_and_counted(tmp_path):
+    """It must not reach the Metropolis test, where NaN rejects invisibly."""
+
+    atoms = _interface(tmp_path / "iface.vasp", n_oxygen=5)
+    sites = _sites(atoms)
+    # calls 1 is the initial relax; poison three later proposals
+    relaxer = _FlakyRelaxer(sites.eligible, sites.layer_of, bad_calls={5, 9, 14})
+    candidates: dict = {}
+    result = run_search(atoms, sites, relaxer, candidates=candidates, **_search_kwargs())
+
+    assert result.rejected_nonfinite == 3
+    assert [row for row in result.trajectory if row.get("rejected_nonfinite")]
+    # none of them entered the archive, so the ranking stays well defined
+    assert all(np.isfinite(rec.energy) for rec in candidates.values())
+    assert any("non-finite energy and were rejected" in w for w in result.warnings)
+
+
+def test_an_infinite_energy_cannot_become_the_ground_state(tmp_path):
+    """-inf sorts first, so an exploded relaxation would win the ranking."""
+
+    atoms = _interface(tmp_path / "iface.vasp", n_oxygen=5)
+    sites = _sites(atoms)
+    relaxer = _FlakyRelaxer(
+        sites.eligible, sites.layer_of, bad_calls={7}, bad_value=float("-inf")
+    )
+    candidates: dict = {}
+    result = run_search(atoms, sites, relaxer, candidates=candidates, **_search_kwargs())
+
+    assert result.rejected_nonfinite == 1
+    assert all(np.isfinite(rec.energy) for rec in candidates.values())
+    assert np.isfinite(result.best_energy)
+    # the walk still did useful work rather than aborting on one bad point
+    assert result.acceptance_rate > 0.0
+
+
+def test_the_archive_funnel_refuses_a_non_finite_record(tmp_path):
+    """Defence in depth: _record is the one place every outcome becomes a row."""
+
+    atoms = _interface(tmp_path / "iface.vasp", n_oxygen=5)
+    sites = _sites(atoms)
+    occupation = frozenset(sorted(sites.eligible)[:3])
+    outcome = RelaxOutcome(
+        atoms=atoms.copy(), energy=float("nan"), converged=True, steps=1, max_force=0.01
+    )
+    with pytest.raises(SafetyError, match="non-finite energy"):
+        _record({}, occupation, outcome, step=0, seed=0, role="sampled")
+
+
+def test_a_truncated_refine_shortlist_says_so(tmp_path):
+    """No silent caps: screen and refined energies are not comparable."""
+
+    atoms = _interface(tmp_path / "iface.vasp", n_oxygen=5)
+    sites = _sites(atoms)
+    relaxer = _FakeRelaxer(sites.eligible, sites.layer_of)
+    result = run_search(
+        atoms, sites, relaxer,
+        **_search_kwargs(steps=120, refine_accepted=True, refine_cap=2),
+    )
+    truncation = [w for w in result.warnings if "refine_cap" in w]
+    assert truncation, "a truncated shortlist was not reported"
+    assert "screen energies only" in truncation[0]
+
+
+def test_energy_is_usable_rejects_every_non_finite_form():
+    assert energy_is_usable(-12.5)
+    assert energy_is_usable(0.0)
+    assert not energy_is_usable(float("nan"))
+    assert not energy_is_usable(float("inf"))
+    assert not energy_is_usable(float("-inf"))
+    assert not energy_is_usable(None)
+    assert not energy_is_usable("low")

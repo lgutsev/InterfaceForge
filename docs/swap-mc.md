@@ -228,6 +228,53 @@ a search deliberately leaves the random-arrangement distribution the model was
 trained near. Compositions whose eligible sites are all N or all O have no swaps
 to make and serve as endpoint controls.
 
+## When the potential returns a non-finite energy
+
+An MLIP that is pushed outside its training domain — a swap that lands two anions
+too close, an exploded relaxation, a committee member that failed to load — can
+return `NaN` or `±inf`. Left alone that is not a loud failure but an invisible
+one, in three distinct ways:
+
+- **The Metropolis test rejects it silently.** `delta <= 0` is `False` for `NaN`
+  and `exp(-NaN/kT)` is `NaN`, so `rng.random() < NaN` is `False`. The move is
+  rejected with nothing written anywhere.
+- **`-inf` is *accepted*.** `delta <= 0` is `True`, so the walk jumps into a
+  configuration the potential could not evaluate and explores onward from there.
+  On the module's own lattice-gas test this ended the search at 18.5 eV where
+  the clean run reaches 11.0 eV — the chain was derailed, not just dented.
+- **A `NaN` in the archive has no defined rank.** `sorted()` compares `NaN` as
+  `False` in both directions, so whether a poisoned record becomes `ranked[0]`
+  — the reported consensus ground state — depends on where it happens to sit in
+  the candidate dict. `-inf` wins that ranking outright, every time.
+
+So the search refuses non-finite energies rather than propagating them:
+
+| Where it appears | What happens |
+|---|---|
+| Initial configuration | `SafetyError`. There is no finite reference, so every subsequent `delta` is `NaN`, every move rejects, and the run would report a confident acceptance rate of 0 over a chain that never moved. |
+| A proposed swap | Rejected explicitly, counted in `rejected_nonfinite`, kept out of the archive, and recorded in the trajectory with `rejected_nonfinite: true`. |
+| Strict refinement | The screen energy is kept and the candidate is tagged `refine-failed`, with a warning naming it — rather than silently leaving it ranked against strictly refined ones. |
+| Random baseline | Skipped and counted in `random_baseline_nonfinite`. |
+| The archive, ever | `SafetyError` from `_record`, the single funnel every outcome passes through. |
+
+A run that rejects more than 20% of its proposals this way says so explicitly:
+at that rate the walk is exploring geometries the potential cannot evaluate and
+the search is not meaningful. Check `rejected_nonfinite` in the summary before
+reading any energy.
+
+## Caps are reported, never silent
+
+Two bounds can quietly reduce coverage, so both are surfaced:
+
+- **`--refine-cap`** truncates the shortlist of accepted arrangements sent for
+  strict refinement. The ones left behind keep only screen energies, and screen
+  and refined energies are not comparable — so a truncated shortlist emits a
+  warning naming how many were dropped.
+- **The random baseline** draws distinct arrangements by rejection sampling. On
+  a small site space it can exhaust its attempts before reaching the requested
+  count; the shortfall appears as `random_baseline_shortfall` rather than a
+  quietly smaller baseline.
+
 ## What to check before trusting a result
 
 - Screen convergence rate (in `manifest.json` / `summary.md`): a low rate means
