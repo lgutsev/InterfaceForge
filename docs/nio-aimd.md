@@ -4,31 +4,56 @@ NiO slab and reactive-surface AIMD is a documented exception to InterfaceForge's
 
 ## Production rule
 
-For **NiO-containing surface/slab systems**, including hydroxylated NiO, dissociated-water states, and phosphonate-decorated NiO, prepare Step1 with the conservative electronic/ionic settings unless a specific campaign has been separately validated and the override is documented.
+For **NiO-containing surface/slab systems**, including hydroxylated NiO, dissociated-water states, and phosphonate-decorated NiO, use the named `nio` Step1 profile unless a specific campaign has been separately validated and the override is documented.
 
 Canonical preparation:
 
 ```bash
 iface vasp step1-prepare OPT \
+    --profile nio \
     --protocol training \
-    --temperature 300 \
-    --conservative \
-    --precondition \
-    --ramp-from 100
+    --temperature 300
 ```
 
-The NiO baseline is therefore:
+`--profile nio` expands to the reviewed NiO baseline:
 
 - `POTIM = 0.5 fs`
 - `ALGO = Normal`
 - `EDIFF = 1E-5`
 - `NELM = 120`
 - `NELMIN = 6`
-- one static magnetic DFT+U preconditioning SCF before MD (`--precondition`)
-- `TEBEG = 100 K` ramping to the requested Step1 target (`--ramp-from 100`)
+- one static magnetic DFT+U preconditioning SCF before MD
+- `TEBEG = 100 K` ramping to the requested Step1 target
 - keep `NBLOCK = 4` unless there is a separate physical reason to change the thermostat cadence
+- Langevin dynamics is **not** enabled by the profile
+
+The profile is an explicit policy choice, not a directory-name heuristic. InterfaceForge does not silently guess that a calculation is NiO from its folder or composition. The selected profile and its resolved settings are written to `step1_manifest.json` and `step1_audit.json` for provenance.
 
 Do **not** use the generic Step1 recipe (`POTIM=1.0 fs`, `ALGO=Fast`, `EDIFF=1E-4`, `NELM=60`) for a new NiO campaign by default.
+
+## Deliberate overrides
+
+The profile supplies a safe baseline but does not lock the calculation. Explicit tuning remains available for a scientifically justified case. For example:
+
+```bash
+iface vasp step1-prepare OPT \
+    --profile nio \
+    --protocol training \
+    --algo All \
+    --ramp-from 150
+```
+
+For a case that remains unstable after the baseline treatment, Langevin can be added explicitly:
+
+```bash
+iface vasp step1-prepare OPT \
+    --profile nio \
+    --protocol training \
+    --langevin \
+    --langevin-gamma 10
+```
+
+The resolved overrides, rather than only the profile name, are recorded in the Step1 provenance files.
 
 ## Why NiO is treated conservatively
 
