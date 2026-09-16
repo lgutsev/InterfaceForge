@@ -5,9 +5,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import platform
 import re
 import shutil
 from collections.abc import Mapping, Sequence
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +53,6 @@ _REMOVE_INCAR = {
     "ANDERSEN_PROB",
 }
 _LABEL = re.compile(r"^[A-Za-z0-9_.-]+$")
-_INCAR_TAG = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*=")
 _POTCAR_ELEMENT = re.compile(r"VRHFIN\s*=\s*([A-Z][a-z]?)\s*:")
 
 
@@ -128,16 +129,30 @@ def _prepare_output(root: Path, force: bool) -> None:
     root.mkdir(parents=True, exist_ok=True)
 
 
+def _incar_assignments(source: Path) -> dict[str, str]:
+    """Read assignments, including semicolons, comments and continued lines."""
+    result: dict[str, str] = {}
+    text = source.read_text(encoding="utf-8", errors="strict")
+    text = text.replace("\\\n", " ")
+    for line in text.splitlines():
+        active = re.split(r"[!#]", line, maxsplit=1)[0]
+        for assignment in active.split(";"):
+            if not assignment.strip():
+                continue
+            match = re.fullmatch(r"\s*([A-Za-z][A-Za-z0-9_]*)\s*=\s*(.*?)\s*", assignment)
+            if not match:
+                raise SafetyError(f"Cannot safely parse INCAR assignment: {assignment!r}")
+            result[match[1].upper()] = match[2]
+    return result
+
+
 def _static_incar(source: Path) -> str:
-    kept: list[str] = []
-    for line in source.read_text(encoding="utf-8", errors="ignore").splitlines():
-        match = _INCAR_TAG.match(line)
-        tag = match.group(1).upper() if match else None
-        if tag in _STATIC_OVERRIDES or tag in _REMOVE_INCAR:
-            continue
-        if tag is not None and tag.startswith("ML_"):
-            continue
-        kept.append(line)
+    kept = [
+        f"{tag} = {value}"
+        for tag, value in _incar_assignments(source).items()
+        if tag not in _STATIC_OVERRIDES and tag not in _REMOVE_INCAR
+        and not tag.startswith("ML_")
+    ]
     while kept and not kept[-1].strip():
         kept.pop()
     kept.extend(
@@ -258,6 +273,7 @@ def prepare_derivative_probe(
 
     for source_index, (label, source) in enumerate(parsed):
         base = read(str(source), index=0)
+        base.set_constraint()  # Full-coordinate PES probes, including previously fixed atoms.
         cell = np.asarray(base.cell.array, dtype=float)
         if len(base) == 0 or cell.shape != (3, 3) or abs(float(np.linalg.det(cell))) < 1e-10:
             raise SafetyError(f"Derivative probes require a non-empty periodic cell: {source}")
@@ -365,6 +381,7 @@ def prepare_derivative_probe(
             "strain_mode": strain_mode,
             "rattles_per_strain": rattles,
             "paired_displacements": paired,
+            "constraint_policy": "full-coordinate displacements and raw forces",
             "seed": seed,
             "paper_derived_defaults": {
                 "displacement_a": DEFAULT_DISPLACEMENT_A,
@@ -454,6 +471,7 @@ def _calculators(
     mace_models: Sequence[str | Path],
     deepmd_models: Sequence[str | Path],
     device: str,
+    mace_dtype: str = "float64",
 ) -> dict[str, Any]:
     calculators: dict[str, Any] = {}
     used: set[str] = set()
@@ -468,7 +486,7 @@ def _calculators(
                 raise SafetyError(f"Missing MACE model: {path}")
             label = _model_label("mace", path, used)
             calculators[label] = MACECalculator(
-                model_paths=str(path), device=device, default_dtype="float32"
+                model_paths=str(path), device=device, default_dtype=mace_dtype
             )
     if deepmd_models:
         try:
@@ -488,10 +506,10 @@ def _prediction(atoms: Any, calculator: Any) -> tuple[float, np.ndarray, np.ndar
     probe = atoms.copy()
     probe.calc = calculator
     energy = float(probe.get_potential_energy())
-    forces = np.asarray(probe.get_forces(), dtype=float)
+    forces = np.asarray(probe.get_forces(apply_constraint=False), dtype=float)
     stress: np.ndarray | None
     try:
-        stress = np.asarray(probe.get_stress(voigt=True), dtype=float)
+        stress = np.asarray(probe.get_stress(voigt=True, apply_constraint=False), dtype=float)
     except (NotImplementedError, RuntimeError, ValueError):
         stress = None
     return energy, forces, stress
@@ -507,6 +525,83 @@ def _metrics(reference: np.ndarray, predicted: np.ndarray) -> dict[str, float]:
     }
 
 
+_DFT_TAGS = (
+    "ENCUT", "EDIFF", "ISMEAR", "SIGMA", "ISPIN", "GGA", "METAGGA",
+    "LHFCALC", "AEXX", "HFSCREEN", "LDAU", "LDAUTYPE", "IVDW",
+    "IBRION", "NSW", "ISYM", "ML_LMLFF",
+)
+
+
+def _validate_dft(directory: Path, expected: Any, actual: Any) -> dict[str, Any]:
+    """Accept only converged static results on the indexed probe geometry."""
+    from ase.geometry import find_mic
+
+    from .dft_evidence import _same_setting
+    from .vasp_provenance import _outcar_fingerprint
+
+    outcar = directory / "OUTCAR"
+    text = outcar.read_text(errors="replace")
+    if expected.get_chemical_symbols() != actual.get_chemical_symbols():
+        raise SafetyError(f"OUTCAR species/order differs from POSCAR: {directory}")
+    if not np.allclose(expected.cell.array, actual.cell.array, atol=1e-5, rtol=0):
+        raise SafetyError(f"OUTCAR cell differs from POSCAR: {directory}")
+    _, distances = find_mic(actual.positions - expected.positions, expected.cell, pbc=expected.pbc)
+    if not np.all(np.isfinite(distances)) or np.max(distances) > 1e-5:
+        raise SafetyError(f"OUTCAR positions differ from POSCAR: {directory}")
+    identity = _outcar_fingerprint(outcar, tracked_tags=_DFT_TAGS)
+    if identity["ionic_frames_detected"] != 1:
+        raise SafetyError(f"Expected exactly one static force frame: {directory}")
+    if "General timing and accounting informations" not in text:
+        raise SafetyError(f"OUTCAR lacks normal termination evidence: {directory}")
+    if "aborting loop because EDIFF is reached" not in text:
+        raise SafetyError(f"OUTCAR lacks electronic convergence evidence: {directory}")
+    executed = identity["outcar_executed_tags"]
+    for tag, value in (("IBRION", "-1"), ("NSW", "0"), ("ISYM", "0")):
+        if tag not in executed or not _same_setting(executed[tag], value):
+            raise SafetyError(f"OUTCAR must demonstrate {tag}={value}: {directory}")
+    if executed.get("ML_LMLFF", "F").upper() in {"T", ".TRUE.", "TRUE"}:
+        raise SafetyError(f"OUTCAR used VASP ML forces: {directory}")
+    inputs = _incar_assignments(directory / "INCAR") if (directory / "INCAR").is_file() else {}
+    missing = []
+    for tag in _DFT_TAGS:
+        if tag in inputs:
+            if tag not in executed:
+                missing.append(f"Executed {tag} unavailable")
+            elif not _same_setting(inputs[tag], executed[tag]):
+                raise SafetyError(f"INCAR/OUTCAR {tag} differs: {directory}")
+    if not inputs:
+        missing.append("INCAR unavailable; executed/input consistency not checked")
+    if "ENCUT" not in executed:
+        missing.append("Executed ENCUT unavailable")
+    # The shared scalar fingerprint does not establish Hubbard arrays or spin initialization.
+    if any(tag in inputs for tag in ("LDAUL", "LDAUU", "LDAUJ")):
+        missing.append("Species-resolved Hubbard parameters require review")
+    if not (directory / "KPOINTS").is_file():
+        missing.append("KPOINTS unavailable; k-point input identity not checked")
+    if not identity["nkpts"]:
+        missing.append("Executed NKPTS unavailable")
+    potcar = directory / "POTCAR"
+    if potcar.is_file():
+        titles = re.findall(r"TITEL\s*=\s*([^\n]+)", potcar.read_text(errors="replace"))
+        titles = list(dict.fromkeys(title.strip() for title in titles))
+        if not titles or not identity["potcar_titles"]:
+            missing.append("POTCAR title identity unavailable")
+        elif titles != identity["potcar_titles"]:
+            raise SafetyError(f"POTCAR/OUTCAR titles differ: {directory}")
+    else:
+        missing.append("POTCAR unavailable; potential identity not checked")
+    return {
+        "outcar_sha256": identity["outcar_sha256"],
+        "geometry": "PASS", "electronic_convergence": "PASS", "termination": "PASS",
+        "missing_evidence": missing,
+        "executed_identity": {key: identity[key] for key in (
+            "outcar_executed_tags", "potcar_titles", "nkpts", "vasp_version")},
+        "input_sha256": {name: _sha256(directory / name)
+                         for name in ("INCAR", "KPOINTS", "POTCAR")
+                         if (directory / name).is_file()},
+    }
+
+
 def evaluate_derivative_probe(
     root: str | Path,
     *,
@@ -514,10 +609,13 @@ def evaluate_derivative_probe(
     deepmd_models: Sequence[str | Path] = (),
     device: str = "cpu",
     output_stem: str = "derivative_probe",
+    mace_dtype: str = "float64",
     _test_calculators: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Collect completed DFT points and evaluate MLIPs on the identical probe set."""
 
+    if mace_dtype not in {"float32", "float64"}:
+        raise ValueError("mace_dtype must be float32 or float64")
     if not output_stem or not _LABEL.fullmatch(output_stem):
         raise ValueError(
             "--output-stem must use only letters, numbers, '.', '_' or '-'"
@@ -536,12 +634,15 @@ def evaluate_derivative_probe(
     _verify_inputs(probe_root, rows)
     read, _ = _ase_io()
     calculators = dict(_test_calculators or {})
-    calculators.update(_calculators(mace_models, deepmd_models, device))
+    calculators.update(_calculators(mace_models, deepmd_models, device, mace_dtype))
 
     values: dict[tuple[str, str], dict[str, Any]] = {}
     prediction_rows: list[dict[str, Any]] = []
     warnings: list[str] = []
     dft_completed = 0
+    dft_evidence: dict[str, Any] = {}
+    executed_by_label: dict[str, dict[str, Any]] = {}
+    inputs_by_label: dict[str, dict[str, str]] = {}
 
     for row in rows:
         structure_id = str(row["structure_id"])
@@ -552,24 +653,43 @@ def evaluate_derivative_probe(
         if outcar.is_file() and outcar.stat().st_size:
             try:
                 dft_atoms = read(str(outcar), index=-1)
+                evidence = _validate_dft(directory, poscar_atoms, dft_atoms)
+                dft_evidence[structure_id] = evidence
+                identity = evidence["executed_identity"]
+                previous = executed_by_label.setdefault(str(row["label"]), identity)
+                if identity != previous:
+                    raise SafetyError(f"Executed DFT settings differ across probes for {row['label']}")
+                previous_inputs = inputs_by_label.setdefault(str(row["label"]), evidence["input_sha256"])
+                if previous_inputs != evidence["input_sha256"]:
+                    # Missing files are reported as unknown; conflicting files are unsafe.
+                    for name in previous_inputs.keys() & evidence["input_sha256"].keys():
+                        if previous_inputs[name] != evidence["input_sha256"][name]:
+                            raise SafetyError(f"{name} differs across probes for {row['label']}")
+                warnings.extend(f"{structure_id}: {note}" for note in evidence["missing_evidence"])
                 try:
                     dft_stress = np.asarray(
-                        dft_atoms.get_stress(voigt=True), dtype=float
+                        dft_atoms.get_stress(voigt=True, apply_constraint=False), dtype=float
                     )
                 except (NotImplementedError, RuntimeError, ValueError):
                     dft_stress = None
                 sources["DFT"] = (
                     float(dft_atoms.get_potential_energy()),
-                    np.asarray(dft_atoms.get_forces(), dtype=float),
+                    np.asarray(dft_atoms.get_forces(apply_constraint=False), dtype=float),
                     dft_stress,
                 )
                 dft_completed += 1
+            except SafetyError:
+                raise
             except Exception as exc:
                 warnings.append(f"Could not parse {outcar}: {exc}")
         for label, calculator in calculators.items():
             sources[label] = _prediction(poscar_atoms, calculator)
 
         for model, (energy, forces, stress) in sources.items():
+            if not np.isfinite(energy) or not np.all(np.isfinite(forces)) or (
+                stress is not None and (stress.shape != (6,) or not np.all(np.isfinite(stress)))
+            ):
+                raise SafetyError(f"Non-finite or invalid prediction for {model} on {structure_id}")
             if forces.shape != (int(row["natoms"]), 3):
                 raise SafetyError(
                     f"Unexpected force shape for {model} on {structure_id}: {forces.shape}"
@@ -763,7 +883,19 @@ def evaluate_derivative_probe(
     results_path = probe_root / f"{output_stem}_results.json"
     write_csv(predictions_path, prediction_rows)
     write_csv(responses_path, response_rows)
-    status = "COMPLETE" if dft_completed == len(rows) else "INCOMPLETE"
+    status = "INCOMPLETE" if dft_completed != len(rows) else "CHECK" if warnings else "COMPLETE"
+    packages = {}
+    for name in ("interfaceforge", "numpy", "ase", "mace-torch", "deepmd-kit", "torch"):
+        try:
+            packages[name] = version(name)
+        except PackageNotFoundError:
+            packages[name] = None
+    model_records = [
+        {"backend": backend, "path": str(Path(path).expanduser().resolve()),
+         "sha256": _sha256(Path(path).expanduser().resolve())}
+        for backend, paths in (("mace", mace_models), ("deepmd", deepmd_models))
+        for path in paths
+    ]
     payload = {
         "schema_version": SCHEMA_VERSION,
         "quantity": QUANTITY,
@@ -771,6 +903,19 @@ def evaluate_derivative_probe(
         "root": str(probe_root),
         "structures": len(rows),
         "dft_completed": dft_completed,
+        "dft_evidence": dft_evidence,
+        "provenance": {
+            "manifest_sha256": _sha256(manifest_path),
+            "implementation_sha256": _sha256(Path(__file__)),
+            "models": model_records,
+            "packages": packages,
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "mace_device": device,
+            "mace_dtype": mace_dtype,
+            "deepmd_device": "backend-managed",
+            "constraint_policy": "raw forces; full-coordinate displacements",
+        },
         "models": models,
         "summaries": summaries,
         "warnings": warnings,

@@ -2,7 +2,8 @@
 
 > **Verification note:** automated-test only. Structure generation, input
 > provenance, overwrite guards, and analytic harmonic-curvature recovery are
-> covered by tests. No real Si-Ti-N-O DFT/MLIP probe campaign has yet been run.
+> covered by tests, including synthetic OUTCARs parsed through ASE and DFT–MLIP
+comparison summaries. No real Si-Ti-N-O DFT/MLIP probe campaign has yet been run.
 
 Energy and force RMSE on ordinary held-out MD frames do not establish that an
 MLIP has learned the local curvature of the potential-energy surface. This
@@ -32,6 +33,11 @@ paper's exact data-generation protocol.
 
 Start with fully relaxed 0 K structures. A VASP run directory may be supplied;
 a non-empty `CONTCAR` is preferred over its `POSCAR`.
+
+These are **full-coordinate PES probes**: preparation removes source constraints
+and displaces all atoms. Evaluation uses raw forces and stress, including for
+older probe trees retaining selective-dynamics flags. It does not test only the
+free-atom subspace of a constrained relaxation.
 
 ```bash
 iface validate derivative-probe prepare derivative_probe \
@@ -91,6 +97,10 @@ INCAR to a static protocol:
 - electronic settings such as ENCUT, precision, spin, DFT+U, dispersion, and
   convergence retained from the template.
 
+INCAR assignments separated by semicolons are parsed individually; comments
+are removed and the last active assignment wins. Unparseable assignments fail
+rather than silently changing the electronic protocol.
+
 The generated hashes are checked again during evaluation. If any POSCAR or
 shared VASP input has changed, evaluation stops instead of mixing protocols.
 
@@ -108,6 +118,12 @@ iface validate derivative-probe evaluate derivative_probe \
   --device cuda --output-stem mace
 ```
 
+MACE defaults to `--mace-dtype float64` to reduce cancellation in energy
+second differences. To assess precision sensitivity, repeat with
+`--mace-dtype float32 --output-stem mace_float32`. This does not recover
+precision already lost during training. `--device` controls MACE; DeePMD device
+selection and precision remain backend-managed.
+
 Run DeePMD/DPA models in their own compatible environment if necessary:
 
 ```bash
@@ -124,6 +140,26 @@ The evaluator writes:
 - `<stem>_responses.csv`: energy- and force-derived directional curvatures
   for every symmetric pair;
 - `<stem>_results.json`: per-model comparison with DFT.
+
+DFT references must match the indexed species/order, cell and positions
+(with a 1e-5 Å absolute tolerance and periodic image equivalence), contain
+exactly one force frame, show normal termination and the explicit EDIFF-reached
+marker, and demonstrate `IBRION=-1`, `NSW=0`, `ISYM=0`. Contradictory geometry,
+tracked executed settings, POTCAR titles or inputs within a source stop evaluation.
+Other VASP convergence-marker formats are not currently accepted.
+
+`COMPLETE` means all DFT points were accepted without evidence warnings;
+`INCOMPLETE` means points are missing/unparseable; `CHECK` means all points were
+read but provenance needs review. None is a scientific pass/fail threshold.
+Missing executed settings or potential/k-point identity remain explicit warnings.
+POTCAR checks establish title identity, not binary equivalence to the potential
+used by VASP; NKPTS is not a full executed k-point mesh comparison. Hubbard
+arrays need manual review. Magnetic-state continuity is not established.
+
+The JSON records manifest and implementation hashes, model paths/hashes,
+OUTCAR/input hashes, inspected executed settings, package/Python/platform
+versions and requested MACE dtype/device. Rerunning with the same output stem
+replaces that stem's results; use distinct stems for comparisons.
 
 The default stem is `derivative_probe`. Set a different `--output-stem` for
 each backend-isolated run so a DeePMD environment does not overwrite MACE
@@ -159,3 +195,10 @@ It does not establish:
 For the current SiN/TiN/TiO work, use this probe to rank finalists for MD and
 future thermal-transport work. Continue to validate the swap-MC model primarily
 through DFT ordering energies at each oxygen composition.
+
+One random direction is reused at each strain by default. Use multiple directions
+and an amplitude sweep before interpreting model rankings. The energy diagnostic
+uses ASE's default VASP energy (extrapolated to zero smearing); finite-smearing
+forces need not be exact derivatives of that energy. Converge smearing and
+consider this when interpreting `k_F-k_E`. Neither numerical amplitude convergence
+nor a real MACE/DeePMD/DFT pilot has been established by the automated tests.
