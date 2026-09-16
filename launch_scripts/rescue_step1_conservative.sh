@@ -13,8 +13,13 @@ set -euo pipefail
 #   1. run must be diagnosed unstable by `iface vasp step1-status`;
 #   2. OSZICAR must be older than STALE_HOURS;
 #   3. no active Slurm job may have that run directory as WorkDir.
-# The Slurm WorkDir check is repeated immediately before any repair is written,
-# so a RUNNING/PENDING/COMPLETING/requeued job is never mutated underneath Slurm.
+#
+# Scheduler efficiency:
+#   Slurm state is read once per safety gate with a single `squeue` call using
+#   its WorkDir field (%Z).  No per-run/per-job `scontrol` RPC loop is used.
+#   A fresh second snapshot is taken immediately before mutation to close the
+#   race window. This makes the script suitable for large job sets and avoids
+#   excessive scheduler-controller traffic from login nodes.
 #
 # Usage:
 #   bash rescue_step1_conservative.sh [Step1_root] [--execute]
@@ -34,7 +39,7 @@ for arg in "$@"; do
     case "$arg" in
         --execute) EXECUTE=1 ;;
         -h|--help)
-            sed -n '3,31p' "$0"
+            sed -n '3,38p' "$0"
             exit 0
             ;;
         *) ROOT="$arg" ;;
@@ -48,7 +53,7 @@ ALGO="${ALGO:-Normal}"
 USE_LANGEVIN="${USE_LANGEVIN:-0}"
 LANGEVIN_GAMMA="${LANGEVIN_GAMMA:-10}"
 
-for cmd in iface squeue scontrol realpath; do
+for cmd in iface squeue realpath python; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "ERROR: '$cmd' is required; refusing rescue because scheduler state cannot be verified" >&2
         exit 2
@@ -63,28 +68,54 @@ fi
 ROOT="$(realpath "$ROOT")"
 STATUS_JSON="$(mktemp)"
 CANDIDATE_LIST="$(mktemp)"
-trap 'rm -f "$STATUS_JSON" "$CANDIDATE_LIST"' EXIT
+SLURM_SNAPSHOT="$(mktemp)"
+trap 'rm -f "$STATUS_JSON" "$CANDIDATE_LIST" "$SLURM_SNAPSHOT"' EXIT
 
-# Return "JOBID STATE" for an active Slurm job whose WorkDir is exactly the
-# supplied run directory. A job present in squeue is considered active for
-# rescue purposes regardless of state (PENDING/RUNNING/COMPLETING/etc.).
-slurm_active_for_run() {
-    local run target job_id state record workdir
-    run="$1"
-    target="$(realpath "$run")"
+snapshot_slurm() {
+    local destination="$1"
+    # %i JobID, %T long state, %Z WorkDir. Any job returned by squeue is active
+    # for rescue purposes, including pending/running/completing/requeued jobs.
+    if ! squeue -h -u "${USER:?USER is not set}" -o '%i|%T|%Z' > "$destination"; then
+        echo "ERROR: could not query Slurm; refusing rescue rather than guessing job state" >&2
+        exit 2
+    fi
+}
 
-    while read -r job_id state; do
-        [[ -n "$job_id" ]] || continue
-        record="$(scontrol show job -o "$job_id" 2>/dev/null || true)"
-        [[ -n "$record" ]] || continue
-        workdir="$(printf '%s\n' "$record" | sed -n 's/.* WorkDir=\([^ ]*\).*/\1/p')"
-        [[ -n "$workdir" ]] || continue
-        if [[ "$(realpath -m "$workdir")" == "$target" ]]; then
-            printf '%s %s\n' "$job_id" "$state"
-            return 0
-        fi
-    done < <(squeue -h -u "${USER:?USER is not set}" -o '%i %T')
-    return 1
+# Emit "RUN|JOBID STATE" for candidates whose absolute path is present as an
+# active Slurm WorkDir. Matching is done locally from one scheduler snapshot.
+active_candidates_from_snapshot() {
+    local candidates_file="$1"
+    local snapshot_file="$2"
+    python - "$candidates_file" "$snapshot_file" <<'PY'
+import os
+import sys
+
+candidates_path, snapshot_path = sys.argv[1:3]
+
+with open(candidates_path, encoding="utf-8") as handle:
+    candidates = [line.strip() for line in handle if line.strip()]
+
+active_by_dir: dict[str, list[tuple[str, str]]] = {}
+with open(snapshot_path, encoding="utf-8") as handle:
+    for raw in handle:
+        raw = raw.rstrip("\n")
+        if not raw:
+            continue
+        fields = raw.split("|", 2)
+        if len(fields) != 3:
+            continue
+        job_id, state, workdir = fields
+        if not workdir or workdir in {"N/A", "(null)"}:
+            continue
+        target = os.path.realpath(workdir)
+        active_by_dir.setdefault(target, []).append((job_id, state))
+
+for run in candidates:
+    target = os.path.realpath(run)
+    for job_id, state in active_by_dir.get(target, []):
+        print(f"{run}|{job_id} {state}")
+        break
+PY
 }
 
 iface vasp step1-status "$ROOT" --stale-hours "$STALE_HOURS" --json > "$STATUS_JSON"
@@ -110,11 +141,19 @@ if ((${#CANDIDATES[@]} == 0)); then
     exit 0
 fi
 
+snapshot_slurm "$SLURM_SNAPSHOT"
+mapfile -t ACTIVE_ROWS < <(active_candidates_from_snapshot "$CANDIDATE_LIST" "$SLURM_SNAPSHOT")
+
+declare -A ACTIVE_INFO=()
+for item in "${ACTIVE_ROWS[@]}"; do
+    ACTIVE_INFO["${item%%|*}"]="${item#*|}"
+done
+
 RUNS=()
 ACTIVE_SKIPPED=()
 for run in "${CANDIDATES[@]}"; do
-    if info="$(slurm_active_for_run "$run")"; then
-        ACTIVE_SKIPPED+=("$run|$info")
+    if [[ -n "${ACTIVE_INFO[$run]:-}" ]]; then
+        ACTIVE_SKIPPED+=("$run|${ACTIVE_INFO[$run]}")
     else
         RUNS+=("$run")
     fi
@@ -153,14 +192,11 @@ if [[ "$USE_LANGEVIN" == "1" ]]; then
 fi
 
 if ((EXECUTE)); then
-    # Race-condition guard: do a second Slurm WorkDir check immediately before
+    # Race-condition guard: take one fresh scheduler snapshot immediately before
     # touching any leaf. Abort the whole batch rather than partially mutate it.
-    RACE=()
-    for run in "${RUNS[@]}"; do
-        if info="$(slurm_active_for_run "$run")"; then
-            RACE+=("$run|$info")
-        fi
-    done
+    printf '%s\n' "${RUNS[@]}" > "$CANDIDATE_LIST"
+    snapshot_slurm "$SLURM_SNAPSHOT"
+    mapfile -t RACE < <(active_candidates_from_snapshot "$CANDIDATE_LIST" "$SLURM_SNAPSHOT")
     if ((${#RACE[@]})); then
         echo "ERROR: one or more selected jobs became active in Slurm after preflight; nothing was changed:" >&2
         for item in "${RACE[@]}"; do
