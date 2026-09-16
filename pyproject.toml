@@ -59,7 +59,7 @@ all = [
 ]
 
 [project.scripts]
-iface = "interfaceforge.cli:main"
+iface = "interfaceforge.profile_cli:main"
 iface-mace-roi = "interfaceforge.mace_roi:main"
 iface-allegro = "interfaceforge.allegro:main"
 iface-mace-leaf-collect = "interfaceforge.leaf_collect:main_mace"
