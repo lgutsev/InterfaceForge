@@ -26,11 +26,14 @@ from .aimd import AIMD_PROTOCOLS, sample_step2_runs, switch_step1_protocol
 from .audit import READINESS_PROFILES, run_audit
 from .beef import plot_beef_campaign
 from .campaign import build_plan, prepare_campaign, submit_campaign
+from .chempot_map import map_report
+from .chempot_map import write_reports as write_map_reports
 from .committee import collect_committee, verify_committee_bundle
 from .config import load_campaign, merge_interface_metadata, references_for
 from .data import collect_dataset
 from .errors import InterfaceForgeError, SafetyError
 from .exploration import generate_exploration
+from .gas_reference import PRESSURE_UNITS_IN_BAR, STANDARD_PRESSURE_BAR, gas_conditions
 from .geometry import (
     batch_slab_vacuum,
     build_slab,
@@ -529,24 +532,29 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 
-def cmd_phases(args: argparse.Namespace) -> int:
-    if args.phases_command == "suggest":
-        _json(suggest_phases(args.elements, api_key=args.api_key))
-        return 0
-    phases = {}
-    for item in args.phases:
+def _read_phase_arguments(items: Sequence[str]) -> dict[str, dict[str, Any]]:
+    """NAME=DIR entries into the composition/energy blocks the hull consumes."""
+
+    from .interface_mu import _read_phase
+
+    phases: dict[str, dict[str, Any]] = {}
+    for item in items:
         name, sep, directory = item.partition("=")
         if not sep:
             raise SafetyError(f"--phase expects NAME=DIR; got {item!r}")
-        from .interface_mu import _read_phase
-
         phase = _read_phase(name.strip(), directory.strip(), allow_vacuum=True)
         phases[name.strip()] = {
             "composition": phase["composition"],
             "energy_ev": phase["energy_ev"],
         }
-    fixed = {}
-    for item in args.fixed_dmu:
+    return phases
+
+
+def _read_fixed_dmu(items: Sequence[str]) -> dict[str, float]:
+    """ELEMENT=EV entries, rejecting duplicates and non-numbers."""
+
+    fixed: dict[str, float] = {}
+    for item in items:
         el, sep, value = item.partition("=")
         if not sep or not el.strip() or el.strip() in fixed:
             raise SafetyError("--fixed-dmu expects unique ELEMENT=VALUE entries")
@@ -554,9 +562,100 @@ def cmd_phases(args: argparse.Namespace) -> int:
             fixed[el.strip()] = float(value)
         except ValueError as exc:
             raise SafetyError("--fixed-dmu value must be a number in eV/atom") from exc
+    return fixed
+
+
+def cmd_phases(args: argparse.Namespace) -> int:
+    if args.phases_command == "suggest":
+        _json(suggest_phases(args.elements, api_key=args.api_key))
+        return 0
+    if args.phases_command == "gas-chempot":
+        return _cmd_phases_gas_chempot(args)
+    if args.phases_command == "map":
+        return _cmd_phases_map(args)
+    phases = _read_phase_arguments(args.phases)
+    fixed = _read_fixed_dmu(args.fixed_dmu)
     payload = hull_report(phases, args.compounds, args.anion, fixed_dmu=fixed)
     if args.output:
         payload['outputs'] = write_phases_reports(payload, args.output, phases)
+    _json(payload)
+    return 0
+
+
+def _gas_pressures(args: argparse.Namespace) -> dict[str, float]:
+    """The partial pressures given on the command line, keyed by element."""
+
+    pressures = {}
+    if getattr(args, "p_n2", None) is not None:
+        pressures["N"] = args.p_n2
+    if getattr(args, "p_o2", None) is not None:
+        pressures["O"] = args.p_o2
+    if not pressures:
+        raise SafetyError(
+            "give at least one partial pressure (--p-n2 and/or --p-o2). A gas "
+            "chemical potential is not defined without one."
+        )
+    return pressures
+
+
+def _cmd_phases_gas_chempot(args: argparse.Namespace) -> int:
+    """Gas thermochemistry alone: no phases, no hull, just mu(T, p)."""
+
+    energies = {}
+    if args.e_n2_ev is not None:
+        energies["N"] = args.e_n2_ev
+    if args.e_o2_ev is not None:
+        energies["O"] = args.e_o2_ev
+    _json(gas_conditions(
+        args.temperature,
+        _gas_pressures(args),
+        unit=args.pressure_unit,
+        energies_ev=energies,
+        standard_pressure_bar=args.standard_pressure_bar,
+        include_zero_point_energy=args.include_zpe,
+        reference_scheme=args.reference_scheme,
+    ))
+    return 0
+
+
+def _cmd_phases_map(args: argparse.Namespace) -> int:
+    """The 2D stability region, with any (T, p) atmospheres placed on it."""
+
+    phases = _read_phase_arguments(args.phases)
+    fixed = _read_fixed_dmu(args.fixed_dmu)
+    axes = [a.strip() for a in args.axes.split(",") if a.strip()]
+    conditions = []
+    if args.temperature is not None:
+        pressures = _gas_pressures(args)
+        missing = [a for a in axes if a not in pressures]
+        if missing:
+            raise SafetyError(
+                f"a partial pressure is needed for every axis; {missing} has none. "
+                "Use --p-n2 / --p-o2, or drop --temperature to get the 0 K region "
+                "on its own."
+            )
+        for temperature in args.temperature:
+            conditions.append({
+                "label": f"{temperature:g} K",
+                "temperature_k": temperature,
+                "pressures": {a: pressures[a] for a in axes},
+                "pressure_unit": args.pressure_unit,
+            })
+    clip = None
+    if args.clip:
+        values = [float(v) for v in args.clip.split(",")]
+        if len(values) != 4:
+            raise SafetyError("--clip expects XMIN,XMAX,YMIN,YMAX")
+        clip = {axes[0]: (values[0], values[1]), axes[1]: (values[2], values[3])}
+    payload = map_report(
+        phases, args.compounds, axes,
+        fixed_dmu=fixed, conditions=conditions, clip=clip,
+        include_zero_point_energy=args.include_zpe,
+        standard_pressure_bar=args.standard_pressure_bar,
+        reference_scheme=args.reference_scheme,
+    )
+    if args.output:
+        payload["outputs"] = write_map_reports(payload, args.output)
     _json(payload)
     return 0
 
@@ -1676,6 +1775,101 @@ def build_parser() -> argparse.ArgumentParser:
         "(png/svg/pdf) into DIR. Without it only the JSON goes to stdout",
     )
     phases_hull.set_defaults(func=cmd_phases)
+
+    def add_gas_options(parser: argparse.ArgumentParser, *, temperatures: bool) -> None:
+        """The (T, p) reservoir flags, identical on both finite-T subcommands."""
+
+        if temperatures:
+            parser.add_argument(
+                "--temperature", type=float, action="append", metavar="K",
+                help="Temperature in K (repeatable: one marker per temperature). "
+                "Omit for the 0 K region alone",
+            )
+        else:
+            parser.add_argument("--temperature", type=float, required=True, metavar="K")
+        parser.add_argument(
+            "--p-n2", type=float, default=None, metavar="P",
+            help="N2 partial pressure, in --pressure-unit",
+        )
+        parser.add_argument(
+            "--p-o2", type=float, default=None, metavar="P",
+            help="O2 partial pressure, in --pressure-unit",
+        )
+        parser.add_argument(
+            "--pressure-unit", default="bar", choices=sorted(PRESSURE_UNITS_IN_BAR),
+            help="Unit of --p-n2/--p-o2 (default: bar)",
+        )
+        parser.add_argument(
+            "--standard-pressure-bar", type=float, default=STANDARD_PRESSURE_BAR,
+            metavar="BAR",
+            help="Standard-state pressure of the tabulated entropies (default: 1 "
+            "bar, which is what NIST-JANAF tabulates)",
+        )
+        parser.add_argument(
+            "--include-zpe", action="store_true",
+            help="Add the molecular zero-point energy to the gas reference. Off by "
+            "default: the solids here carry no ZPE either, so including it on the "
+            "gas alone is a one-sided correction",
+        )
+        parser.add_argument(
+            "--reference-scheme", default="raw-dft", metavar="NAME",
+            help="Names the molecular-reference convention recorded in the output. "
+            "'raw-dft' (default) means the DFT energies are used unmodified",
+        )
+
+    phases_gas = phases_commands.add_parser(
+        "gas-chempot",
+        help="mu(N) and mu(O) from a NIST-JANAF gas reservoir at (T, p)",
+        description="Gas thermochemistry on its own: no phases, no hull. Reports "
+        "the thermal and pressure terms separately, per molecule and per atom, "
+        "with the source of every number.",
+    )
+    add_gas_options(phases_gas, temperatures=False)
+    phases_gas.add_argument(
+        "--e-n2-ev", type=float, default=None, metavar="EV",
+        help="DFT total energy of the N2 molecule. Supply it to get absolute "
+        "potentials as well as deltas; the delta does not depend on it",
+    )
+    phases_gas.add_argument("--e-o2-ev", type=float, default=None, metavar="EV")
+    phases_gas.set_defaults(func=cmd_phases)
+
+    phases_map = phases_commands.add_parser(
+        "map",
+        help="2D chemical-potential stability region, with (T, p) atmospheres on it",
+        description="Computes the feasible (dmu_N, dmu_O) polygon from the same "
+        "phase energies as `phases hull`, reports which phase generates each "
+        "boundary and whether it binds, and projects gas conditions onto it.",
+    )
+    phases_map.add_argument(
+        "--phase", action="append", default=[], dest="phases", required=True,
+        metavar="NAME=DIR", help="A finished VASP run for one phase (repeatable)",
+    )
+    phases_map.add_argument(
+        "--compound", action="append", default=[], dest="compounds", required=True,
+        metavar="NAME",
+        help="The interface's own constituents, held in equilibrium. These define "
+        "the plane: with E elements you need E-2 of them (plus any --fixed-dmu)",
+    )
+    phases_map.add_argument(
+        "--axes", default="N,O", metavar="A,B",
+        help="The two elements to plot (default: N,O)",
+    )
+    phases_map.add_argument(
+        "--fixed-dmu", action="append", default=[], metavar="ELEMENT=EV",
+        help="Fix a further chemical potential, for a system with more than two "
+        "elements left after the constituents",
+    )
+    phases_map.add_argument(
+        "--clip", default=None, metavar="XMIN,XMAX,YMIN,YMAX",
+        help="Drawing window in eV/atom. Only affects the figure; the region "
+        "itself is computed unclipped and reported as bounded or not",
+    )
+    add_gas_options(phases_map, temperatures=True)
+    phases_map.add_argument(
+        "--output", metavar="DIR",
+        help="Also write chempot_map.{json,csv,md} and the figure into DIR",
+    )
+    phases_map.set_defaults(func=cmd_phases)
 
     mlip_compare = commands.add_parser(
         "mlip-compare",

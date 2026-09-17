@@ -44,6 +44,8 @@ For mapped collections spanning unrelated VASP roots, see the
 | Guide | Use it for |
 |---|---|
 | [Interface energy](interface-energy.md) | Work of adhesion and literature/reference comparison |
+| [Grand-canonical interface energy](interface-mu.md) | `gamma(mu)` against a reservoir, molecular references, and the 0 K chemical-potential window |
+| [Gas reservoirs and the 2D map](gas-chempot.md) | Finite-`T`, finite-`p` N2/O2 chemical potentials and the `(dmu_N, dmu_O)` stability region |
 | [Separation energy](separation-energy.md) | Cleavage/separation calculations and DFT-versus-MLIP comparison |
 | [Swap Monte Carlo](swap-mc.md) | Fixed-composition N/O ordering search over MLIP-relaxed interfaces, plus the VASP ordering benchmark that verifies it (after PAIPAI) |
 | [Stratified validation](stratified-validation.md) | Errors by geometry class, temperature, coordination, and other physical groups |
