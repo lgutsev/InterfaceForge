@@ -33,6 +33,31 @@ PAPER = {
     "url": "https://doi.org/10.1038/s41467-026-76391-w",
 }
 
+CURVATURE_DEFINITIONS = {
+    "quantity": "directional second derivative of the potential-energy surface",
+    "units": "eV/Angstrom^2",
+    "displacement_vector": "d is the full 3N Cartesian displacement of one symmetric pair",
+    "unit_direction": "u = d / ||d||",
+    "energy_derived": "k_E = [E(+d) - 2 E(0) + E(-d)] / ||d||^2",
+    "force_derived": "k_F = -[F(+d) - F(-d)] . d / (2 ||d||^2)",
+    "interpretation": (
+        "Both estimators approximate u^T H u, the directional curvature of the "
+        "3N x 3N Hessian H along u, in eV/Angstrom^2."
+    ),
+    "not_established": (
+        "These are not mass-weighted phonon frequencies, a full Hessian, or a "
+        "phonon dispersion; no dynamical matrix is built or diagonalized."
+    ),
+    "internal_delta": (
+        "k_F - k_E is a finite-difference/self-consistency diagnostic for one "
+        "model, not a comparison against DFT."
+    ),
+    "compatibility_alias": (
+        "'directional_curvature_ev_a2' is retained as an alias of "
+        "'force_curvature_ev_a2' for readers of schema_version 1 results."
+    ),
+}
+
 _STATIC_OVERRIDES = {
     "IBRION": "-1",
     "NSW": "0",
@@ -525,6 +550,251 @@ def _metrics(reference: np.ndarray, predicted: np.ndarray) -> dict[str, float]:
     }
 
 
+FORCE_EXPORT_SCHEMA = "interfaceforge.derivative_probe.forces/1"
+
+
+def _export_predictions(
+    path: Path, values: Mapping[tuple[str, str], Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Write every per-structure force array to a pickle-free ``.npz``.
+
+    ``np.load(path)`` reconstructs the arrays without ``allow_pickle``; the
+    parallel ``model``/``structure_id`` string arrays give each ``forces_<i>``
+    array an unambiguous owner, so the reported force errors can be recomputed
+    without rerunning inference.
+    """
+
+    keys = sorted(values)
+    arrays: dict[str, Any] = {}
+    entries: list[dict[str, Any]] = []
+    for index, (model, structure_id) in enumerate(keys):
+        value = values[(model, structure_id)]
+        forces = np.asarray(value["forces"], dtype=float)
+        force_key = f"forces_{index:06d}"
+        arrays[force_key] = forces
+        stress = value["stress"]
+        stress_key = None
+        if stress is not None:
+            stress_key = f"stress_{index:06d}"
+            arrays[stress_key] = np.asarray(stress, dtype=float)
+        entries.append(
+            {
+                "index": index,
+                "model": model,
+                "structure_id": structure_id,
+                "natoms": int(value["natoms"]),
+                "forces_key": force_key,
+                "forces_shape": [int(size) for size in forces.shape],
+                "stress_key": stress_key,
+            }
+        )
+    np.savez_compressed(
+        path,
+        schema=np.asarray(FORCE_EXPORT_SCHEMA),
+        model=np.asarray([model for model, _ in keys], dtype=np.str_),
+        structure_id=np.asarray([sid for _, sid in keys], dtype=np.str_),
+        natoms=np.asarray([entry["natoms"] for entry in entries], dtype=np.int64),
+        energy_ev=np.asarray(
+            [values[key]["energy_ev"] for key in keys], dtype=float
+        ),
+        has_stress=np.asarray(
+            [entry["stress_key"] is not None for entry in entries], dtype=bool
+        ),
+        forces_units=np.asarray("eV/Angstrom"),
+        stress_units=np.asarray("eV/Angstrom^3"),
+        energy_units=np.asarray("eV"),
+        **arrays,
+    )
+    return {
+        "path": str(path),
+        "schema": FORCE_EXPORT_SCHEMA,
+        "format": "numpy .npz (loadable with np.load without allow_pickle)",
+        "units": {
+            "forces": "eV/Angstrom",
+            "stress": "eV/Angstrom^3 (Voigt xx, yy, zz, yz, xz, xy)",
+            "energy": "eV",
+        },
+        "force_array_layout": "(natoms, 3) Cartesian, POSCAR atom order, raw (unconstrained)",
+        "entries": entries,
+        "sha256": _sha256(path),
+    }
+
+
+def _response_key(row: Mapping[str, Any]) -> tuple[str, float, int]:
+    return (str(row["label"]), float(row["strain_fraction"]), int(row["sample"]))
+
+
+def _summarize_model(
+    model: str,
+    rows: Sequence[Mapping[str, Any]],
+    values: Mapping[tuple[str, str], Mapping[str, Any]],
+    row_by_key: Mapping[tuple[str, float, Any, int], Mapping[str, Any]],
+    response_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Compare one model with DFT, metric by metric.
+
+    Each metric depends only on its own prerequisites: forces need a matched
+    DFT/MLIP pair, stress additionally needs stress from both sides,
+    relative energies need that source's zero-strain center, and curvatures
+    need a complete minus/center/plus triplet. A missing prerequisite omits
+    only the metrics that need it and is explained in ``omitted_metrics``.
+    """
+
+    matched = [
+        row
+        for row in rows
+        if ("DFT", str(row["structure_id"])) in values
+        and (model, str(row["structure_id"])) in values
+    ]
+    if not matched:
+        return None
+
+    omitted: dict[str, str] = {}
+    notes: dict[str, list[str]] = {}
+
+    summary: dict[str, Any] = {
+        "model": model,
+        # Retained meaning: probe structures with both a DFT and an MLIP result.
+        "matched_structures": len(matched),
+    }
+
+    # Forces: every matched DFT/MLIP structure.
+    dft_force = np.concatenate(
+        [values[("DFT", str(row["structure_id"]))]["forces"].reshape(-1) for row in matched]
+    )
+    model_force = np.concatenate(
+        [values[(model, str(row["structure_id"]))]["forces"].reshape(-1) for row in matched]
+    )
+    summary["force_ev_a"] = _metrics(dft_force, model_force)
+    summary["force_matched_structures"] = len(matched)
+    summary["force_components"] = int(dft_force.size)
+
+    # Stress: matched structures that carry stress on both sides.
+    stress_matched = [
+        row
+        for row in matched
+        if values[("DFT", str(row["structure_id"]))]["stress"] is not None
+        and values[(model, str(row["structure_id"]))]["stress"] is not None
+    ]
+    if stress_matched:
+        summary["stress_ev_a3"] = _metrics(
+            np.concatenate(
+                [values[("DFT", str(row["structure_id"]))]["stress"] for row in stress_matched]
+            ),
+            np.concatenate(
+                [values[(model, str(row["structure_id"]))]["stress"] for row in stress_matched]
+            ),
+        )
+        summary["stress_matched_structures"] = len(stress_matched)
+        if len(stress_matched) < len(matched):
+            notes.setdefault("stress_ev_a3", []).append(
+                f"{len(matched) - len(stress_matched)} matched structure(s) lack stress "
+                "from DFT or from the model and are excluded."
+            )
+    else:
+        summary["stress_matched_structures"] = 0
+        omitted["stress_ev_a3"] = (
+            "No matched structure provides stress from both DFT and the model."
+        )
+
+    # Relative energies: need this source's zero-strain center on both sides.
+    energy_matched: list[tuple[Mapping[str, Any], str]] = []
+    dropped_sources: dict[str, str] = {}
+    for row in matched:
+        label = str(row["label"])
+        center = row_by_key.get((label, 0.0, None, 0))
+        if center is None:
+            dropped_sources[label] = "no zero-strain center was prepared for this source"
+            continue
+        center_id = str(center["structure_id"])
+        if ("DFT", center_id) not in values or (model, center_id) not in values:
+            dropped_sources[label] = (
+                "the zero-strain center has no matched DFT and model result"
+            )
+            continue
+        energy_matched.append((row, center_id))
+    if energy_matched:
+        dft_delta = [
+            (
+                values[("DFT", str(row["structure_id"]))]["energy_ev"]
+                - values[("DFT", center_id)]["energy_ev"]
+            )
+            / values[("DFT", str(row["structure_id"]))]["natoms"]
+            for row, center_id in energy_matched
+        ]
+        model_delta = [
+            (
+                values[(model, str(row["structure_id"]))]["energy_ev"]
+                - values[(model, center_id)]["energy_ev"]
+            )
+            / values[(model, str(row["structure_id"]))]["natoms"]
+            for row, center_id in energy_matched
+        ]
+        summary["relative_energy_mev_atom"] = {
+            key: value * 1000.0
+            for key, value in _metrics(
+                np.asarray(dft_delta), np.asarray(model_delta)
+            ).items()
+        }
+        summary["relative_energy_matched_structures"] = len(energy_matched)
+        if dropped_sources:
+            notes.setdefault("relative_energy_mev_atom", []).extend(
+                f"Source {label!r} excluded: {reason}."
+                for label, reason in sorted(dropped_sources.items())
+            )
+    else:
+        summary["relative_energy_matched_structures"] = 0
+        detail = "; ".join(
+            f"{label}: {reason}" for label, reason in sorted(dropped_sources.items())
+        )
+        omitted["relative_energy_mev_atom"] = (
+            "No source has a usable zero-strain energy reference"
+            + (f" ({detail})." if detail else ".")
+        )
+
+    # Curvatures: complete minus/center/plus triplets for DFT and the model.
+    dft_responses = {
+        _response_key(row): row for row in response_rows if row["model"] == "DFT"
+    }
+    pairs: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = [
+        (dft_responses[_response_key(row)], row)
+        for row in response_rows
+        if row["model"] == model and _response_key(row) in dft_responses
+    ]
+    for field, count_field, name in (
+        ("energy_curvature_ev_a2", "matched_energy_curvatures", "energy-derived"),
+        ("force_curvature_ev_a2", "matched_force_curvatures", "force-derived"),
+    ):
+        summary[count_field] = len(pairs)
+        if pairs:
+            summary[field] = _metrics(
+                np.asarray([reference[field] for reference, _ in pairs]),
+                np.asarray([predicted[field] for _, predicted in pairs]),
+            )
+        else:
+            omitted[field] = (
+                "No symmetric displacement pair has a complete minus/center/plus "
+                f"triplet for both DFT and the model, so no {name} curvature "
+                "could be compared."
+            )
+    if pairs:
+        # Compatibility alias for schema_version 1 readers; a copy so that a
+        # consumer editing one view cannot silently change the other.
+        summary["directional_curvature_ev_a2"] = dict(summary["force_curvature_ev_a2"])
+        summary["matched_curvatures"] = len(pairs)
+    else:
+        summary["matched_curvatures"] = 0
+    summary["curvature_alias"] = (
+        "directional_curvature_ev_a2 == force_curvature_ev_a2"
+    )
+
+    if omitted:
+        summary["omitted_metrics"] = omitted
+    if notes:
+        summary["metric_notes"] = notes
+    return summary
+
+
 _DFT_TAGS = (
     "ENCUT", "EDIFF", "ISMEAR", "SIGMA", "ISPIN", "GGA", "METAGGA",
     "LHFCALC", "AEXX", "HFSCREEN", "LDAU", "LDAUTYPE", "IVDW",
@@ -659,12 +929,14 @@ def evaluate_derivative_probe(
                 previous = executed_by_label.setdefault(str(row["label"]), identity)
                 if identity != previous:
                     raise SafetyError(f"Executed DFT settings differ across probes for {row['label']}")
-                previous_inputs = inputs_by_label.setdefault(str(row["label"]), evidence["input_sha256"])
-                if previous_inputs != evidence["input_sha256"]:
-                    # Missing files are reported as unknown; conflicting files are unsafe.
-                    for name in previous_inputs.keys() & evidence["input_sha256"].keys():
-                        if previous_inputs[name] != evidence["input_sha256"][name]:
-                            raise SafetyError(f"{name} differs across probes for {row['label']}")
+                # Missing files stay warnings; the first *available* hash of each
+                # file name is the reference, so a probe that lacks one input
+                # cannot hide a conflict between probes that do provide it.
+                reference_inputs = inputs_by_label.setdefault(str(row["label"]), {})
+                for name, digest in evidence["input_sha256"].items():
+                    first = reference_inputs.setdefault(name, digest)
+                    if first != digest:
+                        raise SafetyError(f"{name} differs across probes for {row['label']}")
                 warnings.extend(f"{structure_id}: {note}" for note in evidence["missing_evidence"])
                 try:
                     dft_stress = np.asarray(
@@ -784,89 +1056,10 @@ def evaluate_derivative_probe(
 
     summaries: list[dict[str, Any]] = []
     if "DFT" in models:
-        dft_responses = {
-            (row["label"], float(row["strain_fraction"]), int(row["sample"])): row
-            for row in response_rows
-            if row["model"] == "DFT"
-        }
         for model in [item for item in models if item != "DFT"]:
-            common = [
-                row
-                for row in rows
-                if ("DFT", str(row["structure_id"])) in values
-                and (model, str(row["structure_id"])) in values
-            ]
-            if not common:
-                continue
-            dft_energy_delta: list[float] = []
-            model_energy_delta: list[float] = []
-            dft_force: list[float] = []
-            model_force: list[float] = []
-            dft_stress: list[float] = []
-            model_stress: list[float] = []
-            for row in common:
-                source_center = row_by_key.get((str(row["label"]), 0.0, None, 0))
-                if source_center is None:
-                    raise SafetyError(
-                        "Energy comparison requires zero strain among the prepared centers"
-                    )
-                sid = str(row["structure_id"])
-                center_id = str(source_center["structure_id"])
-                if ("DFT", center_id) not in values or (model, center_id) not in values:
-                    continue
-                dft = values[("DFT", sid)]
-                pred = values[(model, sid)]
-                dft_energy_delta.append(
-                    (dft["energy_ev"] - values[("DFT", center_id)]["energy_ev"])
-                    / dft["natoms"]
-                )
-                model_energy_delta.append(
-                    (pred["energy_ev"] - values[(model, center_id)]["energy_ev"])
-                    / pred["natoms"]
-                )
-                dft_force.extend(dft["forces"].reshape(-1))
-                model_force.extend(pred["forces"].reshape(-1))
-                if dft["stress"] is not None and pred["stress"] is not None:
-                    dft_stress.extend(dft["stress"])
-                    model_stress.extend(pred["stress"])
-            if not dft_energy_delta:
-                continue
-            summary: dict[str, Any] = {
-                "model": model,
-                "matched_structures": len(dft_energy_delta),
-                "relative_energy_mev_atom": {
-                    key: value * 1000.0
-                    for key, value in _metrics(
-                        np.asarray(dft_energy_delta), np.asarray(model_energy_delta)
-                    ).items()
-                },
-                "force_ev_a": _metrics(
-                    np.asarray(dft_force), np.asarray(model_force)
-                ),
-            }
-            if dft_stress:
-                summary["stress_ev_a3"] = _metrics(
-                    np.asarray(dft_stress), np.asarray(model_stress)
-                )
-            model_curvatures: list[float] = []
-            dft_curvatures: list[float] = []
-            for response in response_rows:
-                if response["model"] != model:
-                    continue
-                key = (
-                    response["label"],
-                    float(response["strain_fraction"]),
-                    int(response["sample"]),
-                )
-                if key in dft_responses:
-                    model_curvatures.append(response["force_curvature_ev_a2"])
-                    dft_curvatures.append(dft_responses[key]["force_curvature_ev_a2"])
-            if dft_curvatures:
-                summary["directional_curvature_ev_a2"] = _metrics(
-                    np.asarray(dft_curvatures), np.asarray(model_curvatures)
-                )
-                summary["matched_curvatures"] = len(dft_curvatures)
-            summaries.append(summary)
+            summary = _summarize_model(model, rows, values, row_by_key, response_rows)
+            if summary is not None:
+                summaries.append(summary)
 
     def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         if not records:
@@ -881,8 +1074,10 @@ def evaluate_derivative_probe(
     predictions_path = probe_root / f"{output_stem}_predictions.csv"
     responses_path = probe_root / f"{output_stem}_responses.csv"
     results_path = probe_root / f"{output_stem}_results.json"
+    arrays_path = probe_root / f"{output_stem}_arrays.npz"
     write_csv(predictions_path, prediction_rows)
     write_csv(responses_path, response_rows)
+    force_export = _export_predictions(arrays_path, values)
     status = "INCOMPLETE" if dft_completed != len(rows) else "CHECK" if warnings else "COMPLETE"
     packages = {}
     for name in ("interfaceforge", "numpy", "ase", "mace-torch", "deepmd-kit", "torch"):
@@ -918,6 +1113,8 @@ def evaluate_derivative_probe(
         },
         "models": models,
         "summaries": summaries,
+        "curvature_definitions": CURVATURE_DEFINITIONS,
+        "force_export": force_export,
         "warnings": warnings,
         "citation": PAPER,
         "output_stem": output_stem,
@@ -925,6 +1122,7 @@ def evaluate_derivative_probe(
             "predictions": str(predictions_path),
             "responses": str(responses_path),
             "summary": str(results_path),
+            "arrays": str(arrays_path),
         },
     }
     _json_write(results_path, payload)
