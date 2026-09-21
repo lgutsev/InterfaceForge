@@ -204,3 +204,39 @@ To remake figures from existing `publication_dos_data` without rerunning SUMO:
 ```bash
 iface vasp slab-publish . --config slab_publication.json
 ```
+
+### Surface-normal axis
+
+`slab-align` supports vacuum along x/a, y/b, or z/c. The chosen lattice
+vector must be perpendicular to the other two; tilted normals are rejected.
+Old configs default to z. For an x-normal slab use:
+
+```json
+{
+  "axis": "x",
+  "side": "high-x",
+  "references": [
+    {"prefix": "FAPI_FAI_Surf", "reference": "FAPI_FAI_Surf"}
+  ]
+}
+```
+
+Use `low-x` for the opposite face (and analogously `high-y`/`low-y`).
+An explicit side can also select the axis without an `axis` key; conflicting
+axis/side settings are rejected. Averaging, periodic vacuum detection, ionic
+center, plot labels and `locpot.dat` coordinates follow this selection.
+JSON/TSV include `axis`, `suggested_DIPOL_normal`, and `dipole_axis_status`.
+The legacy `suggested_DIPOL_z` is populated only for z; the legacy profile
+`c_length_A` field is the selected length and has a `normal_length_A` alias.
+
+Generated `INCAR.dipole_fix` uses IDIPOL=1/2/3 for x/y/z and changes only the
+corresponding DIPOL component. The recorded OUTCAR IDIPOL takes precedence
+for the direction audit; a mismatch is flagged even with a flat potential.
+An unavailable OUTCAR direction is marked UNKNOWN. VASP vacuum-level
+crosschecks are performed only when its recorded direction matches.
+Changing the analysis axis does not repair a calculation performed with the
+wrong dipole direction: obtain a self-consistent static calculation with the
+correct IDIPOL before reporting the corrected work function.
+
+This axis option applies to `slab-align`; it does not generalize the separate
+`slab-publish` structure/DOS layout workflow.

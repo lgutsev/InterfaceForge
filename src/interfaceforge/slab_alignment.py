@@ -98,6 +98,9 @@ OUTPUT_FIELDS = [
     "high_minus_low_vacuum_eV",
     "low_slope_eV_per_A",
     "high_slope_eV_per_A",
+    "axis",
+    "suggested_DIPOL_normal",
+    "dipole_axis_status",
     "suggested_DIPOL_z",
     "compactness_R",
     "current_LDIPOL",
@@ -123,6 +126,9 @@ AUDIT_FIELDS = [
     "vasp_lower_vacuum_eV",
     "selected_minus_vasp_vacuum_eV",
     "vasp_vacuum_warning",
+    "axis",
+    "suggested_DIPOL_normal",
+    "dipole_axis_status",
     "suggested_DIPOL_z",
     "compactness_R",
     "current_LDIPOL",
@@ -147,6 +153,19 @@ class Structure:
     counts: list[int]
     fractional: np.ndarray
     coordinate_end_line: int
+    axis: str = "z"
+
+    @property
+    def axis_index(self) -> int:
+        return "xyz".index(self.axis)
+
+    @property
+    def normal_length(self) -> float:
+        return float(np.linalg.norm(self.cell[self.axis_index]))
+
+    @property
+    def normal_positions(self) -> np.ndarray:
+        return np.mod(self.fractional[:, self.axis_index], 1.0) * self.normal_length
 
     @property
     def c_length(self) -> float:
@@ -189,6 +208,7 @@ class ProfileAnalysis:
     atom_high_A: float
     low: Plateau
     high: Plateau
+    axis: str = "z"
 
 
 def _next_nonempty(lines: list[str], index: int) -> int:
@@ -260,12 +280,19 @@ def parse_poscar_lines(lines: list[str]) -> Structure:
     return Structure(cell, species, counts, fractional, index)
 
 
-def read_locpot(path: str | Path) -> tuple[Structure, np.ndarray, np.ndarray]:
+def read_locpot(path: str | Path, axis: str = "z") -> tuple[Structure, np.ndarray, np.ndarray]:
     """Read the raw LOCPOT and return its z-planar average in eV."""
 
     input_path = Path(path)
     lines = input_path.read_text(encoding="utf-8", errors="replace").splitlines()
     structure = parse_poscar_lines(lines)
+    if axis not in ("x", "y", "z"):
+        raise SafetyError("Surface-normal axis must be x, y, or z")
+    structure.axis = axis
+    normal = structure.cell[structure.axis_index]
+    for index, vector in enumerate(structure.cell):
+        if index != structure.axis_index and abs(np.dot(normal, vector)) > 1e-8 * np.linalg.norm(normal) * np.linalg.norm(vector):
+            raise SafetyError("Selected normal lattice vector must be perpendicular to the other two vectors")
     grid_index = _next_nonempty(lines, structure.coordinate_end_line)
     try:
         grid = [int(value) for value in lines[grid_index].split()[:3]]
@@ -280,8 +307,10 @@ def read_locpot(path: str | Path) -> tuple[Structure, np.ndarray, np.ndarray]:
         raise SafetyError(f"{input_path} has {values.size} grid values; expected {required}")
     # VASP writes x fastest, then y, then z. LOCPOT is already in eV and must
     # not receive the volume rescaling that ASE applies to charge densities.
-    potential = values.reshape((nz, ny, nx)).mean(axis=(1, 2))
-    z_grid = np.arange(nz, dtype=float) * structure.c_length / nz
+    array_axis = 2 - structure.axis_index
+    potential = values.reshape((nz, ny, nx)).mean(axis=tuple(i for i in range(3) if i != array_axis))
+    count = grid[structure.axis_index]
+    z_grid = np.arange(count, dtype=float) * structure.normal_length / count
     return structure, z_grid, potential
 
 
@@ -362,7 +391,7 @@ def band_edges_from_vasprun(path: str | Path) -> tuple[float, float, float, floa
 def largest_periodic_gap(z_values: np.ndarray, length: float) -> tuple[float, float, float]:
     values = np.sort(np.unique(np.mod(z_values, length)))
     if values.size < 2:
-        raise SafetyError("At least two distinct z coordinates are required")
+        raise SafetyError("At least two distinct normal coordinates are required")
     next_values = np.r_[values[1:], values[0] + length]
     gaps = next_values - values
     index = int(np.argmax(gaps))
@@ -462,7 +491,7 @@ def _fit_plateau(
         outlier_factor=discontinuity_factor,
         maximum_width_A=discontinuity_max_width_angstrom,
     )
-    if side == "low-z":
+    if side.startswith("low-"):
         steps = [
             step
             for step in steps
@@ -480,10 +509,10 @@ def _fit_plateau(
     correction_step_width_A: float | None = None
     if correction_step_detected:
         transition_start, transition_end, correction_step_A, correction_step_eV = (
-            steps[-1] if side == "low-z" else steps[0]
+            steps[-1] if side.startswith("low-") else steps[0]
         )
         correction_step_width_A = transition_end - transition_start
-        if side == "low-z":
+        if side.startswith("low-"):
             keep = x_values >= transition_end + discontinuity_margin_angstrom
         else:
             keep = x_values <= transition_start - discontinuity_margin_angstrom
@@ -530,12 +559,12 @@ def analyze_profile(
 ) -> tuple[ProfileAnalysis, np.ndarray, np.ndarray]:
     """Fit the two physical vacuum sides independently across a periodic cell."""
 
-    length = structure.c_length
-    gap_start, _gap_end, gap_width = largest_periodic_gap(structure.z_angstrom, length)
+    length = structure.normal_length
+    gap_start, _gap_end, gap_width = largest_periodic_gap(structure.normal_positions, length)
     if gap_width < 2 * (buffer_angstrom + minimum_window_angstrom):
         raise SafetyError(f"Total periodic vacuum gap {gap_width:.3f} A is too small to analyze both sides")
     cut = (gap_start + 0.5 * gap_width) % length
-    atom_shifted = np.mod(structure.z_angstrom - cut, length)
+    atom_shifted = np.mod(structure.normal_positions - cut, length)
     grid_shifted = np.mod(z_grid - cut, length)
     order = np.argsort(grid_shifted)
     grid_shifted, potential_shifted = grid_shifted[order], potential[order]
@@ -544,9 +573,9 @@ def analyze_profile(
     low_start, low_end = buffer_angstrom, atom_low - buffer_angstrom
     high_start, high_end = atom_high + buffer_angstrom, length - buffer_angstrom
     if low_end - low_start < minimum_window_angstrom:
-        raise SafetyError(f"Low-z vacuum window is only {low_end - low_start:.3f} A")
+        raise SafetyError(f"Low-{structure.axis} vacuum window is only {low_end - low_start:.3f} A")
     if high_end - high_start < minimum_window_angstrom:
-        raise SafetyError(f"High-z vacuum window is only {high_end - high_start:.3f} A")
+        raise SafetyError(f"High-{structure.axis} vacuum window is only {high_end - high_start:.3f} A")
     fit_options = {
         "minimum_window_angstrom": minimum_window_angstrom,
         "discontinuity_min_eV": discontinuity_min_eV,
@@ -554,10 +583,10 @@ def analyze_profile(
         "discontinuity_max_width_angstrom": discontinuity_max_width_angstrom,
         "discontinuity_margin_angstrom": discontinuity_margin_angstrom,
     }
-    low = _fit_plateau("low-z", grid_shifted, potential_shifted, low_start, low_end, **fit_options)
-    high = _fit_plateau("high-z", grid_shifted, potential_shifted, high_start, high_end, **fit_options)
+    low = _fit_plateau(f"low-{structure.axis}", grid_shifted, potential_shifted, low_start, low_end, **fit_options)
+    high = _fit_plateau(f"high-{structure.axis}", grid_shifted, potential_shifted, high_start, high_end, **fit_options)
     return (
-        ProfileAnalysis(cut, length, atom_low, atom_high, low, high),
+        ProfileAnalysis(cut, length, atom_low, atom_high, low, high, structure.axis),
         grid_shifted,
         potential_shifted,
     )
@@ -572,7 +601,7 @@ def ionic_center_fraction(structure: Structure) -> tuple[float, float, list[str]
     mass-weighted mean before mapping it back into fractional coordinates.
     """
 
-    z_fraction = np.mod(structure.fractional[:, 2], 1.0)
+    z_fraction = np.mod(structure.fractional[:, structure.axis_index], 1.0)
     masses: list[float] = []
     missing: list[str] = []
     for element in structure.elements:
@@ -587,12 +616,12 @@ def ionic_center_fraction(structure: Structure) -> tuple[float, float, list[str]
     sine = np.sum(weights * np.sin(angles)) / np.sum(weights)
     compactness = float(np.hypot(cosine, sine))
     gap_start, _gap_end, gap_width = largest_periodic_gap(
-        structure.z_angstrom, structure.c_length
+        structure.normal_positions, structure.normal_length
     )
-    cut = (gap_start + 0.5 * gap_width) % structure.c_length
-    unwrapped = np.mod(structure.z_angstrom - cut, structure.c_length)
-    center_angstrom = (cut + float(np.average(unwrapped, weights=weights))) % structure.c_length
-    center = center_angstrom / structure.c_length
+    cut = (gap_start + 0.5 * gap_width) % structure.normal_length
+    unwrapped = np.mod(structure.normal_positions - cut, structure.normal_length)
+    center_angstrom = (cut + float(np.average(unwrapped, weights=weights))) % structure.normal_length
+    center = center_angstrom / structure.normal_length
     return center, compactness, sorted(set(missing))
 
 
@@ -616,7 +645,7 @@ def parse_incar(path: str | Path) -> dict[str, Any]:
     return result
 
 
-def write_dipole_preview(calc_dir: str | Path, suggested_z: float) -> Path:
+def write_dipole_preview(calc_dir: str | Path, suggested_z: float, axis: str = "z") -> Path:
     """Write a conservative static ``INCAR.dipole_fix`` without touching INCAR.
 
     The preview starts from atomic charge densities so an obsolete WAVECAR or
@@ -628,8 +657,10 @@ def write_dipole_preview(calc_dir: str | Path, suggested_z: float) -> Path:
     source = directory / "INCAR"
     lines = source.read_text(encoding="utf-8").splitlines() if source.is_file() else []
     current = parse_incar(source).get("DIPOL")
-    x_value = current[0] if current and len(current) >= 3 else 0.5
-    y_value = current[1] if current and len(current) >= 3 else 0.5
+    if axis not in ("x", "y", "z"):
+        raise SafetyError("Surface-normal axis must be x, y, or z")
+    dipol = list(current) if current and len(current) == 3 else [0.5, 0.5, 0.5]
+    dipol["xyz".index(axis)] = suggested_z
     replacements = {
         "NSW": "NSW    = 0",
         "IBRION": "IBRION = -1",
@@ -642,8 +673,8 @@ def write_dipole_preview(calc_dir: str | Path, suggested_z: float) -> Path:
         "NELM": "NELM   = 200",
         "AMIN": "AMIN   = 0.01",
         "LDIPOL": "LDIPOL = .TRUE.",
-        "IDIPOL": "IDIPOL = 3",
-        "DIPOL": f"DIPOL  = {x_value:.6f} {y_value:.6f} {suggested_z:.6f}",
+        "IDIPOL": f"IDIPOL = {"xyz".index(axis) + 1}",
+        "DIPOL": "DIPOL  = " + " ".join(f"{value:.6f}" for value in dipol),
         "LVHAR": "LVHAR  = .TRUE.",
         "LVACPOTAV": "LVACPOTAV = .TRUE.",
         "VACPOTFLAT": "VACPOTFLAT = 0.01",
@@ -701,13 +732,20 @@ def load_alignment_config(path: str | Path) -> dict[str, Any]:
         ],
     }
     input_path = Path(path)
+    supplied: dict[str, Any] = {}
     if input_path.is_file():
         supplied = json.loads(input_path.read_text(encoding="utf-8"))
         if not isinstance(supplied, dict):
             raise SafetyError("Slab-alignment configuration must be a JSON object")
         config.update(supplied)
-    if config["side"] not in ("high-z", "low-z"):
-        raise SafetyError("Configuration side must be high-z or low-z")
+    axis = config.get("axis", str(config["side"]).split("-")[-1])
+    if axis not in ("x", "y", "z"):
+        raise SafetyError("Configuration axis must be x, y, or z")
+    if "axis" in config and "side" not in supplied:
+        config["side"] = f"high-{axis}"
+    if config["side"] not in (f"high-{axis}", f"low-{axis}"):
+        raise SafetyError("Configuration side must match axis (for example axis=x, side=high-x)")
+    config["axis"] = axis
     if not isinstance(config["references"], list) or not config["references"]:
         raise SafetyError("Configuration references must be a nonempty list")
     return config
@@ -770,11 +808,11 @@ def _plot_profile(
             label="dipole-correction step (excluded)",
         )
     axes.set(
-        xlabel="Shifted distance along c (Å)",
+        xlabel=f"Shifted distance along {profile.axis} (Å)",
         ylabel=(
-            r"Planar-averaged local potential, $\overline{V}_{\rm loc}(z)-E_F$ (eV)"
+            r"Planar-averaged local potential, $\overline{V}_{\rm loc}(s)-E_F$ (eV)"
             if efermi is not None
-            else r"Planar-averaged local potential, $\overline{V}_{\rm loc}(z)$ (eV)"
+            else r"Planar-averaged local potential, $\overline{V}_{\rm loc}(s)$ (eV)"
         ),
         xlim=(0, profile.c_length_A),
         title=calc_dir.name,
@@ -828,11 +866,11 @@ def _plot_workfunction_profile(
     axes.set_xlim(0, profile.c_length_A)
     upper = float(np.max(values)) + 0.5
     axes.set_ylim(upper - 2.5, upper)
-    axes.set_xlabel("Shifted distance along c (Å)")
+    axes.set_xlabel(f"Shifted distance along {profile.axis} (Å)")
     axes.set_ylabel(
-        r"$\overline{V}_{\rm loc}(z)-E_F$ (eV)"
+        r"$\overline{V}_{\rm loc}(s)-E_F$ (eV)"
         if efermi is not None
-        else r"$\overline{V}_{\rm loc}(z)$ (eV)"
+        else r"$\overline{V}_{\rm loc}(s)$ (eV)"
     )
     axes.set_title(calc_dir.name)
     axes.legend(frameon=False, fontsize=8)
@@ -896,7 +934,7 @@ def _write_audit_markers(
     vasp_warning = str(row.get("vasp_vacuum_warning", ""))
     no_field_free_region = "NO_FIELD_FREE_REGION" in vasp_warning
     fix_path = (
-        write_dipole_preview(calc_dir, float(row["suggested_DIPOL_z"]))
+        write_dipole_preview(calc_dir, float(row.get("suggested_DIPOL_normal", row.get("suggested_DIPOL_z"))), str(row.get("axis", "z")))
         if write_fix and not no_field_free_region
         else None
     )
@@ -926,7 +964,8 @@ def _write_audit_markers(
         f"selected_std_eV: {row.get('selected_std_eV', '')}\n"
         f"vasp_vacuum_crosscheck: {row.get('vasp_vacuum_crosscheck', '')}\n"
         f"vasp_vacuum_warning: {vasp_warning}\n"
-        f"suggested_DIPOL_z: {row.get('suggested_DIPOL_z', '')}\n"
+        f"axis: {row.get('axis', 'z')}\n"
+        f"suggested_DIPOL_normal: {row.get('suggested_DIPOL_normal', row.get('suggested_DIPOL_z', ''))}\n"
         f"compactness_R: {row.get('compactness_R', '')}\n"
         f"proposed_incar: {fix_path or 'disabled'}\n"
         f"recommendation: {recommendation}\n"
@@ -990,7 +1029,7 @@ def _analyze_folder(
     }
     details: dict[str, Any] = {}
     try:
-        structure, z_grid, potential = read_locpot(calc_dir / "LOCPOT")
+        structure, z_grid, potential = read_locpot(calc_dir / "LOCPOT", axis=config["axis"])
         profile, shifted_z, shifted_potential = analyze_profile(
             structure,
             z_grid,
@@ -1002,7 +1041,7 @@ def _analyze_folder(
             discontinuity_max_width_angstrom=config["discontinuity_max_width_angstrom"],
             discontinuity_margin_angstrom=config["discontinuity_margin_angstrom"],
         )
-        selected = profile.high if config["side"] == "high-z" else profile.low
+        selected = profile.high if config["side"].startswith("high-") else profile.low
         selected_status = plateau_status(selected, config)
         center, compactness, missing_mass = ionic_center_fraction(structure)
         incar = parse_incar(calc_dir / "INCAR")
@@ -1024,7 +1063,9 @@ def _analyze_folder(
                 "high_minus_low_vacuum_eV": profile.high.plateau_eV - profile.low.plateau_eV,
                 "low_slope_eV_per_A": profile.low.slope_eV_per_A,
                 "high_slope_eV_per_A": profile.high.slope_eV_per_A,
-                "suggested_DIPOL_z": center,
+                "suggested_DIPOL_z": center if config["axis"] == "z" else None,
+                "suggested_DIPOL_normal": center,
+                "axis": config["axis"],
                 "compactness_R": compactness,
                 "current_LDIPOL": incar["LDIPOL"],
                 "current_IDIPOL": incar["IDIPOL"],
@@ -1032,6 +1073,20 @@ def _analyze_folder(
             }
         )
         outcar_path = calc_dir / "OUTCAR"
+        recorded_idipol = None
+        if outcar_path.is_file():
+            matches = re.findall(r"\bIDIPOL\s*=\s*(\d+)", outcar_path.read_text(errors="replace"))
+            if matches:
+                recorded_idipol = int(matches[-1])
+        expected_idipol = structure.axis_index + 1
+        axis_matches = recorded_idipol == expected_idipol
+        row["dipole_axis_status"] = "MATCH" if axis_matches else ("UNKNOWN" if recorded_idipol is None else "MISMATCH")
+        if recorded_idipol is not None and not axis_matches:
+            selected_status = "FAILED_DIPOLE_AXIS"
+            row["error"] = f"OUTCAR IDIPOL={recorded_idipol}; selected axis {structure.axis} requires IDIPOL={expected_idipol}"
+        elif recorded_idipol is None and incar["IDIPOL"] != expected_idipol:
+            selected_status = "SUSPECT_DIPOLE_AXIS"
+            row["error"] = "INCAR dipole direction does not match selected axis; OUTCAR direction unavailable"
         if outcar_path.is_file():
             builtin_vacuum = vacuum_potentials_from_outcar(outcar_path)
             builtin_warning = vacuum_warning_from_outcar(outcar_path)
@@ -1039,9 +1094,9 @@ def _analyze_folder(
                 row["vasp_vacuum_warning"] = builtin_warning
                 if selected_status == "OK":
                     selected_status = "SUSPECT_VASP_VACUUM"
-            if builtin_vacuum is not None:
+            if builtin_vacuum is not None and axis_matches:
                 upper, lower = builtin_vacuum
-                builtin_selected = upper if config["side"] == "high-z" else lower
+                builtin_selected = upper if config["side"].startswith("high-") else lower
                 difference = selected.plateau_eV - builtin_selected
                 row.update(
                     {
@@ -1088,7 +1143,7 @@ def _analyze_folder(
             for position, value in zip(shifted_z, shifted_potential, strict=True)
         )
         (calc_dir / "locpot.dat").write_text(
-            "# shifted_z_A potential_eV potential_minus_EF_eV\n" + data + "\n",
+            f"# shifted_{config['axis']}_A potential_eV potential_minus_EF_eV\n" + data + "\n",
             encoding="utf-8",
         )
         _write_audit_markers(calc_dir, row, write_fix=write_fixes)
@@ -1123,9 +1178,11 @@ def _analyze_folder(
             row["sumo_status"] = _run_sumo(calc_dir)
         details = {
             "folder": calc_dir.name,
-            "profile": asdict(profile),
+            "profile": {**asdict(profile), "normal_length_A": profile.c_length_A},
             "selected_side": config["side"],
-            "suggested_DIPOL_z": center,
+            "suggested_DIPOL_z": center if config["axis"] == "z" else None,
+            "suggested_DIPOL_normal": center,
+            "axis": config["axis"],
             "compactness_R": compactness,
         }
     except (OSError, ValueError, ET.ParseError, SafetyError, DependencyError) as exc:
