@@ -194,7 +194,10 @@ overwritten; `--overwrite` refreshes inputs only while no OUTCAR is present.
 variable at a time.
 
 For LOCPOT-heavy auditing and planning, use the scheduler rather than the head
-node. The combined planning launcher reruns `slab-align` before
+node. `slab-align` streams LOCPOT grid values directly into the selected
+planar average, so memory no longer scales with the full 3-D grid; the supplied
+repair launchers additionally request 16 GB as a safety margin for XML parsing,
+plotting, and Python overhead. The combined planning launcher reruns `slab-align` before
 `slab-tight-scf --dry-run`, so the plan cannot consume a stale audit:
 
 ```bash
