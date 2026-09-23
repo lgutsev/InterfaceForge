@@ -11,7 +11,8 @@ set -euo pipefail
 #
 # Safety gates:
 #   1. run must be diagnosed unstable by `iface vasp step1-status`;
-#   2. OSZICAR must be older than STALE_HOURS;
+#   2. OSZICAR must be older than STALE_HOURS (including normally terminated
+#      jobs that completed NSW but were diagnosed physically/numerically unstable);
 #   3. no active Slurm job may have that run directory as WorkDir.
 #
 # Scheduler efficiency:
@@ -129,7 +130,9 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 
 for row in payload.get("runs", []):
     stability = row.get("stability") or {}
-    if stability.get("unstable") and row.get("stale"):
+    age_hours = row.get("age_hours")
+    inactive_by_age = age_hours is not None and age_hours >= float(payload["stale_hours"])
+    if stability.get("unstable") and inactive_by_age:
         print(row["path"])
 PY
 
