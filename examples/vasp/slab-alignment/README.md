@@ -208,7 +208,12 @@ iface vasp slab-publish . --config slab_publication.json
 ### Surface-normal axis
 
 `slab-align` supports vacuum along x/a, y/b, or z/c. The chosen lattice
-vector must be perpendicular to the other two; tilted normals are rejected.
+vector may deviate by up to 0.1 degrees from the normal to the other two
+vectors. Larger tilts are rejected for review. Distances use the exact
+perpendicular repeat length (cell volume divided by in-plane area), and
+`normal_tilt_degrees` / `normal_length_A` are recorded in JSON and TSV.
+This analysis tolerance is not a certification of VASP dipole-correction
+validity; inspect the recorded settings and vacuum plateau.
 Old configs default to z. For an x-normal slab use:
 
 ```json

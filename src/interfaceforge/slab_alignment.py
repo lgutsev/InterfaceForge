@@ -100,6 +100,8 @@ OUTPUT_FIELDS = [
     "high_slope_eV_per_A",
     "axis",
     "suggested_DIPOL_normal",
+    "normal_tilt_degrees",
+    "normal_length_A",
     "dipole_axis_status",
     "suggested_DIPOL_z",
     "compactness_R",
@@ -128,6 +130,8 @@ AUDIT_FIELDS = [
     "vasp_vacuum_warning",
     "axis",
     "suggested_DIPOL_normal",
+    "normal_tilt_degrees",
+    "normal_length_A",
     "dipole_axis_status",
     "suggested_DIPOL_z",
     "compactness_R",
@@ -161,7 +165,20 @@ class Structure:
 
     @property
     def normal_length(self) -> float:
-        return float(np.linalg.norm(self.cell[self.axis_index]))
+        # Fixed fractional-coordinate planes are parallel to the other two
+        # lattice vectors. Their repeat distance is the reciprocal-plane
+        # spacing, not the length of a slightly tilted direct lattice vector.
+        reciprocal_normal = np.linalg.inv(self.cell)[:, self.axis_index]
+        return float(1.0 / np.linalg.norm(reciprocal_normal))
+
+    @property
+    def normal_tilt_degrees(self) -> float:
+        vector = self.cell[self.axis_index]
+        reciprocal_normal = np.linalg.inv(self.cell)[:, self.axis_index]
+        cosine = np.dot(vector, reciprocal_normal) / (
+            np.linalg.norm(vector) * np.linalg.norm(reciprocal_normal)
+        )
+        return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
 
     @property
     def normal_positions(self) -> np.ndarray:
@@ -281,7 +298,7 @@ def parse_poscar_lines(lines: list[str]) -> Structure:
 
 
 def read_locpot(path: str | Path, axis: str = "z") -> tuple[Structure, np.ndarray, np.ndarray]:
-    """Read the raw LOCPOT and return its z-planar average in eV."""
+    """Read LOCPOT and return its selected fractional-plane average in eV."""
 
     input_path = Path(path)
     lines = input_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -289,10 +306,12 @@ def read_locpot(path: str | Path, axis: str = "z") -> tuple[Structure, np.ndarra
     if axis not in ("x", "y", "z"):
         raise SafetyError("Surface-normal axis must be x, y, or z")
     structure.axis = axis
-    normal = structure.cell[structure.axis_index]
-    for index, vector in enumerate(structure.cell):
-        if index != structure.axis_index and abs(np.dot(normal, vector)) > 1e-8 * np.linalg.norm(normal) * np.linalg.norm(vector):
-            raise SafetyError("Selected normal lattice vector must be perpendicular to the other two vectors")
+    tilt = structure.normal_tilt_degrees
+    if tilt > 0.1:
+        raise SafetyError(
+            f"Selected lattice vector is tilted {tilt:.6f} degrees from the plane normal "
+            "(limit 0.1 degrees); review cell geometry and dipole-correction applicability"
+        )
     grid_index = _next_nonempty(lines, structure.coordinate_end_line)
     try:
         grid = [int(value) for value in lines[grid_index].split()[:3]]
@@ -1030,6 +1049,8 @@ def _analyze_folder(
     details: dict[str, Any] = {}
     try:
         structure, z_grid, potential = read_locpot(calc_dir / "LOCPOT", axis=config["axis"])
+        row["normal_tilt_degrees"] = structure.normal_tilt_degrees
+        row["normal_length_A"] = structure.normal_length
         profile, shifted_z, shifted_potential = analyze_profile(
             structure,
             z_grid,
@@ -1178,7 +1199,8 @@ def _analyze_folder(
             row["sumo_status"] = _run_sumo(calc_dir)
         details = {
             "folder": calc_dir.name,
-            "profile": {**asdict(profile), "normal_length_A": profile.c_length_A},
+            "profile": {**asdict(profile), "normal_length_A": profile.c_length_A,
+                        "normal_tilt_degrees": structure.normal_tilt_degrees},
             "selected_side": config["side"],
             "suggested_DIPOL_z": center if config["axis"] == "z" else None,
             "suggested_DIPOL_normal": center,

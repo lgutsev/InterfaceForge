@@ -79,3 +79,28 @@ class AxisTests(unittest.TestCase):
             self.assertEqual(row['dipole_axis_status'], 'MISMATCH')
             self.assertIn('IDIPOL = 1', (calc/'INCAR.dipole_fix').read_text())
             self.assertTrue((calc/'locpot.dat').read_text().startswith('# shifted_x_A'))
+
+    def test_fapi_small_tilt_accepted_with_projected_distance(self):
+        cell = np.array([[69.187747, .011823, .041248],
+                         [.003376, 19.729049, .001132],
+                         [.011332, .001092, 18.851937]])
+        with tempfile.TemporaryDirectory() as tmp:
+            path, expected = self.make_locpot(Path(tmp), 'x')
+            lines = path.read_text().splitlines()
+            lines[2:5] = [' '.join(map(str, row)) for row in cell]
+            path.write_text('\n'.join(lines))
+            structure, grid, potential = read_locpot(path, 'x')
+            self.assertAlmostEqual(structure.normal_tilt_degrees, .0713418063)
+            area = np.linalg.norm(np.cross(cell[1], cell[2]))
+            self.assertAlmostEqual(structure.normal_length, abs(np.linalg.det(cell))/area)
+            self.assertAlmostEqual(grid[1], structure.normal_length/80)
+            np.testing.assert_allclose(potential, expected)
+            profile, _, _ = analyze_profile(structure, grid, potential)
+            self.assertAlmostEqual(profile.high.plateau_eV, 5.2)
+            # A substantial tilt must still fail, rather than silently relax QC.
+            cell[0, 1] = 5
+            lines[2] = ' '.join(map(str, cell[0]))
+            path.write_text('\n'.join(lines))
+            from interfaceforge.slab_alignment import SafetyError
+            with self.assertRaisesRegex(SafetyError, 'tilted'):
+                read_locpot(path, 'x')
