@@ -193,10 +193,20 @@ overwritten; `--overwrite` refreshes inputs only while no OUTCAR is present.
 `--dipol suggested` moves DIPOL to the audit's ionic centre, but change one
 variable at a time.
 
-`slab-align` is project-head aware: when run from the main work-function directory it analyzes direct calculation daughters plus completed `tight_scf/<daughter>/` and `relax_continue/<daughter>/` calculations. Output rows use relative paths such as `tight_scf/FAPI_FAI_Surf_BCF`, and band-edge deltas are only formed against a reference in the same family; a repair result is never silently compared against a differently prepared root reference. `slab-tight-scf` consumes only `family=root` rows from this combined audit, preventing recursive `tight_scf/tight_scf/...` preparation.\n\nFor LOCPOT-heavy auditing and planning, use the scheduler rather than the head\nnode. `slab-align` streams LOCPOT grid values directly into the selected
-planar average, so memory no longer scales with the full 3-D grid; the supplied
-repair launchers additionally request 16 GB as a safety margin for XML parsing,
-plotting, and Python overhead. The combined planning launcher reruns `slab-align` before
+`slab-align` is project-head aware: when run from the main work-function
+directory it analyzes direct calculation daughters plus completed
+`tight_scf/<daughter>/` and `relax_continue/<daughter>/` calculations. Output
+rows use relative paths such as `tight_scf/FAPI_FAI_Surf_BCF`, and band-edge
+deltas are only formed against a reference in the same family; a repair result
+is never silently compared against a differently prepared root reference.
+`slab-tight-scf` consumes only `family=root` rows from this combined audit,
+preventing recursive `tight_scf/tight_scf/...` preparation.
+
+For LOCPOT-heavy auditing and planning, use the scheduler rather than the head
+node. `slab-align` streams LOCPOT grid values directly into the selected
+planar average, so memory no longer scales with the full 3-D grid. On LONI
+`single`, the supplied launchers request four CPU cores, which currently gives
+roughly 16 GB of job memory under the site's 4 GB/core policy. The combined planning launcher reruns `slab-align` before
 `slab-tight-scf --dry-run`, so the plan cannot consume a stale audit:
 
 ```bash
