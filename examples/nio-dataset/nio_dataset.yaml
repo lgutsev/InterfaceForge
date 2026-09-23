@@ -1,0 +1,20 @@
+# Canonical NiO dataset export settings (`iface dataset export --config nio_dataset.yaml`).
+# Every value below is written out explicitly so the choice is reviewable and is
+# copied verbatim into datasets/canonical/manifest.json. These are the
+# InterfaceForge defaults, not a validated NiO sampling policy.
+stages: [Step2]              # decorrelated Step2 frames (training protocol); add Step1 deliberately
+use_step2_sample: true       # honour step2_sample.json from `iface vasp step2-sample`
+stride: 1                    # only used where no step2_sample.json selection exists
+include_incomplete: false    # runs without an OUTCAR completion marker are reported, not exported
+reject_scf_unconverged: true # MD steps whose SCF hit NELM are rejected
+reject_post_runaway: true    # frames at/after a temperature runaway are rejected
+max_force_ev_ang: null       # no force threshold unless you choose one
+max_md_temperature_k: null   # no temperature threshold unless you choose one
+ratios: [0.8, 0.1, 0.1]
+seed: 20260730
+group_by: case               # case | surface (stricter ligand-transfer split) | coverage
+stratify_by: [ligand]
+split_method: balanced       # balanced | hash (stable when cases are added later)
+type_map: []                 # empty = sorted elements present (C H N Ni O P for the full campaign)
+include_virial: false
+layout: nio
