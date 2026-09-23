@@ -1200,6 +1200,13 @@ def cmd_slab_tight_scf(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         force_warn=args.force_warn,
         require_relaxed=args.require_relaxed,
+        prepare_relax_restarts=args.prepare_relax_restarts,
+        relax_output=args.relax_output,
+        relax_ediff=args.relax_ediff,
+        relax_ediffg=args.relax_ediffg,
+        relax_nelm=args.relax_nelm,
+        relax_nsw=args.relax_nsw,
+        relax_amin=args.relax_amin,
     )
     _json(payload)
     return 1 if payload["counts"].get("BLOCKED") else 0
@@ -2951,7 +2958,8 @@ def build_parser() -> argparse.ArgumentParser:
             "convergence, and write <output>/<folder>/ with CONTCAR as POSCAR and "
             "an INCAR changed only in NSW, IBRION, ISTART, ICHARG, EDIFF, NELM, "
             "AMIN, LDIPOL, IDIPOL, LVHAR, LVACPOTAV, and LCHARG. Parents are "
-            "never modified and nothing is submitted."
+            "never modified and nothing is submitted. Geometry-warning parents also "
+            "receive non-destructive force-converged continuations under relax_continue/."
         ),
     )
     tight_scf.add_argument("root", nargs="?", default=".", help="slab-align root (default: .)")
@@ -3010,9 +3018,30 @@ def build_parser() -> argparse.ArgumentParser:
     tight_scf.add_argument(
         "--require-relaxed",
         action="store_true",
-        help="Block parents whose relaxation did not reach required accuracy (default: warn)",
+        help="Block tight-SCF preparation for parents whose relaxation did not reach required accuracy",
     )
-    tight_scf.set_defaults(func=cmd_slab_tight_scf, with_references=True)
+    tight_scf.add_argument(
+        "--no-relax-restarts",
+        dest="prepare_relax_restarts",
+        action="store_false",
+        help="Do not prepare relax_continue/<folder>/ for parents with geometry warnings",
+    )
+    tight_scf.add_argument("--relax-output", default="relax_continue", help="Continuation-relaxation output tree")
+    tight_scf.add_argument("--relax-ediff", type=float, default=1e-6)
+    tight_scf.add_argument(
+        "--relax-ediffg",
+        type=float,
+        default=-0.03,
+        help="Negative force threshold (eV/A) for continuation relaxations",
+    )
+    tight_scf.add_argument("--relax-nelm", type=int, default=200)
+    tight_scf.add_argument("--relax-nsw", type=int, default=200)
+    tight_scf.add_argument("--relax-amin", type=float, default=0.01)
+    tight_scf.set_defaults(
+        func=cmd_slab_tight_scf,
+        with_references=True,
+        prepare_relax_restarts=True,
+    )
 
     slab_publication = vasp_commands.add_parser(
         "slab-publish",
