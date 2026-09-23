@@ -3,6 +3,7 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -c 1
+#SBATCH --mem=16G
 #SBATCH -t 04:00:00
 #SBATCH -J slab_repair_plan
 #SBATCH -o slab_repair_plan.%j.out
