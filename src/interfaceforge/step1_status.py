@@ -28,7 +28,7 @@ from typing import Any
 
 from .aimd import _first_float, _first_int, preheat_ps
 from .audit import parse_oszicar, read_tail
-from .step1_repair import diagnose_step1_run
+from .step1_repair import diagnose_step1_run, parse_step1_oszicar
 from .vasp import parse_incar
 
 _EXCLUDED = ("archive", "backup", ".interfaceforge", "precondition")
@@ -190,11 +190,38 @@ def _run_status(run: Path, *, stale_hours: float) -> dict[str, Any]:
         updated=updated,
         stale_hours=stale_hours,
     )
+    age_hours = None
+    if updated is not None:
+        age_hours = (datetime.now(tz=timezone.utc) - updated).total_seconds() / 3600.0
     if prefix_steps and state == "not-started":
         state = "repair-prepared"
     stability = diagnose_step1_run(run)
-    if stability["unstable"] and state not in {"done", "not-started", "no-incar"}:
+    if stability["unstable"] and state not in {"not-started", "no-incar"}:
+        # A VASP timing footer only means the executable exited normally.  It
+        # does not make a physically/numerically runaway trajectory usable.
         state = "unstable"
+
+    thermal_steps = parse_step1_oszicar(run / "OSZICAR", nelm=stability["scf_nelm"])["steps"]
+    valid_temperatures = [
+        row["temperature_k"] for row in thermal_steps if row["temperature_k"] is not None
+    ]
+    tail_count = min(50, len(valid_temperatures))
+    tail_temperatures = valid_temperatures[-tail_count:] if tail_count else []
+    thermal_target_k = summary["teend"] or summary["tebeg"]
+    thermal_tail_mean_k = (
+        sum(tail_temperatures) / len(tail_temperatures) if tail_temperatures else None
+    )
+    thermal_tail_min_k = min(tail_temperatures) if tail_temperatures else None
+    thermal_tail_max_k = max(tail_temperatures) if tail_temperatures else None
+    thermal_ready_threshold_k = (
+        (5.0 / 6.0) * thermal_target_k if thermal_target_k is not None else None
+    )
+    thermal_ready = (
+        thermal_tail_mean_k is not None
+        and thermal_ready_threshold_k is not None
+        and thermal_tail_mean_k >= thermal_ready_threshold_k
+        and not stability["unstable"]
+    )
 
     done_step = frames_oszicar
     original_potim = _first_float(repair.get("original_potim_fs"), potim)
@@ -214,6 +241,7 @@ def _run_status(run: Path, *, stale_hours: float) -> dict[str, Any]:
         "path": str(run),
         "state": state,
         "stale": stale,
+        "age_hours": age_hours,
         "frames_oszicar": frames_oszicar,
         "frames_oszicar_segment": frames_segment,
         "accepted_prefix_steps": prefix_steps,
@@ -231,6 +259,13 @@ def _run_status(run: Path, *, stale_hours: float) -> dict[str, Any]:
         "temperature_mean_k": oszicar["temperature_mean_k"],
         "temperature_std_k": oszicar["temperature_std_k"],
         "temperature_last_k": oszicar["temperature_last_k"],
+        "thermal_target_k": thermal_target_k,
+        "thermal_tail_window_steps": tail_count,
+        "thermal_tail_mean_k": thermal_tail_mean_k,
+        "thermal_tail_min_k": thermal_tail_min_k,
+        "thermal_tail_max_k": thermal_tail_max_k,
+        "thermal_ready_threshold_k": thermal_ready_threshold_k,
+        "thermal_ready": thermal_ready,
         "wavecar_present": _nonempty(run / "WAVECAR"),
         "contcar_present": _nonempty(run / "CONTCAR"),
         "potcar_present": _nonempty(run / "POTCAR"),
@@ -318,7 +353,17 @@ def render(payload: dict[str, Any]) -> str:
         if row["temperature_mean_k"] is not None:
             mean_k = row["temperature_mean_k"]
             std = row["temperature_std_k"]
-            temp_txt = f"  T={mean_k:.0f} K" if std is None else f"  T={mean_k:.0f}+/-{std:.0f} K"
+            if std is None:
+                temp_txt = f"  Tmean={mean_k:.0f} K"
+            else:
+                temp_txt = f"  Tmean={mean_k:.0f}+/-{std:.0f} K"
+            tail_mean = row.get("thermal_tail_mean_k")
+            tail_n = row.get("thermal_tail_window_steps") or 0
+            if tail_mean is not None and tail_n:
+                temp_txt += f"  Ttail{tail_n}={tail_mean:.0f} K"
+                threshold = row.get("thermal_ready_threshold_k")
+                if threshold is not None:
+                    temp_txt += " ready" if row.get("thermal_ready") else f" (<{threshold:.0f} K)"
 
         lines.append(f"  [{row['state']:<11}] {row['run']}")
         lines.append(
