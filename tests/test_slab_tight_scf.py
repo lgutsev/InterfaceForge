@@ -8,7 +8,9 @@ from pathlib import Path
 from interfaceforge.errors import SafetyError
 from interfaceforge.slab_alignment import parse_incar
 from interfaceforge.slab_tight_scf import (
+    needs_relax_restart,
     prepare_tight_scf,
+    relax_restart_overrides,
     rewrite_incar,
     scf_diagnostics_from_outcar,
     selective_free_mask,
@@ -309,6 +311,56 @@ class PrepareTightScfTests(unittest.TestCase):
             self.assertEqual(entry["action"], "BLOCKED")
             self.assertIn("require-relaxed", entry["reason"])
 
+    def test_geometry_warning_prepares_force_based_relax_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _family(root)
+            (root / "Ref_A" / "OUTCAR").write_text(
+                _outcar(converged_steps=3, nsw=3, reached=False, forces=[(0.2, 0.0, 0.0)]),
+                encoding="utf-8",
+            )
+            result = prepare_tight_scf(root)
+            entry = next(item for item in result["plan"] if item["folder"] == "Ref_A")
+            self.assertEqual(entry["relax_restart_action"], "PREPARED")
+            restart = root / "relax_continue" / "Ref_A"
+            incar = (restart / "INCAR").read_text(encoding="utf-8")
+            for expected in (
+                "IBRION = 2",
+                "NSW = 200",
+                "EDIFF = 1E-06",
+                "EDIFFG = -0.03",
+                "NELM = 200",
+                "AMIN = 0.01",
+                "ISTART = 1",
+                "ICHARG = 0",
+            ):
+                self.assertIn(expected, incar)
+            self.assertIn("0.41", (restart / "POSCAR").read_text(encoding="utf-8"))
+            self.assertTrue((restart / "WAVECAR").is_file())
+            provenance = json.loads((restart / "RELAX_RESTART_PROVENANCE.json").read_text())
+            self.assertEqual(provenance["overrides"]["EDIFFG"], "-0.03")
+            self.assertEqual(result["relax_counts"]["PREPARED"], 1)
+
+    def test_relax_restart_helpers(self) -> None:
+        overrides = relax_restart_overrides(
+            reuse_wavecar=False,
+            ediff=1e-6,
+            ediffg=-0.03,
+            nelm=200,
+            nsw=200,
+            amin=0.01,
+        )
+        self.assertEqual(overrides["ISTART"], "0")
+        self.assertEqual(overrides["ICHARG"], "2")
+        self.assertEqual(overrides["EDIFFG"], "-0.03")
+        synthetic = type("D", (), {
+            "is_relaxation": True,
+            "hit_nsw_limit": False,
+            "ionic_converged": True,
+            "final_max_force_eV_per_A": 0.08,
+        })()
+        self.assertTrue(needs_relax_restart(synthetic, 0.05))
+
     def test_dry_run_writes_only_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -316,6 +368,7 @@ class PrepareTightScfTests(unittest.TestCase):
             result = prepare_tight_scf(root, dry_run=True)
             self.assertEqual(result["counts"]["WOULD_PREPARE"], 2)
             self.assertFalse((root / "tight_scf").exists())
+            self.assertFalse((root / "relax_continue").exists())
             self.assertTrue((root / "tight_scf_plan.txt").is_file())
 
     def test_negative_force_warning_threshold_is_an_error(self) -> None:
@@ -324,6 +377,13 @@ class PrepareTightScfTests(unittest.TestCase):
             _family(root)
             with self.assertRaisesRegex(SafetyError, "force_warn"):
                 prepare_tight_scf(root, force_warn=-0.01)
+
+    def test_nonnegative_relax_ediffg_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _family(root)
+            with self.assertRaisesRegex(SafetyError, "relax_ediffg"):
+                prepare_tight_scf(root, relax_ediffg=0.03)
 
     def test_missing_audit_is_an_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
