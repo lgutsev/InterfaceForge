@@ -98,6 +98,48 @@ class Step1StatusTests(unittest.TestCase):
             self.assertEqual(payload["runs"][0]["state"], "stalled?")
             self.assertTrue(payload["runs"][0]["stale"])
 
+    def test_tail_temperature_marks_ramp_as_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / "Step1" / "run"
+            run.mkdir(parents=True)
+            incar = _INCAR.replace("TEEND=100", "TEEND=300")
+            (run / "INCAR").write_text(incar, encoding="utf-8")
+            temps = [100 + round(200 * (i - 1) / 399) for i in range(1, 401)]
+            (run / "OSZICAR").write_text(
+                "".join(
+                    f"   {i} F= -.1E1 E0= -.1E1  d E =0  T= {temp} \n"
+                    for i, temp in enumerate(temps, start=1)
+                ),
+                encoding="utf-8",
+            )
+            (run / "OUTCAR").write_text(
+                "General timing and accounting informations for this job\n", encoding="utf-8"
+            )
+            row = step1_status(run)["runs"][0]
+            self.assertLess(row["temperature_mean_k"], 250)
+            self.assertGreater(row["thermal_tail_mean_k"], 250)
+            self.assertEqual(row["thermal_tail_window_steps"], 50)
+            self.assertAlmostEqual(row["thermal_ready_threshold_k"], 250.0)
+            self.assertTrue(row["thermal_ready"])
+            rendered = render(step1_status(run))
+            self.assertIn("Tmean=", rendered)
+            self.assertIn("Ttail50=", rendered)
+            self.assertIn("ready", rendered)
+
+    def test_finished_but_unstable_is_not_reported_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / "Step1" / "run"
+            run.mkdir(parents=True)
+            (run / "INCAR").write_text(_INCAR, encoding="utf-8")
+            text = _oszicar(399) + " 400 F= 0.100E+03 E0= 0.100E+03 d E=0 T= 300\n"
+            (run / "OSZICAR").write_text(text, encoding="utf-8")
+            (run / "OUTCAR").write_text(
+                "General timing and accounting informations for this job\n", encoding="utf-8"
+            )
+            row = step1_status(run)["runs"][0]
+            self.assertEqual(row["state"], "unstable")
+            self.assertFalse(row["thermal_ready"])
+
     def test_error_marker_detected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp) / "Step1" / "run"

@@ -281,12 +281,24 @@ def prepare_step1_repair(
         nblock = _first_int(incar.get("NBLOCK"), 1) or 1
         if target_nsw is None or target_nsw <= 0:
             raise SafetyError(f"{run}/INCAR has no positive NSW")
+
+        previous_repair: dict[str, Any] = {}
+        previous_repair_path = run / "step1_repair.json"
+        if previous_repair_path.is_file():
+            try:
+                previous_repair = json.loads(previous_repair_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                previous_repair = {}
+        previous_prefix_steps = _first_int(previous_repair.get("safe_prefix_steps"), 0) or 0
+        original_target_nsw = (
+            _first_int(previous_repair.get("original_nsw"), target_nsw) or target_nsw
+        )
         diagnostic = diagnose_step1_run(
             run,
             energy_jump_ev=energy_jump_ev,
             max_temperature_k=max_temperature_k,
         )
-        if diagnostic["md_steps"] >= target_nsw or not diagnostic["unstable"]:
+        if not diagnostic["unstable"]:
             continue
         age_hours = _mtime_age_hours(run / "OSZICAR")
         inactive = age_hours is not None and age_hours >= stale_hours
@@ -306,16 +318,19 @@ def prepare_step1_repair(
         frames = _xdatcar_frames(xdatcar, ion_count) if xdatcar is not None else []
         safe_step = min(safe_step, len(frames) * nblock)
         safe_step = (safe_step // nblock) * nblock
-        remaining = target_nsw - safe_step
+        cumulative_safe_step = min(original_target_nsw, previous_prefix_steps + safe_step)
+        remaining = original_target_nsw - cumulative_safe_step
         plan = {
             "run": str(run),
             "status": "READY" if inactive else "ACTIVE_OR_RECENT",
             "age_hours": age_hours,
             "diagnostic": diagnostic,
             "source": "POSCAR" if safe_step == 0 else xdatcar.name,
-            "safe_prefix_steps": safe_step,
+            "safe_prefix_steps": cumulative_safe_step,
+            "safe_segment_steps": safe_step,
+            "previous_safe_prefix_steps": previous_prefix_steps,
             "rewind_frame": safe_step // nblock if safe_step else None,
-            "original_nsw": target_nsw,
+            "original_nsw": original_target_nsw,
             "repair_nsw": remaining,
             "original_potim_fs": _first_float(incar.get("POTIM"), 1.0),
             "repair_potim_fs": float(potim_fs),
@@ -339,14 +354,14 @@ def prepare_step1_repair(
     for plan in (plans if execute else []):
         run = Path(plan["run"])
         require_files(run, ("INCAR", "POSCAR", "KPOINTS", "POTCAR", "OSZICAR"))
-        safe_step = int(plan["safe_prefix_steps"])
+        safe_segment_step = int(plan.get("safe_segment_steps", plan["safe_prefix_steps"]))
         nblock = _first_int(parse_incar(run / "INCAR").get("NBLOCK"), 1) or 1
         xdatcar = run / str(plan["source"])
         _, ion_count, _ = _poscar_layout(run / "POSCAR")
-        frames = _xdatcar_frames(xdatcar, ion_count) if safe_step else []
+        frames = _xdatcar_frames(xdatcar, ion_count) if safe_segment_step else []
         archive = archive_run(run, "step1_repair")
-        if safe_step:
-            frame = frames[safe_step // nblock - 1]
+        if safe_segment_step:
+            frame = frames[safe_segment_step // nblock - 1]
             _write_rewind_poscar(archive / "POSCAR", frame, run / "POSCAR")
         else:
             shutil.copy2(archive / "POSCAR", run / "POSCAR")

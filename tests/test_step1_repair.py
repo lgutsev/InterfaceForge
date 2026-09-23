@@ -156,6 +156,41 @@ class Step1RepairTests(unittest.TestCase):
             self.assertEqual(launcher.count("srun -n4 vasp_std"), 2)
             self.assertFalse((run / "WAVECAR").exists())
 
+    def test_completed_unstable_run_is_repairable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _run(Path(tmp))
+            incar = parse_incar(run / "INCAR")
+            (run / "INCAR").write_text(
+                (run / "INCAR").read_text(encoding="utf-8").replace("NSW=400", "NSW=22"),
+                encoding="utf-8",
+            )
+            payload = prepare_step1_repair(run, stale_hours=0.0)
+            self.assertEqual(payload["repairable"], 1)
+            plan = payload["runs"][0]
+            self.assertEqual(plan["original_nsw"], 22)
+            self.assertLess(plan["safe_prefix_steps"], 22)
+            self.assertGreater(plan["repair_nsw"], 0)
+
+    def test_repeat_repair_preserves_cumulative_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _run(Path(tmp))
+            first = prepare_step1_repair(run, execute=True, stale_hours=0.0)["runs"][0]
+            self.assertEqual(first["safe_prefix_steps"], 12)
+
+            # Simulate the prepared repair itself running into another late runaway.
+            (run / "OSZICAR").write_text(_oszicar(), encoding="utf-8")
+            (run / "XDATCAR").write_text(_xdatcar(), encoding="utf-8")
+            old = time.time() - 10 * 3600
+            os.utime(run / "OSZICAR", (old, old))
+
+            second = prepare_step1_repair(run, stale_hours=0.0)["runs"][0]
+            self.assertEqual(second["previous_safe_prefix_steps"], 12)
+            self.assertGreaterEqual(second["safe_prefix_steps"], 12)
+            self.assertEqual(
+                second["repair_nsw"],
+                second["original_nsw"] - second["safe_prefix_steps"],
+            )
+
     def test_cli_is_dry_run_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run = _run(Path(tmp))
