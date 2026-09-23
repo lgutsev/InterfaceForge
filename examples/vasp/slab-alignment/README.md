@@ -154,8 +154,12 @@ iface vasp slab-tight-scf . --config slab_alignment_fapi.json --copy '*.sbatch'
 ```
 
 The command reads `band_edge_alignment.json` and parses every daughter's OUTCAR
-for EDIFF, NELM, AMIN, the per-ionic-step SCF convergence, and the
-charge-sloshing and vacuum-charge warnings. It then writes
+for EDIFF, NELM, AMIN, the per-ionic-step SCF convergence, ionic-relaxation
+termination, final forces, and the charge-sloshing and vacuum-charge warnings.
+By default, a parent geometry that exhausted NSW or retains a final maximum
+force above 0.05 eV/A is reported but not blocked; use `--require-relaxed` to
+turn failed ionic convergence into a hard block, and `--force-warn` to change
+the force-warning threshold. It then writes
 `tight_scf/<folder>/` for every flagged daughter (`SUSPECT_*`,
 `FAILED_FLATNESS`, or a VASP vacuum warning), plus that daughter's configured
 reference as a same-settings control. Each new folder contains:
@@ -170,7 +174,8 @@ reference as a same-settings control. Each new folder contains:
   functional, cutoff, `LREAL`, and `DIPOL` are kept so that any change can be
   attributed to convergence;
 - `INCAR.parent` and `TIGHT_SCF_PROVENANCE.json`, which holds the audit
-  metrics, parent SCF diagnostics, and the tag-level INCAR diff.
+  metrics (including cell-tilt status), parent SCF/ionic diagnostics, geometry
+  warning policy, and the tag-level INCAR diff.
 
 Parents are never modified and nothing is submitted. Folders that pass the
 audit, or whose LOCPOT audit failed, are skipped unless `--select all` is
@@ -258,19 +263,24 @@ iface vasp slab-publish . --config slab_publication.json
 
 ### Surface-normal axis
 
-`slab-align` supports vacuum along x/a, y/b, or z/c. The chosen lattice
-vector may deviate by up to 0.1 degrees from the normal to the other two
-vectors. Larger tilts are rejected for review. Distances use the exact
-perpendicular repeat length (cell volume divided by in-plane area), and
-`normal_tilt_degrees` / `normal_length_A` are recorded in JSON and TSV.
-This analysis tolerance is not a certification of VASP dipole-correction
-validity; inspect the recorded settings and vacuum plateau.
+`slab-align` supports vacuum along x/a, y/b, or z/c. Cell tilt is now a
+two-level quality-control check rather than a hard 0.1-degree cutoff. By
+default, tilts above 0.1 degrees are retained and marked `TILT_WARNING`, while
+tilts above 1.0 degree are rejected as `TILT_FAILURE` for manual review.
+Both thresholds are configurable with `tilt_warn_degrees` and
+`tilt_fail_degrees`. Distances use the exact perpendicular repeat length
+(cell volume divided by in-plane area), and `normal_tilt_degrees`,
+`tilt_status`, and `normal_length_A` are recorded in JSON and TSV. These
+analysis thresholds are not a certification of VASP dipole-correction
+validity; inspect the recorded IDIPOL, geometry, and vacuum plateau.
 Old configs default to z. For an x-normal slab use:
 
 ```json
 {
   "axis": "x",
   "side": "high-x",
+  "tilt_warn_degrees": 0.1,
+  "tilt_fail_degrees": 1.0,
   "references": [
     {"prefix": "FAPI_FAI_Surf", "reference": "FAPI_FAI_Surf"}
   ]
