@@ -10,7 +10,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from . import __version__
+from . import __version__, nio_dataset
+from . import nequip as nequip_backend
 from .adhesion import METHODS as ADHESION_METHODS
 from .adhesion import SLAB_MODES as ADHESION_SLAB_MODES
 from .adhesion import audit_adhesion, prepare_adhesion, summarize_adhesion
@@ -62,6 +63,7 @@ from .mlip_compare import (
     parse_combine_entry,
     prepare_comparison,
 )
+from .nio_readiness import readiness_audit
 from .packaging import (
     materialize_dataset,
     pack_campaign,
@@ -259,6 +261,7 @@ def cmd_committee(args: argparse.Namespace) -> int:
             training_data_compression=args.training_data_compression,
             label=args.label,
             notes=args.notes,
+            include_checkpoints=args.include_checkpoints,
         )
     _json(payload)
     return 0
@@ -299,6 +302,7 @@ def cmd_package(args: argparse.Namespace) -> int:
             mace_committee_root=args.mace_committee_root,
             deepmd_root=args.deepmd_root,
             dataset_root=args.dataset_root,
+            nequip_root=args.nequip_root,
             repo_prefix=args.repo_prefix,
             license_id=args.license,
             expected_members=args.expected_members,
@@ -318,12 +322,95 @@ def cmd_package(args: argparse.Namespace) -> int:
 
 def cmd_train(args: argparse.Namespace) -> int:
     campaign = _campaign(args)
-    payload = (
-        generate_mace_training(campaign, force=args.force)
-        if args.engine == "mace"
-        else generate_deepmd_training(campaign, force=args.force)
-    )
+    generators = {
+        "mace": generate_mace_training,
+        "deepmd": generate_deepmd_training,
+        "nequip": nequip_backend.generate_nequip_training,
+    }
+    payload = generators[args.engine](campaign, force=args.force)
     _json(payload)
+    return 0
+
+
+def _nequip_root(args: argparse.Namespace) -> Path:
+    if getattr(args, "root", None):
+        return Path(args.root).expanduser().resolve()
+    campaign = _campaign(args)
+    settings = dict(campaign.models.get("nequip", {}))
+    value = Path(str(settings.get("output_dir", "models/nequip"))).expanduser()
+    return value if value.is_absolute() else (campaign.root / value).resolve()
+
+
+def cmd_nequip(args: argparse.Namespace) -> int:
+    root = _nequip_root(args)
+    if args.nequip_command == "status":
+        payload = nequip_backend.discover_members(root)
+        if args.json:
+            _json(payload)
+        else:
+            print(nequip_backend.render_status(payload))
+        return 0
+    if args.nequip_command == "evaluate":
+        payload = nequip_backend.evaluate_nequip_committee(root, output=args.output, reference=args.reference)
+        _json(payload)
+        return 0
+    payload = nequip_backend.submit_nequip(root, args.stage, execute=args.execute)
+    _json(payload)
+    return 0
+
+
+def _dataset_config(args: argparse.Namespace):
+    return nio_dataset.load_export_config(
+        args.config,
+        stages=tuple(args.stages) if args.stages else None,
+        use_step2_sample=False if args.no_step2_sample else None,
+        stride=args.stride,
+        include_incomplete=True if args.include_incomplete else None,
+        reject_scf_unconverged=False if args.keep_scf_unconverged else None,
+        reject_post_runaway=False if args.keep_post_runaway else None,
+        max_force_ev_ang=args.max_force,
+        max_md_temperature_k=args.max_md_temperature,
+        ratios=tuple(args.ratios) if args.ratios else None,
+        seed=args.seed,
+        group_by=args.group_by,
+        stratify_by=tuple(args.stratify_by) if args.stratify_by else None,
+        split_method=args.split_method,
+        type_map=tuple(args.type_map) if args.type_map else None,
+        include_virial=True if args.include_virial else None,
+        layout=args.layout,
+    )
+
+
+def cmd_dataset(args: argparse.Namespace) -> int:
+    if args.dataset_command == "verify":
+        payload = nio_dataset.verify_dataset(args.dataset, check_membership=not args.skip_membership)
+        _json(payload)
+        return 0 if payload["valid"] else 1
+    config = _dataset_config(args)
+    if args.dataset_command == "discover":
+        payload = nio_dataset.discover_report(args.roots, config)
+        if args.output_json:
+            target = Path(args.output_json).expanduser().resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+        brief = {key: payload[key] for key in ("roots", "config", "summary")}
+        _json(payload if args.full else brief)
+        return 0
+    if args.dataset_command == "export":
+        payload = nio_dataset.export_dataset(args.roots, args.output, config, force=args.force)
+        _json(payload)
+        return 0
+    campaign = load_campaign(args.campaign) if args.campaign else None
+    payload = readiness_audit(args.roots, config, output=args.output, campaign=campaign, dataset=args.dataset)
+    _json(
+        {
+            "ready_for_gpu_smoke_tests": payload["ready_for_gpu_smoke_tests"],
+            "blocking_items": payload["blocking_items"],
+            "frames_per_split": payload["answers"]["frames_per_split"],
+            "leakage_detected": payload["answers"]["leakage"]["leakage_detected"],
+            "outputs": payload["outputs"],
+        }
+    )
     return 0
 
 
@@ -346,6 +433,11 @@ def cmd_mlip_compare(args: argparse.Namespace) -> int:
             seeds=tuple(args.seeds),
             deepmd_arch=args.deepmd_arch,
             force=args.force,
+            backends=tuple(args.backends) if args.backends else None,
+            nequip_models_root=args.nequip_root,
+            nequip_seeds=tuple(args.nequip_seeds) if args.nequip_seeds else None,
+            profile_path=campaign.profile_path,
+            nequip_profile=args.nequip_profile,
         )
     elif args.mlip_compare_command == "status":
         payload = comparison_status(
@@ -364,8 +456,14 @@ def cmd_mlip_compare(args: argparse.Namespace) -> int:
 
 
 def cmd_mlip_progress(args: argparse.Namespace) -> int:
+    campaign = _campaign(args)
+    nequip_roots = [Path(value) for value in args.nequip_root]
+    configured = dict(campaign.models.get("nequip", {})).get("output_dir")
+    if configured:
+        configured_path = Path(str(configured)).expanduser()
+        nequip_roots.append(configured_path if configured_path.is_absolute() else campaign.root / configured_path)
     payload = mlip_progress(
-        _campaign(args).root, mace_committee_root=args.mace_committee_root
+        campaign.root, mace_committee_root=args.mace_committee_root, nequip_roots=nequip_roots
     )
     if args.json:
         _json(payload)
@@ -1512,12 +1610,12 @@ def build_parser() -> argparse.ArgumentParser:
     committee_collect.add_argument(
         "source",
         help="MACE: directory of seed_* training runs. DeePMD: a models/deepmd/<arch> "
-        "directory of model_NNN/ runs.",
+        "directory of model_NNN/ runs. NequIP: the models/nequip root from 'iface train nequip'.",
     )
     committee_collect.add_argument(
         "output", help="New bundle directory or .zip name; both directory and ZIP are created"
     )
-    committee_collect.add_argument("--engine", choices=("mace", "deepmd"), default="mace")
+    committee_collect.add_argument("--engine", choices=("mace", "deepmd", "nequip"), default="mace")
     committee_collect.add_argument("--expected-members", type=int, default=4)
     committee_collect.add_argument(
         "--model-pattern",
@@ -1542,6 +1640,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     committee_collect.add_argument("--label")
     committee_collect.add_argument("--notes")
+    committee_collect.add_argument(
+        "--include-checkpoints",
+        action="store_true",
+        help="NequIP only: also bundle each member's best.ckpt (version-fragile; the .nequip.zip "
+        "package is the portable record)",
+    )
     committee_collect.set_defaults(func=cmd_committee)
     committee_verify = committee_commands.add_parser(
         "verify", help="Validate every checksum in a collected directory or ZIP archive"
@@ -1559,7 +1663,7 @@ def build_parser() -> argparse.ArgumentParser:
         "huggingface",
         help="Turn a committee bundle into an upload-ready Hugging Face model repo (no push)",
     )
-    package_hf.add_argument("bundle", help="An extracted committee bundle directory (MACE or DeePMD)")
+    package_hf.add_argument("bundle", help="An extracted committee bundle directory (MACE, DeePMD or NequIP)")
     package_hf.add_argument("output", help="New directory for the Hugging Face model repo")
     package_hf.add_argument("--repo-id", help="Target Hub repo id, e.g. myorg/sintin-dpa2")
     package_hf.add_argument("--license", default="mit", help="SPDX license id for the model card (default: mit)")
@@ -1572,7 +1676,8 @@ def build_parser() -> argparse.ArgumentParser:
     package_hf.add_argument("--dataset-repo-id", help="Hub dataset id to link in the model card")
     package_hf.add_argument(
         "--metrics",
-        help="mlip-compare comparison.json or deepmd rmse_overall.csv to embed as evaluation metrics",
+        help="mlip-compare comparison.json, deepmd rmse_overall.csv, or a committee-evaluation "
+        "summary.json (iface nequip evaluate) to embed as evaluation metrics",
     )
     package_hf.add_argument("--zip", action="store_true", help="Also write <output>.zip")
     package_hf.add_argument("--force", action="store_true")
@@ -1635,6 +1740,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--dataset-root", help="Default: <campaign>/datasets/canonical"
     )
     package_campaign.add_argument(
+        "--nequip-root", help="NequIP committee root (default <campaign>/models/nequip when present)"
+    )
+    package_campaign.add_argument(
         "--repo-prefix",
         help="Hub repo id prefix, e.g. myorg/sintin -- becomes myorg/sintin-mace, "
         "myorg/sintin-mace-ft, myorg/sintin-dpa2, ... Omit to leave repo ids unset.",
@@ -1686,11 +1794,106 @@ def build_parser() -> argparse.ArgumentParser:
     mace_roi_evaluate.add_argument("--predicted-forces-key", default="MACE_forces")
     mace_roi_evaluate.set_defaults(func=cmd_mace_roi_evaluate)
 
-    train = commands.add_parser("train", help="Generate model training campaigns")
-    train.add_argument("engine", choices=("mace", "deepmd"))
+    train = commands.add_parser("train", help="Generate model training campaigns (never submits)")
+    train.add_argument(
+        "engine",
+        choices=("mace", "deepmd", "nequip"),
+        help="nequip = NequIP message-passing GNN committee (Allegro is separate: iface-allegro)",
+    )
     add_campaign_option(train)
     train.add_argument("--force", action="store_true")
     train.set_defaults(func=cmd_train)
+
+    nequip = commands.add_parser(
+        "nequip", help="Inspect, evaluate, or (dry-run) submit a generated NequIP committee"
+    )
+    nequip_commands = nequip.add_subparsers(dest="nequip_command", required=True)
+    nequip_status = nequip_commands.add_parser(
+        "status", help="Read-only member state, epochs, checkpoints, final models, evaluation"
+    )
+    nequip_evaluate = nequip_commands.add_parser(
+        "evaluate", help="Committee metrics from member predictions on the canonical test split"
+    )
+    nequip_submit = nequip_commands.add_parser(
+        "submit", help="Print (default) or --execute sbatch for one generated NequIP launcher"
+    )
+    for sub in (nequip_status, nequip_evaluate, nequip_submit):
+        add_campaign_option(sub)
+        sub.add_argument("--root", help="NequIP committee root (default: models/nequip of the campaign)")
+    nequip_status.add_argument("--json", action="store_true")
+    nequip_evaluate.add_argument("--output", help="Default: <root>/evaluation")
+    nequip_evaluate.add_argument(
+        "--reference", help="Reference extxyz (default: the canonical test file recorded at generation)"
+    )
+    nequip_submit.add_argument("stage", choices=nequip_backend.SUBMIT_STAGES)
+    nequip_submit.add_argument(
+        "--execute", action="store_true", help="Actually call sbatch (default is a dry run)"
+    )
+    nequip.set_defaults(func=cmd_nequip)
+
+    dataset = commands.add_parser(
+        "dataset",
+        help="Canonical NiO AIMD dataset: discover, export (MACE/DeePMD/NequIP), verify, readiness",
+    )
+    dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
+    dataset_discover = dataset_commands.add_parser(
+        "discover", help="Read-only trajectory inventory, frame QC and the split an export would use"
+    )
+    dataset_export = dataset_commands.add_parser(
+        "export", help="Write the canonical extxyz + DeePMD dataset with leakage-safe splits"
+    )
+    dataset_readiness = dataset_commands.add_parser(
+        "readiness", help="Pre-GPU audit: trajectories, frames, problems, split, leakage, backends"
+    )
+    for sub in (dataset_discover, dataset_export, dataset_readiness):
+        sub.add_argument("roots", nargs="+", help="Project head(s) holding Step1/ and Step2_<T>K/ trees")
+        sub.add_argument("--config", help="YAML/JSON export settings (or a previous export manifest.json)")
+        sub.add_argument(
+            "--stages", nargs="+", choices=nio_dataset.STAGES, help="Stages to export (default: Step2)"
+        )
+        sub.add_argument("--no-step2-sample", action="store_true", help="Ignore step2_sample.json frame selections")
+        sub.add_argument("--stride", type=int, help="Keep every Nth valid frame when no step2_sample applies")
+        sub.add_argument(
+            "--include-incomplete", action="store_true", help="Also export runs without an OUTCAR completion marker"
+        )
+        sub.add_argument(
+            "--keep-scf-unconverged", action="store_true", help="Do not reject MD steps that hit NELM"
+        )
+        sub.add_argument(
+            "--keep-post-runaway", action="store_true", help="Do not reject frames after a temperature runaway"
+        )
+        sub.add_argument("--max-force", type=float, help="Reject frames with max |F| above this (eV/A)")
+        sub.add_argument(
+            "--max-md-temperature", type=float, help="Reject frames whose OSZICAR temperature exceeds this (K)"
+        )
+        sub.add_argument("--ratios", nargs=3, type=float, metavar=("TRAIN", "VALID", "TEST"))
+        sub.add_argument("--seed", type=int)
+        sub.add_argument("--group-by", choices=nio_dataset.GROUP_BY, help="Leakage unit (default: case)")
+        sub.add_argument(
+            "--stratify-by",
+            nargs="+",
+            choices=("ligand", "coverage", "motif", "pattern", "anchor", "stage", "none"),
+            help="Balance splits within these chemistry strata (default: ligand)",
+        )
+        sub.add_argument("--split-method", choices=nio_dataset.SPLIT_METHODS)
+        sub.add_argument("--type-map", nargs="+", help="Explicit element order (default: sorted elements)")
+        sub.add_argument("--include-virial", action="store_true")
+        sub.add_argument("--layout", choices=("nio", "generic"))
+    dataset_discover.add_argument("--output-json", help="Also write the full report here")
+    dataset_discover.add_argument("--full", action="store_true", help="Print every trajectory row")
+    dataset_export.add_argument("--output", required=True, help="New canonical dataset directory")
+    dataset_export.add_argument("--force", action="store_true")
+    dataset_readiness.add_argument("--output", required=True, help="Directory for readiness.json/readiness.md")
+    dataset_readiness.add_argument("--dataset", help="An exported canonical dataset to verify")
+    dataset_readiness.add_argument(
+        "-c", "--campaign", help="campaign.yaml whose MACE/DeePMD/NequIP inputs should be cross-checked"
+    )
+    dataset_verify = dataset_commands.add_parser(
+        "verify", help="Re-check hashes, frame identity, split identity and extxyz/DeePMD agreement"
+    )
+    dataset_verify.add_argument("dataset")
+    dataset_verify.add_argument("--skip-membership", action="store_true")
+    dataset.set_defaults(func=cmd_dataset)
 
     phases_parser = commands.add_parser(
         "phases",
@@ -1729,7 +1932,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     mlip_compare = commands.add_parser(
         "mlip-compare",
-        help="Compare MACE and DeePMD committees on exactly matched canonical frames",
+        help="Compare MACE, DeePMD/DPA and NequIP committees on exactly matched canonical frames",
     )
     mlip_compare_commands = mlip_compare.add_subparsers(
         dest="mlip_compare_command", required=True
@@ -1753,6 +1956,26 @@ def build_parser() -> argparse.ArgumentParser:
         default="dpa2",
         choices=("dpa2", "dpa2_ft", "dpa3", "dpa3_ft", "dpa4"),
         help="Which trained DeePMD committee to compare against (default dpa2)",
+    )
+    compare_prepare.add_argument(
+        "--backends",
+        nargs="+",
+        choices=("mace", "deepmd", "nequip"),
+        help="Backends evaluated on the matched frames (default: mace deepmd, plus nequip "
+        "when --nequip-root is given)",
+    )
+    compare_prepare.add_argument(
+        "--nequip-root",
+        help="NequIP committee root from 'iface train nequip' (e.g. models/nequip); "
+        "every member needs a compiled model",
+    )
+    compare_prepare.add_argument(
+        "--nequip-seeds", nargs="+", type=int, help="NequIP members to use (default: all, in seed order)"
+    )
+    compare_prepare.add_argument(
+        "--nequip-profile",
+        default="nequip_gpu",
+        help="Scheduler profile job for the NequIP inference launcher (default nequip_gpu)",
     )
     compare_prepare.add_argument("--force", action="store_true")
     compare_prepare.set_defaults(func=cmd_mlip_compare)
@@ -1781,7 +2004,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="LABEL[:ENGINE]=DIR",
         help="A finalized mlip-compare output dir and its family label (repeat). "
-        "ENGINE (MACE|DPA2) defaults to MACE when LABEL starts with 'mace', else DPA2",
+        "ENGINE (MACE|DPA2|NEQUIP) defaults from the LABEL prefix (mace*, nequip*, else DPA2)",
     )
     combine_members = compare_combine.add_mutually_exclusive_group()
     combine_members.add_argument("--members", action="store_true", default=None)
@@ -1797,6 +2020,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--mace-committee-root",
         help="Directory holding mace_committee/ and mace_finetune_committee/ "
         "(default <campaign>/models/mace_committee_520eV)",
+    )
+    mlip_progress_parser.add_argument(
+        "--nequip-root",
+        action="append",
+        default=[],
+        help="Extra NequIP committee root(s) to report (models/nequip is always checked)",
     )
     mlip_progress_parser.add_argument(
         "--json", action="store_true", help="Emit the raw payload instead of a table"

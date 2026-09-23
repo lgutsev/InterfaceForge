@@ -143,3 +143,40 @@ jobs:
       OMP_NUM_THREADS: "1"
       PYTHONUNBUFFERED: "1"
       CUDA_DEVICE_ORDER: PCI_BUS_ID
+
+  # NequIP (message-passing GNN) committees: `iface train nequip`. Separate from
+  # allegro_gpu so a NequIP environment can be pinned independently of Allegro.
+  # NEQUIP_ACTIVATE_SCRIPT must activate an env providing nequip-train,
+  # nequip-package and nequip-compile (and a CUDA PyTorch build for nequip_gpu).
+  nequip_gpu:
+    partition: gpu2
+    account: YOUR_LONI_ACCOUNT
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 8
+    gpus: 1
+    time: "72:00:00"
+    modules: []
+    preamble: ['source "${NEQUIP_ACTIVATE_SCRIPT:?Set NEQUIP_ACTIVATE_SCRIPT to the NequIP environment activation script}"']
+    environment:
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      PYTHONUNBUFFERED: "1"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      CUDA_DEVICE_ORDER: "PCI_BUS_ID"
+
+  # CPU-only NequIP (debugging / tiny smoke tests; production training is GPU).
+  nequip_cpu:
+    partition: workq
+    account: YOUR_LONI_ACCOUNT
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 16
+    time: "12:00:00"
+    modules: []
+    preamble: ['source "${NEQUIP_ACTIVATE_SCRIPT:?Set NEQUIP_ACTIVATE_SCRIPT to the NequIP environment activation script}"']
+    environment:
+      OMP_NUM_THREADS: "16"
+      MKL_NUM_THREADS: "16"
+      PYTHONUNBUFFERED: "1"

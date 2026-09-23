@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError, SafetyError
+from .provenance import interfaceforge_commit
 from .state import sha256_file, utc_now
 
 _SEED_NAME = re.compile(r"^seed[_-](?P<seed>-?\d+)$")
@@ -26,8 +27,11 @@ _FROZEN_MODEL_NAMES = ("frozen_model.pth", "frozen_model.pt", "frozen_model.pt2"
 _RUN_ARTIFACTS = {
     "mace": ("results", "mace_model", "checkpoints", "logs"),
     "deepmd": ("input.json", "lcurve.out", "model.ckpt.pt", "test_results"),
+    "nequip": ("config.yaml", "outputs/best.ckpt", "outputs/last.ckpt", "logs", "status.json", "versions.json"),
 }
-_ENGINES = ("mace", "deepmd")
+_ENGINES = ("mace", "deepmd", "nequip")
+# Never redistributed inside a model bundle (licensing or size): VASP inputs/outputs.
+_PROHIBITED_NAMES = ("POTCAR", "WAVECAR", "CHGCAR", "OUTCAR", "vasprun.xml")
 
 
 def _resolved(path: str | Path) -> Path:
@@ -182,6 +186,116 @@ def _discover_deepmd_members(source: Path) -> list[dict[str, Any]]:
             }
         )
     return sorted(members, key=lambda item: item["index"])
+
+
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _discover_nequip_members(
+    source: Path, *, include_checkpoints: bool
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Completed NequIP members (``seed_<seed>/final/model.nequip.zip``) with provenance.
+
+    The portable ``nequip-package`` archive is the stored model. The compiled
+    model (device/PyTorch specific), the exact training config and a provenance
+    record travel as checksummed extra files; checkpoints only on request.
+    """
+
+    from .nequip import discover_members
+
+    state = discover_members(source)
+    manifest = _read_json_file(source / "training_manifest.json") or {}
+    if state["missing_seeds"]:
+        raise SafetyError(f"NequIP members missing for seeds {state['missing_seeds']} under {source}")
+    evaluation = _read_json_file(source / "evaluation" / "summary.json")
+    per_model_eval = {
+        str(row.get("seed")): row
+        for row in (evaluation or {}).get("per_model", [])
+        if row.get("model") != "ensemble_mean"
+    }
+    records: list[dict[str, Any]] = []
+    for position, member in enumerate(state["members"]):
+        seed = member["seed"]
+        member_dir = source / member["member"]
+        package = member_dir / "final" / "model.nequip.zip"
+        if not member["package"] or not package.is_file():
+            raise SafetyError(
+                f"NequIP member {member['member']} has no final/model.nequip.zip (state {member['state']}); "
+                "finish training/finalize before collecting"
+            )
+        if member["state"] != "complete":
+            raise SafetyError(f"NequIP member {member['member']} is {member['state']}, not complete")
+        extras: list[tuple[str, Path | None, str, Any]] = []
+        if member["compiled_model"]:
+            compiled = Path(member["compiled_model"])
+            extras.append(("compiled_model", compiled, f"models/seed_{seed}{''.join(compiled.suffixes)}", None))
+        extras.append(("config", member_dir / "config.yaml", f"configs/seed_{seed}.config.yaml", None))
+        if include_checkpoints and member["best_checkpoint"]:
+            best = member_dir / "outputs" / "best.ckpt"
+            extras.append(("checkpoint", best, f"checkpoints/seed_{seed}.best.ckpt", None))
+        provenance = {
+            "architecture": "nequip",
+            "seed": seed,
+            "member_label": f"model_{position:03d}",
+            "config_sha256": (member_dir / "config.sha256").read_text(encoding="utf-8").strip()
+            if (member_dir / "config.sha256").is_file()
+            else None,
+            "best_checkpoint_sha256": (member_dir / "final" / "best_ckpt.sha256").read_text(encoding="utf-8").strip()
+            if (member_dir / "final" / "best_ckpt.sha256").is_file()
+            else None,
+            "status": _read_json_file(member_dir / "status.json"),
+            "versions": _read_json_file(member_dir / "versions.json"),
+            "final_epoch": member["epoch"],
+            "validation_metrics": member["val_metrics"],
+            "test_metrics_lightning": member["test_metrics"],
+            "committee_evaluation_metrics": per_model_eval.get(str(seed)),
+            "restarts": member["restarts"],
+        }
+        extras.append(("provenance", None, f"provenance/seed_{seed}.json", provenance))
+        records.append(
+            {
+                "seed": seed,
+                "model_index": position,
+                "run_name": member["member"],
+                "model": package,
+                "stored_model": f"models/seed_{seed}.nequip.zip",
+                "member_extra": {"architecture": "nequip"},
+                "extra_files": extras,
+            }
+        )
+    engine_manifest = {
+        "architecture": "nequip",
+        "type_map": manifest.get("type_names"),
+        "campaign": manifest.get("campaign"),
+        "hyperparameters": manifest.get("hyperparameters"),
+        "defaults_applied": manifest.get("defaults_applied"),
+        "model_dtype": manifest.get("model_dtype"),
+        "device": manifest.get("device"),
+        "compile": manifest.get("compile"),
+        "training_interfaceforge_commit": manifest.get("interfaceforge_commit"),
+        "training_interfaceforge_version": manifest.get("interfaceforge_version"),
+        "dataset": (manifest.get("dataset") or {}).get("identity"),
+        "dataset_files_sha256": (manifest.get("dataset") or {}).get("sha256"),
+        "committee_evaluation": (
+            {
+                "ensemble": evaluation.get("ensemble"),
+                "reference": evaluation.get("reference"),
+                "disagreement": evaluation.get("disagreement"),
+                "notes": evaluation.get("notes"),
+            }
+            if evaluation
+            else None
+        ),
+        "checkpoints_included": bool(include_checkpoints),
+        "compiled_model_note": "compiled models are specific to the GPU/PyTorch they were built on; "
+        "recompile the portable .nequip.zip on the target machine",
+    }
+    return records, engine_manifest
 
 
 def _deepmd_input_value(members: Sequence[dict[str, Any]], *keys: str) -> Any:
@@ -341,6 +455,7 @@ def collect_committee(
     training_data_compression: str = "deflated",
     label: str | None = None,
     notes: str | None = None,
+    include_checkpoints: bool = False,
 ) -> dict[str, Any]:
     """Copy final committee models into a compact, checksummed bundle.
 
@@ -392,6 +507,9 @@ def collect_committee(
             for seed, run_name, model in _discover_mace_models(source, model_pattern)
         ]
         found_hint = f"with pattern {model_pattern!r} under {source}"
+    elif engine == "nequip":
+        normalized, engine_manifest = _discover_nequip_members(source, include_checkpoints=include_checkpoints)
+        found_hint = f"under {source} (expected seed_*/final/model.nequip.zip from 'iface train nequip')"
     else:
         ensemble = _load_deepmd_ensemble(source)
         # `iface train deepmd` writes each architecture to models/deepmd/<arch>/,
@@ -491,6 +609,30 @@ def collect_committee(
             if copied_checksum != record["sha256"]:
                 raise SafetyError(f"Checksum changed while copying {record['model']}")
             run_root = source / str(record["run_name"])
+            extra_entries: list[dict[str, Any]] = []
+            for kind, extra_source, extra_stored, generated in record.get("extra_files", []):
+                stored_extra = pathlib.PurePosixPath(extra_stored)
+                if any(name.lower() in stored_extra.name.lower() for name in _PROHIBITED_NAMES):
+                    raise SafetyError(f"Refusing to bundle prohibited file {stored_extra}")
+                extra_target = temporary / stored_extra
+                extra_target.parent.mkdir(parents=True, exist_ok=True)
+                if generated is not None:
+                    extra_target.write_text(
+                        json.dumps(generated, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"
+                    )
+                else:
+                    shutil.copy2(extra_source, extra_target)
+                extra_checksum = sha256_file(extra_target)
+                extra_entries.append(
+                    {
+                        "kind": kind,
+                        "stored": stored_extra.as_posix(),
+                        "source": str(extra_source) if extra_source is not None else None,
+                        "sha256": extra_checksum,
+                        "size_bytes": extra_target.stat().st_size,
+                    }
+                )
+                checksum_lines.append(f"{extra_checksum}  {stored_extra.as_posix()}")
             member = {
                 "index": index,
                 "model_index": record["model_index"],
@@ -506,6 +648,8 @@ def collect_committee(
                 },
                 **record["member_extra"],
             }
+            if extra_entries:
+                member["extra_files"] = extra_entries
             members.append(member)
             checksum_lines.append(f"{copied_checksum}  {stored.as_posix()}")
             model_lines.append(stored.as_posix())
@@ -520,6 +664,7 @@ def collect_committee(
             "expected_members": expected_members,
             "model_count": len(members),
             "model_pattern": model_pattern if engine == "mace" else None,
+            "interfaceforge_commit": interfaceforge_commit(),
             "members": members,
             "training_data": data_records,
             "training_data_archive": str(data_archive) if data_archive is not None else None,
@@ -623,6 +768,13 @@ def verify_committee_bundle(bundle_root: str | Path) -> dict[str, Any]:
         if checksum in observed_hashes:
             raise SafetyError(f"Duplicate committee model content in bundle: {model}")
         observed_hashes.add(checksum)
+        for extra in member.get("extra_files", []) or []:
+            stored_extra = Path(str(extra.get("stored", "")))
+            extra_path = (root / stored_extra).resolve()
+            if stored_extra.is_absolute() or not _inside(extra_path, root) or not extra_path.is_file():
+                raise SafetyError(f"Missing or unsafe committee extra file: {stored_extra}")
+            if sha256_file(extra_path) != extra.get("sha256") or extra_path.stat().st_size != extra.get("size_bytes"):
+                raise SafetyError(f"Committee extra file checksum/size mismatch: {stored_extra}")
 
     expected_digest = _bundle_digest(str(manifest.get("engine", "")), members)
     if expected_digest != manifest.get("bundle_sha256"):
@@ -691,6 +843,16 @@ def _verify_committee_zip(archive: Path) -> dict[str, Any]:
                 if checksum in observed_hashes:
                     raise SafetyError(f"Duplicate committee model content in ZIP: {stored}")
                 observed_hashes.add(checksum)
+                for extra in member.get("extra_files", []) or []:
+                    stored_extra = pathlib.PurePosixPath(str(extra.get("stored", "")))
+                    if stored_extra.is_absolute() or ".." in stored_extra.parts:
+                        raise SafetyError(f"Unsafe committee extra file path in ZIP: {stored_extra}")
+                    extra_name = (pathlib.PurePosixPath(top_level) / stored_extra).as_posix()
+                    if extra_name not in known_names:
+                        raise SafetyError(f"Missing committee extra file in ZIP: {stored_extra}")
+                    extra_checksum, extra_size = _sha256_zip_member(handle, extra_name)
+                    if extra_checksum != extra.get("sha256") or extra_size != extra.get("size_bytes"):
+                        raise SafetyError(f"Committee extra file checksum/size mismatch in ZIP: {stored_extra}")
 
             expected_digest = _bundle_digest(str(manifest.get("engine", "")), members)
             if expected_digest != manifest.get("bundle_sha256"):
