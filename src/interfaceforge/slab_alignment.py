@@ -101,6 +101,7 @@ OUTPUT_FIELDS = [
     "axis",
     "suggested_DIPOL_normal",
     "normal_tilt_degrees",
+    "tilt_status",
     "normal_length_A",
     "dipole_axis_status",
     "suggested_DIPOL_z",
@@ -131,6 +132,7 @@ AUDIT_FIELDS = [
     "axis",
     "suggested_DIPOL_normal",
     "normal_tilt_degrees",
+    "tilt_status",
     "normal_length_A",
     "dipole_axis_status",
     "suggested_DIPOL_z",
@@ -297,8 +299,17 @@ def parse_poscar_lines(lines: list[str]) -> Structure:
     return Structure(cell, species, counts, fractional, index)
 
 
-def read_locpot(path: str | Path, axis: str = "z") -> tuple[Structure, np.ndarray, np.ndarray]:
-    """Read LOCPOT and return its selected fractional-plane average in eV."""
+def read_locpot(
+    path: str | Path,
+    axis: str = "z",
+    max_tilt_degrees: float | None = 0.1,
+) -> tuple[Structure, np.ndarray, np.ndarray]:
+    """Read LOCPOT and return its selected fractional-plane average in eV.
+
+    ``max_tilt_degrees`` rejects cells whose selected lattice vector deviates
+    from the plane normal by more than the limit; ``None`` defers the tilt
+    decision to the caller.
+    """
 
     input_path = Path(path)
     lines = input_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -307,10 +318,10 @@ def read_locpot(path: str | Path, axis: str = "z") -> tuple[Structure, np.ndarra
         raise SafetyError("Surface-normal axis must be x, y, or z")
     structure.axis = axis
     tilt = structure.normal_tilt_degrees
-    if tilt > 0.1:
+    if max_tilt_degrees is not None and tilt > max_tilt_degrees:
         raise SafetyError(
             f"Selected lattice vector is tilted {tilt:.6f} degrees from the plane normal "
-            "(limit 0.1 degrees); review cell geometry and dipole-correction applicability"
+            f"(limit {max_tilt_degrees:g} degrees); review cell geometry and dipole-correction applicability"
         )
     grid_index = _next_nonempty(lines, structure.coordinate_end_line)
     try:
@@ -745,6 +756,12 @@ def load_alignment_config(path: str | Path) -> dict[str, Any]:
         "std_warn_eV": 0.02,
         "std_fail_eV": 0.05,
         "vasp_vacuum_tolerance_eV": 0.05,
+        # Planes of constant fractional coordinate stay parallel to the surface
+        # for any tilt, and distances use the projected normal, so a small tilt
+        # is recorded rather than rejected. Larger tilts need a human decision
+        # on whether IDIPOL still corresponds to the slab normal.
+        "tilt_warn_degrees": 0.1,
+        "tilt_fail_degrees": 1.0,
         "references": [
             {"prefix": "MAPI_MAI_Surf", "reference": "MAPI_MAI_Surf"},
             {"prefix": "MAPI_PbI2_Surf", "reference": "MAPI_PbI2_Surf"},
@@ -765,6 +782,10 @@ def load_alignment_config(path: str | Path) -> dict[str, Any]:
     if config["side"] not in (f"high-{axis}", f"low-{axis}"):
         raise SafetyError("Configuration side must match axis (for example axis=x, side=high-x)")
     config["axis"] = axis
+    warn, fail = float(config["tilt_warn_degrees"]), float(config["tilt_fail_degrees"])
+    if not 0.0 <= warn <= fail < 90.0:
+        raise SafetyError("Require 0 <= tilt_warn_degrees <= tilt_fail_degrees < 90")
+    config["tilt_warn_degrees"], config["tilt_fail_degrees"] = warn, fail
     if not isinstance(config["references"], list) or not config["references"]:
         raise SafetyError("Configuration references must be a nonempty list")
     return config
@@ -776,6 +797,14 @@ def reference_for(name: str, config: dict[str, Any]) -> str | None:
         if name == prefix or name.startswith(prefix + "_"):
             return str(rule["reference"])
     return None
+
+
+def tilt_status(tilt_degrees: float, config: dict[str, Any]) -> str:
+    if tilt_degrees > config["tilt_fail_degrees"]:
+        return "TILT_FAILURE"
+    if tilt_degrees > config["tilt_warn_degrees"]:
+        return "TILT_WARNING"
+    return "OK"
 
 
 def plateau_status(plateau: Plateau, config: dict[str, Any]) -> str:
@@ -904,6 +933,13 @@ def _remove_generated_marker(calc_dir: Path, name: str) -> None:
         marker.unlink()
 
 
+def _tilt_note(row: dict[str, Any]) -> str:
+    status = row.get("tilt_status", "")
+    if status not in ("TILT_WARNING", "TILT_FAILURE"):
+        return ""
+    return f"tilt_status: {status} ({float(row.get('normal_tilt_degrees', 0.0)):.4f} degrees)\n"
+
+
 def _write_audit_markers(
     calc_dir: Path,
     row: dict[str, Any],
@@ -930,7 +966,8 @@ def _write_audit_markers(
         _remove_generated_marker(calc_dir, "INCAR.dipole_fix")
         marker = calc_dir / OK_MARKER
         marker.write_text(
-            "LOCPOT selected-side vacuum passed the InterfaceForge flatness audit.\n",
+            "LOCPOT selected-side vacuum passed the InterfaceForge flatness audit.\n"
+            + _tilt_note(row),
             encoding="utf-8",
         )
         row["audit_action"] = "NONE_FLAT_ENOUGH"
@@ -942,10 +979,12 @@ def _write_audit_markers(
         marker = calc_dir / AUDIT_FAILED_MARKER
         marker.write_text(
             "InterfaceForge could not audit this LOCPOT. Review the reported error before relaunch.\n"
-            f"error: {row.get('error', '')}\n",
+            f"error: {row.get('error', '')}\n" + _tilt_note(row),
             encoding="utf-8",
         )
-        row["audit_action"] = "REVIEW_AUDIT_FAILURE"
+        row["audit_action"] = (
+            "REVIEW_CELL_TILT" if row.get("tilt_status") == "TILT_FAILURE" else "REVIEW_AUDIT_FAILURE"
+        )
         row["relaunch_review_required"] = True
         row["review_flag_path"] = str(marker)
         return
@@ -988,7 +1027,8 @@ def _write_audit_markers(
         f"compactness_R: {row.get('compactness_R', '')}\n"
         f"proposed_incar: {fix_path or 'disabled'}\n"
         f"recommendation: {recommendation}\n"
-        "No calculation was submitted and INCAR was not modified.\n",
+        + _tilt_note(row)
+        + "No calculation was submitted and INCAR was not modified.\n",
         encoding="utf-8",
     )
     row["audit_action"] = action
@@ -1045,12 +1085,22 @@ def _analyze_folder(
         "vasp_vacuum_warning": "",
         "pdos_review_required": True,
         "sumo_status": "NOT_REQUESTED",
+        "tilt_status": "NOT_ANALYZED",
     }
     details: dict[str, Any] = {}
     try:
-        structure, z_grid, potential = read_locpot(calc_dir / "LOCPOT", axis=config["axis"])
+        structure, z_grid, potential = read_locpot(
+            calc_dir / "LOCPOT", axis=config["axis"], max_tilt_degrees=None
+        )
         row["normal_tilt_degrees"] = structure.normal_tilt_degrees
         row["normal_length_A"] = structure.normal_length
+        row["tilt_status"] = tilt_status(structure.normal_tilt_degrees, config)
+        if row["tilt_status"] == "TILT_FAILURE":
+            raise SafetyError(
+                f"Selected lattice vector is tilted {structure.normal_tilt_degrees:.6f} degrees from the "
+                f"plane normal (tilt_fail_degrees {config['tilt_fail_degrees']:g}); confirm that "
+                f"IDIPOL={structure.axis_index + 1} still corresponds to the slab normal before relaunch"
+            )
         profile, shifted_z, shifted_potential = analyze_profile(
             structure,
             z_grid,

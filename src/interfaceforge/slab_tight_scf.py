@@ -14,6 +14,11 @@ potential-output tags change; the functional, cutoff, k-points, LREAL, and
 DIPOL are preserved so that any change in the vacuum slope can be attributed
 to electronic convergence.  Nothing is submitted and parent folders are never
 modified.
+
+A tight static SCF cannot repair the geometry itself, so the parent relaxation
+is audited too: a run that exhausted ``NSW`` without VASP's "reached required
+accuracy", or whose final forces on free atoms are large (``EDIFFG > 0`` is an
+energy criterion and never checks forces), is reported with a warning.
 """
 
 from __future__ import annotations
@@ -50,6 +55,13 @@ PLAN_FIELDS = [
     "parent_NELM",
     "parent_AMIN",
     "parent_charge_sloshing_warning",
+    "parent_IBRION",
+    "parent_NSW",
+    "parent_EDIFFG",
+    "parent_ionic_converged",
+    "parent_hit_nsw_limit",
+    "parent_final_max_force_eV_per_A",
+    "warnings",
     "wavecar",
     "incar_changes",
     "destination",
@@ -74,6 +86,18 @@ class ScfDiagnostics:
     ICHARG: int | None = None
     charge_sloshing_warning: bool = False
     vacuum_warning: str = ""
+    IBRION: int | None = None
+    NSW: int | None = None
+    EDIFFG: float | None = None
+    reached_required_accuracy: bool = False
+    ionic_converged: bool | None = None
+    hit_nsw_limit: bool | None = None
+    final_max_force_eV_per_A: float | None = None
+    force_atoms: str = "all"
+
+    @property
+    def is_relaxation(self) -> bool:
+        return self.IBRION in (1, 2, 3) and bool(self.NSW)
 
 
 def _first_float(pattern: str, line: str) -> float | None:
@@ -81,13 +105,15 @@ def _first_float(pattern: str, line: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
-def scf_diagnostics_from_outcar(path: str | Path) -> ScfDiagnostics:
-    """Parse settings and per-ionic-step SCF convergence from an OUTCAR.
+def scf_diagnostics_from_outcar(path: str | Path, free_mask: list[bool] | None = None) -> ScfDiagnostics:
+    """Parse settings, SCF convergence, and ionic convergence from an OUTCAR.
 
     An ionic step counts as converged only when VASP printed ``aborting loop
     because EDIFF is reached`` for it; a step that ends without that line
     (NELM exhausted, or VASP 6's explicit "not reached" message) is
-    unconverged.
+    unconverged.  For relaxations, ionic convergence requires "reached
+    required accuracy"; the final force maximum uses only atoms free in
+    ``free_mask`` (selective dynamics) when it is supplied.
     """
 
     diag = ScfDiagnostics()
@@ -97,6 +123,9 @@ def scf_diagnostics_from_outcar(path: str | Path) -> ScfDiagnostics:
     current_step: int | None = None
     step_converged = False
     step_status: dict[int, bool] = {}
+    forces: list[float] = []
+    last_forces: list[float] = []
+    force_state = 0  # 0 idle, 1 expecting dashes, 2 reading rows
 
     def close_step() -> None:
         if current_step is not None:
@@ -104,6 +133,34 @@ def scf_diagnostics_from_outcar(path: str | Path) -> ScfDiagnostics:
 
     with outcar.open(encoding="utf-8", errors="replace") as handle:
         for line in handle:
+            if force_state:
+                if line.lstrip().startswith("---"):
+                    if force_state == 2:
+                        last_forces, force_state = forces, 0
+                    else:
+                        forces, force_state = [], 2
+                    continue
+                if force_state == 2:
+                    fields = line.split()
+                    if len(fields) >= 6:
+                        fx, fy, fz = (float(value) for value in fields[3:6])
+                        forces.append((fx * fx + fy * fy + fz * fz) ** 0.5)
+                        continue
+                    force_state = 0
+            if "TOTAL-FORCE" in line:
+                force_state = 1
+                continue
+            if diag.NSW is None and re.match(r"^\s*NSW\s*=", line):
+                value = _first_float(r"NSW\s*=\s*([0-9]+)", line)
+                diag.NSW = int(value) if value is not None else None
+            elif diag.IBRION is None and re.match(r"^\s*IBRION\s*=", line):
+                value = _first_float(r"IBRION\s*=\s*(-?[0-9]+)", line)
+                diag.IBRION = int(value) if value is not None else None
+            elif diag.EDIFFG is None and re.match(r"^\s*EDIFFG\s*=", line):
+                match = re.search(r"EDIFFG\s*=\s*([-+0-9.EeDd]+)", line)
+                diag.EDIFFG = float(match.group(1).upper().replace("D", "E")) if match else None
+            elif "reached required accuracy" in line:
+                diag.reached_required_accuracy = True
             if diag.EDIFF is None and re.match(r"^\s*EDIFF\s*=", line):
                 match = re.search(r"EDIFF\s*=\s*([-+0-9.EeDd]+)", line)
                 diag.EDIFF = float(match.group(1).upper().replace("D", "E")) if match else None
@@ -140,7 +197,64 @@ def scf_diagnostics_from_outcar(path: str | Path) -> ScfDiagnostics:
     if step_status:
         diag.final_scf_converged = step_status[max(step_status)]
     diag.vacuum_warning = vacuum_warning_from_outcar(outcar)
+    if diag.is_relaxation:
+        diag.ionic_converged = diag.reached_required_accuracy
+        diag.hit_nsw_limit = not diag.reached_required_accuracy and diag.ionic_steps >= int(diag.NSW or 0)
+    if last_forces:
+        if free_mask is not None and len(free_mask) == len(last_forces):
+            selected = [force for force, free in zip(last_forces, free_mask, strict=True) if free]
+            diag.force_atoms = "free"
+        else:
+            selected = last_forces
+        diag.final_max_force_eV_per_A = max(selected) if selected else 0.0
     return diag
+
+
+def selective_free_mask(path: str | Path) -> list[bool] | None:
+    """Per-atom "any direction free" flags from a POSCAR/CONTCAR, or None."""
+
+    structure_path = Path(path)
+    if not structure_path.is_file():
+        return None
+    lines = structure_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    structure = parse_poscar_lines(lines)
+    count = sum(structure.counts)
+    nonempty = [line.strip() for line in lines[: structure.coordinate_end_line] if line.strip()]
+    coordinates, preamble = nonempty[-count:], nonempty[:-count]
+    # The mode line (Direct/Cartesian) directly precedes the coordinates;
+    # "Selective dynamics" can only be the line before it.
+    if len(preamble) < 2 or not preamble[-2].lower().startswith("s"):
+        return None
+    return [any(flag.upper().startswith("T") for flag in fields.split()[3:6]) for fields in coordinates]
+
+
+def relaxation_warnings(diag: ScfDiagnostics, force_warn: float) -> list[str]:
+    """Human-readable reasons to distrust the parent geometry."""
+
+    warnings: list[str] = []
+    if diag.hit_nsw_limit:
+        warnings.append(
+            f"PARENT_HIT_NSW_LIMIT: relaxation used all NSW={diag.NSW} ionic steps without "
+            "'reached required accuracy'"
+        )
+    elif diag.ionic_converged is False:
+        warnings.append(
+            f"PARENT_IONIC_NOT_CONVERGED: no 'reached required accuracy' after {diag.ionic_steps} "
+            f"of NSW={diag.NSW} steps"
+        )
+    if diag.final_max_force_eV_per_A is not None and diag.final_max_force_eV_per_A > force_warn:
+        note = (
+            "; EDIFFG>0 is an energy criterion, so forces were never checked"
+            if diag.is_relaxation and diag.EDIFFG is not None and diag.EDIFFG > 0
+            else ""
+        )
+        warnings.append(
+            f"PARENT_FORCES_HIGH: final max force on {diag.force_atoms} atoms "
+            f"{diag.final_max_force_eV_per_A:.3f} eV/A > {force_warn:g}{note}"
+        )
+    if diag.final_scf_converged is False:
+        warnings.append("PARENT_FINAL_SCF_UNCONVERGED: the last ionic step did not reach EDIFF")
+    return warnings
 
 
 def _split_comment(line: str) -> tuple[str, str]:
@@ -322,13 +436,17 @@ def prepare_tight_scf(
     copy_patterns: list[str] | None = None,
     overwrite: bool = False,
     dry_run: bool = False,
+    force_warn: float = 0.05,
+    require_relaxed: bool = False,
 ) -> dict[str, Any]:
     """Write tight static-SCF copies of audited slab calculations.
 
     Every immediate daughter listed in the slab-align audit is inspected.
     Selected daughters get ``<output>/<folder>/`` containing POSCAR (from
     CONTCAR), KPOINTS, POTCAR, a rewritten INCAR, the parent INCAR as
-    ``INCAR.parent``, optionally WAVECAR, and a provenance JSON.
+    ``INCAR.parent``, optionally WAVECAR, and a provenance JSON.  Parent
+    relaxations that did not converge ionically are reported as warnings, or
+    blocked when ``require_relaxed`` is set.
     """
 
     if select not in ("flagged", "all"):
@@ -378,9 +496,14 @@ def prepare_tight_scf(
             "wavecar": "",
             "incar_changes": [],
             "destination": "",
+            "warnings": [],
         }
         try:
-            diag = scf_diagnostics_from_outcar(parent / "OUTCAR")
+            mask = selective_free_mask(parent / "CONTCAR") if (parent / "CONTCAR").is_file() else None
+        except (OSError, ValueError, IndexError, SafetyError):
+            mask = None
+        try:
+            diag = scf_diagnostics_from_outcar(parent / "OUTCAR", free_mask=mask)
             entry.update(
                 {
                     "parent_finished": diag.finished,
@@ -391,6 +514,13 @@ def prepare_tight_scf(
                     "parent_NELM": diag.NELM,
                     "parent_AMIN": diag.AMIN,
                     "parent_charge_sloshing_warning": diag.charge_sloshing_warning,
+                    "parent_IBRION": diag.IBRION,
+                    "parent_NSW": diag.NSW,
+                    "parent_EDIFFG": diag.EDIFFG,
+                    "parent_ionic_converged": diag.ionic_converged,
+                    "parent_hit_nsw_limit": diag.hit_nsw_limit,
+                    "parent_final_max_force_eV_per_A": diag.final_max_force_eV_per_A,
+                    "warnings": relaxation_warnings(diag, force_warn),
                 }
             )
             diag_error = ""
@@ -410,6 +540,8 @@ def prepare_tight_scf(
                 raise SafetyError(diag_error)
             if not diag.finished:
                 raise SafetyError("parent OUTCAR has no final timing block; the run may be incomplete")
+            if require_relaxed and diag.ionic_converged is False:
+                raise SafetyError("parent relaxation did not reach required accuracy (--require-relaxed)")
             for required in ("INCAR", "KPOINTS", "POTCAR"):
                 if not (parent / required).is_file():
                     raise SafetyError(f"parent {required} is missing")
@@ -474,6 +606,7 @@ def prepare_tight_scf(
                     "vacuum_minus_ef_eV", "axis", "current_DIPOL", "suggested_DIPOL_normal",
                 )},
                 "parent_scf": asdict(diag),
+                "parent_geometry_warnings": entry["warnings"],
                 "overrides": overrides,
                 "incar_changes": changes,
                 "copied": copied,
@@ -504,6 +637,7 @@ def prepare_tight_scf(
         "dry_run": dry_run,
         "settings": {"EDIFF": ediff, "NELM": nelm, "AMIN": amin, "wavecar": wavecar, "dipol": dipol},
         "counts": counts,
+        "geometry_warnings": sum(bool(entry["warnings"]) for entry in plan),
         "config_copied": config_copied,
         "outputs": outputs,
         "plan": plan,
@@ -518,8 +652,19 @@ def _format(value: Any) -> str:
     if isinstance(value, list):
         if value and isinstance(value[0], dict):
             return "; ".join(f"{item['tag']}:{item['old']}->{item['new']}" for item in value)
+        if value and isinstance(value[0], str):
+            return " | ".join(value)
         return " ".join(str(item) for item in value)
     return str(value)
+
+
+def _ionic_label(entry: dict[str, Any]) -> str:
+    if entry.get("parent_hit_nsw_limit"):
+        return "NSW_LIMIT"
+    converged = entry.get("parent_ionic_converged")
+    if converged is None:
+        return "static" if "parent_finished" in entry else "--"
+    return "converged" if converged else "NOT_CONV"
 
 
 def _write_plan(root: Path, out_path: Path, plan: list[dict[str, Any]], *, dry_run: bool) -> dict[str, str]:
@@ -536,17 +681,21 @@ def _write_plan(root: Path, out_path: Path, plan: list[dict[str, Any]], *, dry_r
         "=" * 60,
         "Parent folders were not modified and no job was submitted.",
         "",
-        f"{'folder':36s} {'role':18s} {'action':15s} {'EDIFF':>8s} {'AMIN':>6s} {'unconv':>6s}",
+        f"{'folder':36s} {'role':18s} {'action':15s} {'EDIFF':>8s} {'AMIN':>6s} {'unconv':>6s} "
+        f"{'ionic':>9s} {'Fmax':>7s}",
     ]
     for entry in plan:
         unconverged = entry.get("parent_unconverged_scf_steps")
         lines.append(
             f"{entry['folder'][:36]:36s} {entry['role'][:18] or '-':18s} {entry['action'][:15]:15s} "
             f"{_format(entry.get('parent_EDIFF')):>8s} {_format(entry.get('parent_AMIN')):>6s} "
-            f"{(str(len(unconverged)) if isinstance(unconverged, list) else '--'):>6s}"
+            f"{(str(len(unconverged)) if isinstance(unconverged, list) else '--'):>6s} "
+            f"{_ionic_label(entry):>9s} {_format(entry.get('parent_final_max_force_eV_per_A')) or '--':>7s}"
         )
         if entry.get("reason"):
             lines.append(f"  note: {entry['reason']}")
+        for warning in entry.get("warnings") or []:
+            lines.append(f"  warn: {warning}")
         if entry.get("incar_changes") and entry["action"] in ("PREPARED", "WOULD_PREPARE"):
             lines.append("  INCAR: " + _format(entry["incar_changes"]))
     lines.extend(

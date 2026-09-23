@@ -11,6 +11,7 @@ from interfaceforge.slab_tight_scf import (
     prepare_tight_scf,
     rewrite_incar,
     scf_diagnostics_from_outcar,
+    selective_free_mask,
 )
 
 INCAR = """GGA = PE
@@ -47,8 +48,18 @@ Direct
 POTCAR = "  VRHFIN =Pb: 6s5d6p\n  VRHFIN =I: 5s5p\n"
 
 
-def _outcar(*, converged_steps: int, unconverged_last: bool = False, finished: bool = True) -> str:
+def _outcar(
+    *,
+    converged_steps: int,
+    unconverged_last: bool = False,
+    finished: bool = True,
+    nsw: int = 99,
+    reached: bool = True,
+    forces: list[tuple[float, float, float]] | None = None,
+) -> str:
     lines = [
+        f"   NSW    =     {nsw}    number of steps for IOM",
+        "   IBRION =      2    ionic relax: 0-MD 1-quasi-New 2-CG",
         "   ISTART =      1    job   : 0-new  1-cont  2-samecut",
         "   ICHARG =      0    charge: 1-file 2-atom 10-const",
         "   NELM   =     60;   NELMIN=  2; NELMDL=  0     # of ELM steps",
@@ -66,6 +77,14 @@ def _outcar(*, converged_steps: int, unconverged_last: bool = False, finished: b
         lines.append(f"----- Iteration {step:6d}(  59)  -----")
         lines.append(f"----- Iteration {step:6d}(  60)  -----")
     lines.append("|     The minimum charge density times volume of the cell along the axis      |")
+    lines.append(" POSITION                                       TOTAL-FORCE (eV/Angst)")
+    lines.append(" " + "-" * 83)
+    for fx, fy, fz in forces or [(0.01, 0.0, 0.0), (0.0, 0.02, 0.0)]:
+        lines.append(f"     16.40000      5.00000      5.00000      {fx:10.6f}   {fy:10.6f}   {fz:10.6f}")
+    lines.append(" " + "-" * 83)
+    lines.append("    total drift:                                0.004443     -0.155348      0.025823")
+    if reached:
+        lines.append(" reached required accuracy - stopping structural energy minimisation")
     if finished:
         lines.append(" General timing and accounting informations for this job:")
     return "\n".join(lines) + "\n"
@@ -150,6 +169,48 @@ class OutcarDiagnosticsTests(unittest.TestCase):
             self.assertFalse(diag.final_scf_converged)
 
 
+class IonicConvergenceTests(unittest.TestCase):
+    def test_nsw_limit_and_high_forces_on_free_atoms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "OUTCAR"
+            path.write_text(
+                _outcar(converged_steps=3, nsw=3, reached=False, forces=[(0.9, 0.0, 0.0), (0.0, 0.08, 0.0)]),
+                encoding="utf-8",
+            )
+            diag = scf_diagnostics_from_outcar(path)
+            self.assertTrue(diag.hit_nsw_limit)
+            self.assertFalse(diag.ionic_converged)
+            self.assertAlmostEqual(diag.final_max_force_eV_per_A, 0.9)
+            self.assertAlmostEqual(diag.EDIFFG, 1e-3)
+            # The first atom is fixed by selective dynamics, so its force is ignored.
+            diag = scf_diagnostics_from_outcar(path, free_mask=[False, True])
+            self.assertAlmostEqual(diag.final_max_force_eV_per_A, 0.08)
+            self.assertEqual(diag.force_atoms, "free")
+
+    def test_converged_relaxation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "OUTCAR"
+            path.write_text(_outcar(converged_steps=3), encoding="utf-8")
+            diag = scf_diagnostics_from_outcar(path)
+            self.assertTrue(diag.ionic_converged)
+            self.assertFalse(diag.hit_nsw_limit)
+            self.assertAlmostEqual(diag.final_max_force_eV_per_A, 0.02)
+
+    def test_selective_free_mask(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "CONTCAR"
+            path.write_text(POSCAR.replace("Pb I", "Sn I"), encoding="utf-8")
+            self.assertIsNone(selective_free_mask(path))
+            path.write_text(
+                POSCAR.replace(
+                    "Direct\n0.40 0.5 0.5\n0.60 0.5 0.5",
+                    "Selective dynamics\nDirect\n0.40 0.5 0.5 F F F\n0.60 0.5 0.5 T T F",
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(selective_free_mask(path), [False, True])
+
+
 class PrepareTightScfTests(unittest.TestCase):
     def test_flagged_folder_and_reference_control_are_prepared(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -220,6 +281,27 @@ class PrepareTightScfTests(unittest.TestCase):
             self.assertIn("incomplete", blocked["Ref_A"])
             self.assertIn("POTCAR order", blocked["Ref"])
             self.assertFalse((root / "tight_scf" / "Ref_A").exists())
+
+    def test_unrelaxed_parent_warns_or_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _family(root)
+            (root / "Ref_A" / "OUTCAR").write_text(
+                _outcar(converged_steps=3, nsw=3, reached=False, forces=[(0.2, 0.0, 0.0)]), encoding="utf-8"
+            )
+            result = prepare_tight_scf(root, dry_run=True)
+            entry = next(item for item in result["plan"] if item["folder"] == "Ref_A")
+            self.assertEqual(entry["action"], "WOULD_PREPARE")
+            self.assertTrue(entry["parent_hit_nsw_limit"])
+            self.assertTrue(any(w.startswith("PARENT_HIT_NSW_LIMIT") for w in entry["warnings"]))
+            self.assertTrue(any("energy criterion" in w for w in entry["warnings"]))
+            self.assertEqual(result["geometry_warnings"], 1)
+            self.assertIn("warn: PARENT_HIT_NSW_LIMIT", (root / "tight_scf_plan.txt").read_text(encoding="utf-8"))
+
+            blocked = prepare_tight_scf(root, require_relaxed=True)
+            entry = next(item for item in blocked["plan"] if item["folder"] == "Ref_A")
+            self.assertEqual(entry["action"], "BLOCKED")
+            self.assertIn("require-relaxed", entry["reason"])
 
     def test_dry_run_writes_only_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

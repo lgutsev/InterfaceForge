@@ -68,6 +68,7 @@ def load_publication_config(path: str | Path) -> dict[str, Any]:
         "vacuum_context_angstrom": 2.0,
         "dpi": 600,
         "allow_suspect": False,
+        "tilt_fail_degrees": 1.0,
     }
     input_path = Path(path)
     if not input_path.is_file():
@@ -98,7 +99,9 @@ def _load_case(root: Path, name: str, config: dict[str, Any]) -> PublicationCase
     missing = [path.name for path in required if not path.is_file()]
     if missing:
         raise SafetyError(f"{name}: missing {', '.join(missing)}")
-    structure, z_grid, potential = read_locpot(calc_dir / "LOCPOT")
+    structure, z_grid, potential = read_locpot(
+        calc_dir / "LOCPOT", max_tilt_degrees=float(config["tilt_fail_degrees"])
+    )
     profile, shifted_z, shifted_potential = analyze_profile(
         structure,
         z_grid,

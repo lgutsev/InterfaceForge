@@ -1198,6 +1198,8 @@ def cmd_slab_tight_scf(args: argparse.Namespace) -> int:
         copy_patterns=args.copy,
         overwrite=args.overwrite,
         dry_run=args.dry_run,
+        force_warn=args.force_warn,
+        require_relaxed=args.require_relaxed,
     )
     _json(payload)
     return 1 if payload["counts"].get("BLOCKED") else 0
@@ -2999,6 +3001,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tight_scf.add_argument("--overwrite", action="store_true", help="Refresh inputs in existing unrun folders")
     tight_scf.add_argument("--dry-run", action="store_true", help="Write only the plan in root")
+    tight_scf.add_argument(
+        "--force-warn",
+        type=float,
+        default=0.05,
+        help="Warn when the parent's final max force on free atoms exceeds this (eV/A)",
+    )
+    tight_scf.add_argument(
+        "--require-relaxed",
+        action="store_true",
+        help="Block parents whose relaxation did not reach required accuracy (default: warn)",
+    )
     tight_scf.set_defaults(func=cmd_slab_tight_scf, with_references=True)
 
     slab_publication = vasp_commands.add_parser(

@@ -62,6 +62,46 @@ class AxisTests(unittest.TestCase):
                 with self.assertRaises(Exception):
                     load_alignment_config(config)
 
+    def test_tilt_warning_is_analyzed_and_tilt_failure_is_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, degrees in (('slab', 0.0), ('slab_small', 0.25), ('slab_big', 4.4)):
+                calc = root/name
+                calc.mkdir()
+                path, _ = self.make_locpot(calc, 'x')
+                lines = path.read_text().splitlines()
+                lines[2] = f'40 {40*np.tan(np.radians(degrees))} 0'
+                path.write_text('\n'.join(lines))
+                (calc/'INCAR').write_text('IDIPOL = 1\nLDIPOL = .TRUE.\n')
+                (calc/'OUTCAR').write_text('IDIPOL = 1\n E-fermi : 1.0\n')
+            config = root/'config.json'
+            settings = {'axis': 'x', 'side': 'high-x', 'references': [{'prefix': 'slab', 'reference': 'slab'}]}
+            config.write_text(json.dumps(settings))
+            with (
+                patch('interfaceforge.slab_alignment._plot_profile'),
+                patch('interfaceforge.slab_alignment._plot_workfunction_profile'),
+            ):
+                rows = {row['folder']: row for row in analyze_slab_alignment(root, config='config.json')['rows']}
+                self.assertEqual(rows['slab']['tilt_status'], 'OK')
+                self.assertEqual(rows['slab_small']['tilt_status'], 'TILT_WARNING')
+                self.assertEqual(rows['slab_small']['flatness_status'], 'OK')
+                self.assertAlmostEqual(rows['slab_small']['normal_tilt_degrees'], 0.25, places=6)
+                self.assertIn('TILT_WARNING', (root/'slab_small'/'LOCPOT_FLATNESS_OK').read_text())
+                self.assertEqual(rows['slab_big']['tilt_status'], 'TILT_FAILURE')
+                self.assertEqual(rows['slab_big']['flatness_status'], 'FAILED_ANALYSIS')
+                self.assertEqual(rows['slab_big']['audit_action'], 'REVIEW_CELL_TILT')
+                self.assertIn('tilt_fail_degrees 1', rows['slab_big']['error'])
+
+                config.write_text(json.dumps({**settings, 'tilt_fail_degrees': 5.0}))
+                rows = {row['folder']: row for row in analyze_slab_alignment(root, config='config.json')['rows']}
+                self.assertEqual(rows['slab_big']['tilt_status'], 'TILT_WARNING')
+                self.assertEqual(rows['slab_big']['flatness_status'], 'OK')
+                self.assertFalse((root/'slab_big'/'LOCPOT_AUDIT_FAILED').exists())
+
+            config.write_text(json.dumps({**settings, 'tilt_warn_degrees': 2.0, 'tilt_fail_degrees': 1.0}))
+            with self.assertRaisesRegex(Exception, 'tilt_warn_degrees'):
+                load_alignment_config(config)
+
     def test_wrong_recorded_axis_flagged(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
