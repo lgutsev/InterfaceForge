@@ -248,6 +248,12 @@ class PrepareTightScfTests(unittest.TestCase):
                 self.assertTrue((child / name).is_file(), name)
             provenance = json.loads((child / "TIGHT_SCF_PROVENANCE.json").read_text(encoding="utf-8"))
             self.assertAlmostEqual(provenance["parent_scf"]["EDIFF"], 1e-4)
+            self.assertEqual(
+                provenance["parent_geometry_policy"],
+                {"force_warn_eV_per_A": 0.05, "require_relaxed": False},
+            )
+            self.assertEqual(result["settings"]["force_warn_eV_per_A"], 0.05)
+            self.assertFalse(result["settings"]["require_relaxed"])
             self.assertTrue((root / "tight_scf" / "slab_alignment_fapi.json").is_file())
             self.assertTrue((root / "tight_scf" / "tight_scf_plan.tsv").is_file())
             # Parents are untouched.
@@ -311,6 +317,13 @@ class PrepareTightScfTests(unittest.TestCase):
             self.assertEqual(result["counts"]["WOULD_PREPARE"], 2)
             self.assertFalse((root / "tight_scf").exists())
             self.assertTrue((root / "tight_scf_plan.txt").is_file())
+
+    def test_negative_force_warning_threshold_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _family(root)
+            with self.assertRaisesRegex(SafetyError, "force_warn"):
+                prepare_tight_scf(root, force_warn=-0.01)
 
     def test_missing_audit_is_an_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
