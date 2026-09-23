@@ -59,6 +59,8 @@ ATOMIC_MASS = {
 
 OUTPUT_FIELDS = [
     "folder",
+    "family",
+    "case_name",
     "reference",
     "status",
     "error",
@@ -114,6 +116,8 @@ OUTPUT_FIELDS = [
 
 AUDIT_FIELDS = [
     "folder",
+    "family",
+    "case_name",
     "flatness_status",
     "flat_enough",
     "selected_side",
@@ -1197,12 +1201,19 @@ def _analyze_folder(
     calc_dir: Path,
     config: dict[str, Any],
     *,
+    folder_label: str | None = None,
+    family: str = "root",
+    reference_label: str | None = None,
     run_sumo: bool,
     write_fixes: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    case_name = calc_dir.name
+    base_reference = reference_for(case_name, config) or ""
     row: dict[str, Any] = {
-        "folder": calc_dir.name,
-        "reference": reference_for(calc_dir.name, config) or "",
+        "folder": folder_label or case_name,
+        "family": family,
+        "case_name": case_name,
+        "reference": reference_label if reference_label is not None else base_reference,
         "status": "FAILED_ANALYSIS",
         "error": "",
         "flatness_status": "FAILED_ANALYSIS",
@@ -1380,7 +1391,9 @@ def _analyze_folder(
         if run_sumo:
             row["sumo_status"] = _run_sumo(calc_dir)
         details = {
-            "folder": calc_dir.name,
+            "folder": row["folder"],
+            "family": family,
+            "case_name": case_name,
             "profile": {**asdict(profile), "normal_length_A": profile.c_length_A,
                         "normal_tilt_degrees": structure.normal_tilt_degrees},
             "selected_side": config["side"],
@@ -1517,6 +1530,52 @@ def _write_outputs(root: Path, rows: list[dict[str, Any]], details: list[dict[st
     }
 
 
+REPAIR_FAMILIES = ("tight_scf", "relax_continue")
+
+
+def discover_slab_calculations(
+    root: Path,
+    config: dict[str, Any],
+    *,
+    only: str | None = None,
+) -> list[tuple[Path, str, str, str]]:
+    """Discover root and known repair-family calculations from one head directory.
+
+    Returns ``(path, family, folder_label, reference_label)``. Repair-family
+    references stay within the same family so duplicate calculation basenames
+    never collide in alignment deltas.
+    """
+
+    families: list[tuple[str, Path]] = [("root", root)]
+    families.extend((name, root / name) for name in REPAIR_FAMILIES if (root / name).is_dir())
+    discovered: list[tuple[Path, str, str, str]] = []
+    for family, family_root in families:
+        available = {
+            child.name
+            for child in family_root.iterdir()
+            if child.is_dir() and (child / "LOCPOT").is_file()
+        }
+        for calc_dir in sorted(family_root.iterdir()):
+            if not calc_dir.is_dir() or not (calc_dir / "LOCPOT").is_file():
+                continue
+            reference_name = reference_for(calc_dir.name, config)
+            if not reference_name:
+                continue
+            folder_label = calc_dir.name if family == "root" else f"{family}/{calc_dir.name}"
+            if only is not None and only not in (calc_dir.name, folder_label):
+                continue
+            if family == "root":
+                reference_label = reference_name
+            elif reference_name in available:
+                reference_label = f"{family}/{reference_name}"
+            else:
+                # A repair family can legitimately contain only the structures
+                # that needed work. Keep the row analyzable but do not compare
+                # it against a differently prepared root reference.
+                reference_label = ""
+            discovered.append((calc_dir, family, folder_label, reference_label))
+    return discovered
+
 def analyze_slab_alignment(
     root: str | Path = ".",
     *,
@@ -1525,29 +1584,27 @@ def analyze_slab_alignment(
     write_dipole_fixes: bool = True,
     only: str | None = None,
 ) -> dict[str, Any]:
-    """Analyze all configured immediate child calculations and align band edges."""
+    """Analyze root slabs plus known repair-family daughters and align band edges."""
 
     root_path = Path(root).expanduser().resolve()
     config_path = Path(config).expanduser()
     if not config_path.is_absolute():
         config_path = root_path / config_path
     settings = load_alignment_config(config_path)
-    calculation_dirs = sorted(
-        path
-        for path in root_path.iterdir()
-        if path.is_dir()
-        and (path / "LOCPOT").is_file()
-        and reference_for(path.name, settings)
-        and (only is None or path.name == only)
-    )
-    if not calculation_dirs:
-        raise SafetyError("No matching immediate subfolder contains LOCPOT")
+    calculations = discover_slab_calculations(root_path, settings, only=only)
+    if not calculations:
+        raise SafetyError(
+            "No matching slab calculation contains LOCPOT under the root, tight_scf/, or relax_continue/"
+        )
     rows: list[dict[str, Any]] = []
     details: list[dict[str, Any]] = []
-    for calculation_dir in calculation_dirs:
+    for calculation_dir, family, folder_label, reference_label in calculations:
         row, detail = _analyze_folder(
             calculation_dir,
             settings,
+            folder_label=folder_label,
+            family=family,
+            reference_label=reference_label,
             run_sumo=run_sumo,
             write_fixes=write_dipole_fixes,
         )
@@ -1564,6 +1621,10 @@ def analyze_slab_alignment(
         "root": str(root_path),
         "config": str(config_path),
         "count": len(rows),
+        "family_counts": {
+            family: sum(row.get("family") == family for row in rows)
+            for family in ("root", *REPAIR_FAMILIES)
+        },
         "failures": failures,
         "suspects": suspects,
         "flat_enough": flat_enough,
