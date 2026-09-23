@@ -457,6 +457,8 @@ def prepare_tight_scf(
         raise SafetyError("dipol must be 'keep' or 'suggested'")
     if not 0 < ediff < 1e-4 or nelm < 1 or not 0 < amin <= 0.1:
         raise SafetyError("Require 0 < EDIFF < 1E-4, NELM >= 1, and 0 < AMIN <= 0.1")
+    if force_warn < 0:
+        raise SafetyError("force_warn must be nonnegative")
 
     root_path = Path(root).expanduser().resolve()
     audit_path = Path(audit).expanduser()
@@ -604,9 +606,14 @@ def prepare_tight_scf(
                     "flatness_status", "selected_side", "selected_slope_eV_per_A", "selected_swing_eV",
                     "selected_std_eV", "vasp_vacuum_crosscheck", "vasp_vacuum_warning",
                     "vacuum_minus_ef_eV", "axis", "current_DIPOL", "suggested_DIPOL_normal",
+                    "normal_tilt_degrees", "tilt_status",
                 )},
                 "parent_scf": asdict(diag),
                 "parent_geometry_warnings": entry["warnings"],
+                "parent_geometry_policy": {
+                    "force_warn_eV_per_A": force_warn,
+                    "require_relaxed": require_relaxed,
+                },
                 "overrides": overrides,
                 "incar_changes": changes,
                 "copied": copied,
@@ -635,7 +642,15 @@ def prepare_tight_scf(
         "output": str(out_path),
         "audit": str(audit_path),
         "dry_run": dry_run,
-        "settings": {"EDIFF": ediff, "NELM": nelm, "AMIN": amin, "wavecar": wavecar, "dipol": dipol},
+        "settings": {
+            "EDIFF": ediff,
+            "NELM": nelm,
+            "AMIN": amin,
+            "wavecar": wavecar,
+            "dipol": dipol,
+            "force_warn_eV_per_A": force_warn,
+            "require_relaxed": require_relaxed,
+        },
         "counts": counts,
         "geometry_warnings": sum(bool(entry["warnings"]) for entry in plan),
         "config_copied": config_copied,
