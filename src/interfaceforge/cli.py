@@ -1209,7 +1209,8 @@ def cmd_slab_tight_scf(args: argparse.Namespace) -> int:
         relax_amin=args.relax_amin,
     )
     _json(payload)
-    return 1 if payload["counts"].get("BLOCKED") else 0
+    blocked = payload["counts"].get("BLOCKED") or payload.get("relax_counts", {}).get("BLOCKED")
+    return 1 if blocked else 0
 
 
 def cmd_slab_publication(args: argparse.Namespace) -> int:
