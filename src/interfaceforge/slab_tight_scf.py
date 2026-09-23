@@ -36,6 +36,7 @@ from .slab_alignment import parse_incar, parse_poscar_lines, vacuum_warning_from
 
 AUDIT_JSON = "band_edge_alignment.json"
 PROVENANCE_NAME = "TIGHT_SCF_PROVENANCE.json"
+RELAX_PROVENANCE_NAME = "RELAX_RESTART_PROVENANCE.json"
 PARENT_INCAR_NAME = "INCAR.parent"
 OPTIONAL_INPUTS = ("vdw_kernel.bindat",)
 
@@ -65,6 +66,10 @@ PLAN_FIELDS = [
     "wavecar",
     "incar_changes",
     "destination",
+    "relax_restart_action",
+    "relax_restart_reason",
+    "relax_restart_destination",
+    "relax_restart_incar_changes",
 ]
 
 _STATEMENT = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*=(.*)$")
@@ -257,6 +262,137 @@ def relaxation_warnings(diag: ScfDiagnostics, force_warn: float) -> list[str]:
     return warnings
 
 
+def needs_relax_restart(diag: ScfDiagnostics, force_warn: float) -> bool:
+    """Return whether the parent geometry needs a force-based continuation."""
+
+    if not diag.is_relaxation:
+        return False
+    if diag.hit_nsw_limit or diag.ionic_converged is False:
+        return True
+    return (
+        diag.final_max_force_eV_per_A is not None
+        and diag.final_max_force_eV_per_A > force_warn
+    )
+
+
+def relax_restart_overrides(
+    *,
+    reuse_wavecar: bool,
+    ediff: float,
+    ediffg: float,
+    nelm: int,
+    nsw: int,
+    amin: float,
+) -> dict[str, str]:
+    """Settings for a conservative continuation from the parent final geometry."""
+
+    return {
+        "IBRION": "2",
+        "NSW": str(nsw),
+        "EDIFF": f"{ediff:G}",
+        "EDIFFG": f"{ediffg:G}",
+        "NELM": str(nelm),
+        "AMIN": f"{amin:g}",
+        "ISTART": "1" if reuse_wavecar else "0",
+        "ICHARG": "0" if reuse_wavecar else "2",
+    }
+
+
+def _prepare_relax_restart(
+    parent: Path,
+    destination: Path,
+    diag: ScfDiagnostics,
+    *,
+    warnings: list[str],
+    copy_patterns: list[str] | None,
+    overwrite: bool,
+    dry_run: bool,
+    ediff: float,
+    ediffg: float,
+    nelm: int,
+    nsw: int,
+    amin: float,
+) -> dict[str, Any]:
+    """Prepare one non-destructive force-converged relaxation continuation."""
+
+    if not diag.finished:
+        raise SafetyError("parent OUTCAR has no final timing block; the run may be incomplete")
+    for required in ("INCAR", "KPOINTS", "POTCAR"):
+        if not (parent / required).is_file():
+            raise SafetyError(f"parent {required} is missing")
+    _check_geometry(parent)
+
+    reuse = (parent / "WAVECAR").is_file() and (parent / "WAVECAR").stat().st_size > 0
+    overrides = relax_restart_overrides(
+        reuse_wavecar=reuse,
+        ediff=ediff,
+        ediffg=ediffg,
+        nelm=nelm,
+        nsw=nsw,
+        amin=amin,
+    )
+    parent_incar = (parent / "INCAR").read_text(encoding="utf-8", errors="replace")
+    new_incar, changes = rewrite_incar(parent_incar, overrides)
+
+    if destination.exists():
+        if not overwrite:
+            return {
+                "action": "SKIPPED_EXISTS",
+                "reason": "relaxation restart destination exists; pass --overwrite to refresh inputs",
+                "destination": str(destination),
+                "incar_changes": changes,
+            }
+        if (destination / "OUTCAR").exists():
+            raise SafetyError("relaxation restart destination already contains OUTCAR; move it aside manually")
+    if dry_run:
+        return {
+            "action": "WOULD_PREPARE",
+            "reason": "",
+            "destination": str(destination),
+            "incar_changes": changes,
+        }
+
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "INCAR").write_text(new_incar, encoding="utf-8")
+    shutil.copy2(parent / "INCAR", destination / PARENT_INCAR_NAME)
+    shutil.copy2(parent / "CONTCAR", destination / "POSCAR")
+    copied = ["CONTCAR->POSCAR", "KPOINTS", "POTCAR"]
+    for name_to_copy in ("KPOINTS", "POTCAR", *OPTIONAL_INPUTS):
+        if (parent / name_to_copy).is_file():
+            shutil.copy2(parent / name_to_copy, destination / name_to_copy)
+            if name_to_copy in OPTIONAL_INPUTS:
+                copied.append(name_to_copy)
+    for pattern in copy_patterns or []:
+        for match in sorted(parent.glob(pattern)):
+            if match.is_file() and match.name not in ("INCAR", "POSCAR", "OUTCAR", "WAVECAR"):
+                shutil.copy2(match, destination / match.name)
+                copied.append(match.name)
+    if reuse:
+        shutil.copy2(parent / "WAVECAR", destination / "WAVECAR")
+        copied.append("WAVECAR")
+    elif (destination / "WAVECAR").exists():
+        (destination / "WAVECAR").unlink()
+
+    provenance = {
+        "parent": str(parent),
+        "purpose": "continue the parent relaxation from CONTCAR until a force-based EDIFFG criterion is met",
+        "parent_scf": asdict(diag),
+        "parent_geometry_warnings": warnings,
+        "overrides": overrides,
+        "incar_changes": changes,
+        "copied": copied,
+    }
+    (destination / RELAX_PROVENANCE_NAME).write_text(
+        json.dumps(provenance, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "action": "PREPARED",
+        "reason": "",
+        "destination": str(destination),
+        "incar_changes": changes,
+    }
+
 def _split_comment(line: str) -> tuple[str, str]:
     cut = min((index for index in (line.find("#"), line.find("!")) if index >= 0), default=-1)
     if cut < 0:
@@ -438,6 +574,13 @@ def prepare_tight_scf(
     dry_run: bool = False,
     force_warn: float = 0.05,
     require_relaxed: bool = False,
+    prepare_relax_restarts: bool = True,
+    relax_output: str | Path = "relax_continue",
+    relax_ediff: float = 1e-6,
+    relax_ediffg: float = -0.03,
+    relax_nelm: int = 200,
+    relax_nsw: int = 200,
+    relax_amin: float = 0.01,
 ) -> dict[str, Any]:
     """Write tight static-SCF copies of audited slab calculations.
 
@@ -459,6 +602,12 @@ def prepare_tight_scf(
         raise SafetyError("Require 0 < EDIFF < 1E-4, NELM >= 1, and 0 < AMIN <= 0.1")
     if force_warn < 0:
         raise SafetyError("force_warn must be nonnegative")
+    if not 0 < relax_ediff < 1e-4:
+        raise SafetyError("Require 0 < relax_ediff < 1E-4")
+    if relax_ediffg >= 0:
+        raise SafetyError("relax_ediffg must be negative for force-based convergence")
+    if relax_nelm < 1 or relax_nsw < 1 or not 0 < relax_amin <= 0.1:
+        raise SafetyError("Require relax_nelm/relax_nsw >= 1 and 0 < relax_amin <= 0.1")
 
     root_path = Path(root).expanduser().resolve()
     audit_path = Path(audit).expanduser()
@@ -475,6 +624,12 @@ def prepare_tight_scf(
     out_path = out_path.resolve()
     if out_path == root_path:
         raise SafetyError("Output directory must differ from the calculation root")
+    relax_out_path = Path(relax_output).expanduser()
+    if not relax_out_path.is_absolute():
+        relax_out_path = root_path / relax_out_path
+    relax_out_path = relax_out_path.resolve()
+    if relax_out_path in (root_path, out_path):
+        raise SafetyError("Relaxation restart output must differ from root and tight-SCF output")
 
     only_set = set(only) if only else None
     if only_set:
@@ -499,6 +654,10 @@ def prepare_tight_scf(
             "incar_changes": [],
             "destination": "",
             "warnings": [],
+            "relax_restart_action": "DISABLED" if not prepare_relax_restarts else "NOT_NEEDED",
+            "relax_restart_reason": "",
+            "relax_restart_destination": "",
+            "relax_restart_incar_changes": [],
         }
         try:
             mask = selective_free_mask(parent / "CONTCAR") if (parent / "CONTCAR").is_file() else None
@@ -529,6 +688,33 @@ def prepare_tight_scf(
         except (OSError, SafetyError) as exc:
             diag = None
             diag_error = str(exc)
+
+        if prepare_relax_restarts and diag is not None and needs_relax_restart(diag, force_warn):
+            relax_destination = relax_out_path / name
+            try:
+                relax_result = _prepare_relax_restart(
+                    parent,
+                    relax_destination,
+                    diag,
+                    warnings=entry["warnings"],
+                    copy_patterns=copy_patterns,
+                    overwrite=overwrite,
+                    dry_run=dry_run,
+                    ediff=relax_ediff,
+                    ediffg=relax_ediffg,
+                    nelm=relax_nelm,
+                    nsw=relax_nsw,
+                    amin=relax_amin,
+                )
+                entry["relax_restart_action"] = relax_result["action"]
+                entry["relax_restart_reason"] = relax_result["reason"]
+                entry["relax_restart_destination"] = relax_result["destination"]
+                entry["relax_restart_incar_changes"] = relax_result["incar_changes"]
+            except (OSError, ValueError, SafetyError) as exc:
+                entry["relax_restart_action"] = "BLOCKED"
+                entry["relax_restart_reason"] = str(exc)
+                entry["relax_restart_destination"] = str(relax_destination)
+
         plan.append(entry)
         if name not in chosen:
             entry["action"] = "SKIPPED"
@@ -635,11 +821,15 @@ def prepare_tight_scf(
 
     outputs = _write_plan(root_path, out_path, plan, dry_run=dry_run)
     counts: dict[str, int] = {}
+    relax_counts: dict[str, int] = {}
     for entry in plan:
         counts[entry["action"]] = counts.get(entry["action"], 0) + 1
+        relax_action = entry.get("relax_restart_action", "NOT_NEEDED")
+        relax_counts[relax_action] = relax_counts.get(relax_action, 0) + 1
     return {
         "root": str(root_path),
         "output": str(out_path),
+        "relax_output": str(relax_out_path),
         "audit": str(audit_path),
         "dry_run": dry_run,
         "settings": {
@@ -650,8 +840,15 @@ def prepare_tight_scf(
             "dipol": dipol,
             "force_warn_eV_per_A": force_warn,
             "require_relaxed": require_relaxed,
+            "prepare_relax_restarts": prepare_relax_restarts,
+            "relax_EDIFF": relax_ediff,
+            "relax_EDIFFG": relax_ediffg,
+            "relax_NELM": relax_nelm,
+            "relax_NSW": relax_nsw,
+            "relax_AMIN": relax_amin,
         },
         "counts": counts,
+        "relax_counts": relax_counts,
         "geometry_warnings": sum(bool(entry["warnings"]) for entry in plan),
         "config_copied": config_copied,
         "outputs": outputs,
@@ -711,6 +908,12 @@ def _write_plan(root: Path, out_path: Path, plan: list[dict[str, Any]], *, dry_r
             lines.append(f"  note: {entry['reason']}")
         for warning in entry.get("warnings") or []:
             lines.append(f"  warn: {warning}")
+        relax_action = entry.get("relax_restart_action", "NOT_NEEDED")
+        if relax_action not in ("NOT_NEEDED", "DISABLED"):
+            relax_note = f" -> {entry.get('relax_restart_destination', '')}"
+            if entry.get("relax_restart_reason"):
+                relax_note += f" ({entry['relax_restart_reason']})"
+            lines.append(f"  relax-restart: {relax_action}{relax_note}")
         if entry.get("incar_changes") and entry["action"] in ("PREPARED", "WOULD_PREPARE"):
             lines.append("  INCAR: " + _format(entry["incar_changes"]))
     lines.extend(
