@@ -159,8 +159,12 @@ termination, final forces, and the charge-sloshing and vacuum-charge warnings.
 By default, a parent geometry that exhausted NSW or retains a final maximum
 force above 0.05 eV/A is reported but not blocked; use `--require-relaxed` to
 turn failed ionic convergence into a hard block, and `--force-warn` to change
-the force-warning threshold. It then writes
-`tight_scf/<folder>/` for every flagged daughter (`SUSPECT_*`,
+the force-warning threshold. Geometry-warning parents are also prepared under
+`relax_continue/<folder>/` by default. Those continuation runs start from
+`CONTCAR`, preserve the physical model, and use `EDIFF=1E-6`,
+`EDIFFG=-0.03 eV/A`, `NSW=200`, `NELM=200`, and `AMIN=0.01`. Use
+`--no-relax-restarts` to disable this or the `--relax-*` options to adjust it.
+The command then writes `tight_scf/<folder>/` for every flagged daughter (`SUSPECT_*`,
 `FAILED_FLATNESS`, or a VASP vacuum warning), plus that daughter's configured
 reference as a same-settings control. Each new folder contains:
 
@@ -177,14 +181,37 @@ reference as a same-settings control. Each new folder contains:
   metrics (including cell-tilt status), parent SCF/ionic diagnostics, geometry
   warning policy, and the tag-level INCAR diff.
 
-Parents are never modified and nothing is submitted. Folders that pass the
-audit, or whose LOCPOT audit failed, are skipped unless `--select all` is
-given. A parent without a final OUTCAR timing block, or with a CONTCAR/POSCAR
+Parents are never modified and nothing is submitted. The continuation tree is
+independent of tight-SCF selection, so a slab can be skipped for vacuum repair
+yet still receive a geometry restart when it exhausted NSW or retains large
+residual forces. Folders that pass the audit, or whose LOCPOT audit failed, are
+skipped from the tight-SCF tree unless `--select all` is given. A parent without
+a final OUTCAR timing block, or with a CONTCAR/POSCAR
 count or POTCAR species-order mismatch, is `BLOCKED` with a reason in
 `tight_scf/tight_scf_plan.txt`. Existing output folders are never
 overwritten; `--overwrite` refreshes inputs only while no OUTCAR is present.
 `--dipol suggested` moves DIPOL to the audit's ionic centre, but change one
 variable at a time.
+
+For LOCPOT-heavy auditing and planning, use the scheduler rather than the head
+node. The combined planning launcher reruns `slab-align` before
+`slab-tight-scf --dry-run`, so the plan cannot consume a stale audit:
+
+```bash
+sbatch /path/to/InterfaceForge/launch_scripts/run_slab_repair_plan_single.sbatch
+```
+
+It auto-detects `slab_alignment_fapi.json` when present (otherwise
+`slab_alignment.json`), or accepts `SLAB_ALIGNMENT_CONFIG`. After reviewing the
+plan, prepare the unrun repair inputs through the scheduler as well:
+
+```bash
+sbatch /path/to/InterfaceForge/launch_scripts/run_slab_repair_prepare_single.sbatch
+```
+
+The preparation launcher refreshes only destinations without an `OUTCAR`,
+copies `runvasp.sh` when present, and prepares both `tight_scf/` and
+`relax_continue/`.
 
 After the runs finish, re-audit the new tree with the same configuration and
 compare `selected_swing_eV` and the work function against the parent audit:
