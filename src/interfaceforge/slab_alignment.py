@@ -299,12 +299,118 @@ def parse_poscar_lines(lines: list[str]) -> Structure:
     return Structure(cell, species, counts, fractional, index)
 
 
+def _read_locpot_header(handle: Any, input_path: Path) -> tuple[Structure, list[int]]:
+    """Read only the POSCAR-like LOCPOT header and leave the stream at the grid."""
+
+    lines: list[str] = []
+    for _ in range(6):
+        raw = handle.readline()
+        if raw == "":
+            raise SafetyError(f"VASP structure header is too short in {input_path}")
+        lines.append(raw.rstrip("\n"))
+
+    line5 = lines[5].split()
+    if _all_integers(line5):
+        counts = [int(value) for value in line5]
+    else:
+        counts: list[int] | None = None
+        while counts is None:
+            raw = handle.readline()
+            if raw == "":
+                raise SafetyError(f"Species counts not found in {input_path}")
+            lines.append(raw.rstrip("\n"))
+            fields = raw.split()
+            if fields:
+                try:
+                    counts = [int(value) for value in fields]
+                except ValueError as exc:
+                    raise SafetyError(f"Species counts not found in {input_path}") from exc
+    atom_count = sum(counts)
+
+    # Read coordinate-mode preamble (optionally Selective dynamics) and exactly
+    # the declared number of non-empty coordinate rows. The full LOCPOT grid is
+    # deliberately never stored as Python text.
+    mode_found = False
+    while not mode_found:
+        raw = handle.readline()
+        if raw == "":
+            raise SafetyError(f"Coordinate mode not found in {input_path}")
+        lines.append(raw.rstrip("\n"))
+        if not raw.strip():
+            continue
+        if raw.strip().lower().startswith("s"):
+            continue
+        mode_found = True
+
+    coordinates = 0
+    while coordinates < atom_count:
+        raw = handle.readline()
+        if raw == "":
+            raise SafetyError(f"Fewer coordinates than declared atoms in {input_path}")
+        lines.append(raw.rstrip("\n"))
+        if raw.strip():
+            coordinates += 1
+
+    structure = parse_poscar_lines(lines)
+
+    while True:
+        raw = handle.readline()
+        if raw == "":
+            raise SafetyError(f"LOCPOT grid dimensions not found in {input_path}")
+        fields = raw.split()
+        if not fields:
+            continue
+        try:
+            grid = [int(value) for value in fields[:3]]
+        except ValueError as exc:
+            raise SafetyError(f"LOCPOT grid dimensions not found in {input_path}") from exc
+        if len(grid) != 3:
+            raise SafetyError(f"LOCPOT grid dimensions not found in {input_path}")
+        return structure, grid
+
+
+def _accumulate_locpot_chunk(
+    text: str,
+    *,
+    offset: int,
+    required: int,
+    nx: int,
+    ny: int,
+    axis_index: int,
+    sums: np.ndarray,
+) -> int:
+    """Accumulate one text chunk directly into the requested planar sums."""
+
+    if offset >= required or not text:
+        return offset
+    values = np.fromstring(text, sep=" ")
+    if values.size == 0:
+        return offset
+    remaining = required - offset
+    if values.size > remaining:
+        values = values[:remaining]
+    indices = np.arange(offset, offset + values.size, dtype=np.int64)
+    if axis_index == 0:
+        groups = indices % nx
+    elif axis_index == 1:
+        groups = (indices // nx) % ny
+    else:
+        groups = indices // (nx * ny)
+    sums += np.bincount(groups, weights=values, minlength=sums.size)
+    return offset + int(values.size)
+
+
 def read_locpot(
     path: str | Path,
     axis: str = "z",
     max_tilt_degrees: float | None = 0.1,
 ) -> tuple[Structure, np.ndarray, np.ndarray]:
-    """Read LOCPOT and return its selected fractional-plane average in eV.
+    """Stream LOCPOT and return its selected fractional-plane average in eV.
+
+    The parser keeps only the POSCAR-like header, a bounded text buffer, and
+    the one-dimensional planar sums in memory. It never materializes the full
+    three-dimensional grid, which keeps peak memory essentially independent of
+    LOCPOT grid volume.
 
     ``max_tilt_degrees`` rejects cells whose selected lattice vector deviates
     from the plane normal by more than the limit; ``None`` defers the tilt
@@ -312,37 +418,63 @@ def read_locpot(
     """
 
     input_path = Path(path)
-    lines = input_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    structure = parse_poscar_lines(lines)
     if axis not in ("x", "y", "z"):
         raise SafetyError("Surface-normal axis must be x, y, or z")
-    structure.axis = axis
-    tilt = structure.normal_tilt_degrees
-    if max_tilt_degrees is not None and tilt > max_tilt_degrees:
-        raise SafetyError(
-            f"Selected lattice vector is tilted {tilt:.6f} degrees from the plane normal "
-            f"(limit {max_tilt_degrees:g} degrees); review cell geometry and dipole-correction applicability"
-        )
-    grid_index = _next_nonempty(lines, structure.coordinate_end_line)
-    try:
-        grid = [int(value) for value in lines[grid_index].split()[:3]]
-    except (IndexError, ValueError) as exc:
-        raise SafetyError(f"LOCPOT grid dimensions not found in {input_path}") from exc
-    if len(grid) != 3:
-        raise SafetyError(f"LOCPOT grid dimensions not found in {input_path}")
-    nx, ny, nz = grid
-    required = nx * ny * nz
-    values = np.fromstring(" ".join(lines[grid_index + 1 :]), sep=" ", count=required)
-    if values.size != required:
-        raise SafetyError(f"{input_path} has {values.size} grid values; expected {required}")
-    # VASP writes x fastest, then y, then z. LOCPOT is already in eV and must
-    # not receive the volume rescaling that ASE applies to charge densities.
-    array_axis = 2 - structure.axis_index
-    potential = values.reshape((nz, ny, nx)).mean(axis=tuple(i for i in range(3) if i != array_axis))
-    count = grid[structure.axis_index]
+
+    with input_path.open(encoding="utf-8", errors="replace") as handle:
+        structure, grid = _read_locpot_header(handle, input_path)
+        structure.axis = axis
+        tilt = structure.normal_tilt_degrees
+        if max_tilt_degrees is not None and tilt > max_tilt_degrees:
+            raise SafetyError(
+                f"Selected lattice vector is tilted {tilt:.6f} degrees from the plane normal "
+                f"(limit {max_tilt_degrees:g} degrees); review cell geometry and dipole-correction applicability"
+            )
+
+        nx, ny, nz = grid
+        required = nx * ny * nz
+        axis_index = structure.axis_index
+        count = grid[axis_index]
+        sums = np.zeros(count, dtype=np.float64)
+        offset = 0
+        buffer: list[str] = []
+        buffered_chars = 0
+        chunk_chars = 1024 * 1024
+
+        for raw in handle:
+            if offset >= required:
+                break
+            buffer.append(raw)
+            buffered_chars += len(raw)
+            if buffered_chars >= chunk_chars:
+                offset = _accumulate_locpot_chunk(
+                    "".join(buffer),
+                    offset=offset,
+                    required=required,
+                    nx=nx,
+                    ny=ny,
+                    axis_index=axis_index,
+                    sums=sums,
+                )
+                buffer.clear()
+                buffered_chars = 0
+        if offset < required and buffer:
+            offset = _accumulate_locpot_chunk(
+                "".join(buffer),
+                offset=offset,
+                required=required,
+                nx=nx,
+                ny=ny,
+                axis_index=axis_index,
+                sums=sums,
+            )
+        if offset != required:
+            raise SafetyError(f"{input_path} has {offset} grid values; expected {required}")
+
+    plane_size = required // count
+    potential = sums / plane_size
     z_grid = np.arange(count, dtype=float) * structure.normal_length / count
     return structure, z_grid, potential
-
 
 def efermi_from_outcar(path: str | Path) -> float:
     matches = re.findall(
