@@ -111,6 +111,15 @@ Direct
         self.assertTrue(np.allclose(planar, [2.5, 6.5, 10.5, 14.5]))
         self.assertAlmostEqual(structure.c_length, 40.0)
 
+    def test_locpot_reader_streams_without_path_read_text(self) -> None:
+        values = " ".join(str(float(index)) for index in range(1, 17))
+        locpot = POSCAR + "\n2 2 4\n" + values + "\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "LOCPOT"
+            path.write_text(locpot, encoding="utf-8")
+            with mock.patch.object(Path, "read_text", side_effect=AssertionError("full-file read")):
+                _structure, _grid, planar = read_locpot(path)
+        self.assertTrue(np.allclose(planar, [2.5, 6.5, 10.5, 14.5]))
     def test_physical_sides_are_never_merged(self) -> None:
         structure = parse_poscar_lines(POSCAR.splitlines())
         z_grid = np.linspace(0, 40, 800, endpoint=False)
