@@ -87,6 +87,7 @@ from .separation_energy import write_json_payload as write_separation_energy_jso
 from .separation_energy import write_reports as write_separation_energy_reports
 from .slab_alignment import analyze_slab_alignment
 from .slab_publication import plot_slab_publication
+from .slab_repair_status import slab_repair_status
 from .slab_tight_scf import prepare_tight_scf
 from .step1_launch import launch_step1_runs
 from .step1_repair import prepare_step1_repair
@@ -1179,6 +1180,22 @@ def cmd_slab_alignment(args: argparse.Namespace) -> int:
     )
     _json(payload)
     return 1 if payload["failures"] else 0
+
+
+def cmd_slab_repair_status(args: argparse.Namespace) -> int:
+    payload = slab_repair_status(
+        args.root,
+        force_target=args.force_target,
+        write_json=args.json_output,
+        write_text=args.text_output,
+    )
+    _json(payload)
+    bad = sum(
+        count
+        for status, count in payload["counts"].items()
+        if status in {"PARSE_ERROR", "STATIC_SCF_FAILED", "RELAX_NSW_LIMIT", "RELAX_NOT_CONVERGED", "RELAX_FORCE_HIGH"}
+    )
+    return 1 if bad else 0
 
 
 def cmd_slab_tight_scf(args: argparse.Namespace) -> int:
@@ -2950,6 +2967,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     slab_alignment.set_defaults(write_dipole_fixes=True)
     slab_alignment.set_defaults(func=cmd_slab_alignment)
+
+    repair_status = vasp_commands.add_parser(
+        "slab-repair-status",
+        help="Summarize in-progress tight_scf and relax_continue jobs without reading LOCPOT",
+    )
+    repair_status.add_argument(
+        "root",
+        nargs="?",
+        default=".",
+        help="Project head containing tight_scf/ and relax_continue/ (default: .)",
+    )
+    repair_status.add_argument(
+        "--force-target",
+        type=float,
+        default=0.03,
+        help="Final force target for relax_continue readiness in eV/A (default: 0.03)",
+    )
+    repair_status.add_argument(
+        "--json-output",
+        default="slab_repair_status.json",
+        help="JSON summary path relative to root",
+    )
+    repair_status.add_argument(
+        "--text-output",
+        default="slab_repair_status.txt",
+        help="Human-readable summary path relative to root",
+    )
+    repair_status.set_defaults(func=cmd_slab_repair_status)
 
     tight_scf = vasp_commands.add_parser(
         "slab-tight-scf",
