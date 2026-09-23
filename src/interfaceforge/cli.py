@@ -2920,7 +2920,7 @@ def build_parser() -> argparse.ArgumentParser:
         "root",
         nargs="?",
         default=".",
-        help="Root whose immediate children are VASP calculations (default: .)",
+        help="Project head; scans direct slabs plus tight_scf/<daughter> and relax_continue/<daughter> (default: .)",
     )
     slab_alignment.add_argument(
         "--config",
