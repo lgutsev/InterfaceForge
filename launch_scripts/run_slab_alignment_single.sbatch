@@ -1,9 +1,8 @@
 #!/bin/bash
 #SBATCH -p single
 #SBATCH -N 1
-#SBATCH -n 1
+#SBATCH -n 4
 #SBATCH -c 1
-#SBATCH --mem=16G
 #SBATCH -t 04:00:00
 #SBATCH -J slab_align
 #SBATCH -o slab_align.%j.out
