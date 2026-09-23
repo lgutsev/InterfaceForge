@@ -1576,6 +1576,7 @@ def discover_slab_calculations(
             discovered.append((calc_dir, family, folder_label, reference_label))
     return discovered
 
+
 def analyze_slab_alignment(
     root: str | Path = ".",
     *,
