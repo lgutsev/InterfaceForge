@@ -615,9 +615,11 @@ def prepare_tight_scf(
         audit_path = root_path / audit_path
     if not audit_path.is_file():
         raise SafetyError(f"Missing {audit_path}; run 'iface vasp slab-align' first")
-    rows = json.loads(audit_path.read_text(encoding="utf-8")).get("rows", [])
+    audit_rows = json.loads(audit_path.read_text(encoding="utf-8")).get("rows", [])
+    rows = [row for row in audit_rows if row.get("family", "root") == "root"]
+    ignored_nested_audit_rows = len(audit_rows) - len(rows)
     if not rows:
-        raise SafetyError(f"{audit_path} contains no audited folders")
+        raise SafetyError(f"{audit_path} contains no root-family audited folders")
     out_path = Path(output).expanduser()
     if not out_path.is_absolute():
         out_path = root_path / out_path
@@ -831,6 +833,7 @@ def prepare_tight_scf(
         "output": str(out_path),
         "relax_output": str(relax_out_path),
         "audit": str(audit_path),
+        "ignored_nested_audit_rows": ignored_nested_audit_rows,
         "dry_run": dry_run,
         "settings": {
             "EDIFF": ediff,
