@@ -87,6 +87,7 @@ from .separation_energy import write_json_payload as write_separation_energy_jso
 from .separation_energy import write_reports as write_separation_energy_reports
 from .slab_alignment import analyze_slab_alignment
 from .slab_publication import plot_slab_publication
+from .slab_tight_scf import prepare_tight_scf
 from .step1_launch import launch_step1_runs
 from .step1_repair import prepare_step1_repair
 from .step1_status import render as render_step1_status
@@ -1178,6 +1179,28 @@ def cmd_slab_alignment(args: argparse.Namespace) -> int:
     )
     _json(payload)
     return 1 if payload["failures"] else 0
+
+
+def cmd_slab_tight_scf(args: argparse.Namespace) -> int:
+    payload = prepare_tight_scf(
+        args.root,
+        output=args.output,
+        audit=args.audit,
+        config=args.config,
+        select=args.select,
+        only=args.only,
+        with_references=args.with_references,
+        ediff=args.ediff,
+        nelm=args.nelm,
+        amin=args.amin,
+        wavecar=args.wavecar,
+        dipol=args.dipol,
+        copy_patterns=args.copy,
+        overwrite=args.overwrite,
+        dry_run=args.dry_run,
+    )
+    _json(payload)
+    return 1 if payload["counts"].get("BLOCKED") else 0
 
 
 def cmd_slab_publication(args: argparse.Namespace) -> int:
@@ -2917,6 +2940,66 @@ def build_parser() -> argparse.ArgumentParser:
     )
     slab_alignment.set_defaults(write_dipole_fixes=True)
     slab_alignment.set_defaults(func=cmd_slab_alignment)
+
+    tight_scf = vasp_commands.add_parser(
+        "slab-tight-scf",
+        help="Write tight static-SCF inputs for slabs flagged by slab-align",
+        description=(
+            "Read band_edge_alignment.json, inspect each daughter's OUTCAR SCF "
+            "convergence, and write <output>/<folder>/ with CONTCAR as POSCAR and "
+            "an INCAR changed only in NSW, IBRION, ISTART, ICHARG, EDIFF, NELM, "
+            "AMIN, LDIPOL, IDIPOL, LVHAR, LVACPOTAV, and LCHARG. Parents are "
+            "never modified and nothing is submitted."
+        ),
+    )
+    tight_scf.add_argument("root", nargs="?", default=".", help="slab-align root (default: .)")
+    tight_scf.add_argument("--output", default="tight_scf", help="Output tree, relative to root")
+    tight_scf.add_argument(
+        "--audit",
+        default="band_edge_alignment.json",
+        help="slab-align JSON, relative to root",
+    )
+    tight_scf.add_argument(
+        "--config",
+        default="slab_alignment.json",
+        help="slab-align config copied into the output tree for re-auditing",
+    )
+    tight_scf.add_argument(
+        "--select",
+        choices=("flagged", "all"),
+        default="flagged",
+        help="flagged: SUSPECT/FAILED_FLATNESS or VASP vacuum warning (default); all: every daughter",
+    )
+    tight_scf.add_argument("--only", action="append", help="Restrict to this daughter (repeatable)")
+    tight_scf.add_argument(
+        "--no-references",
+        dest="with_references",
+        action="store_false",
+        help="Do not add each selected folder's reference as a same-settings control",
+    )
+    tight_scf.add_argument("--ediff", type=float, default=1e-7)
+    tight_scf.add_argument("--nelm", type=int, default=200)
+    tight_scf.add_argument("--amin", type=float, default=0.01)
+    tight_scf.add_argument(
+        "--wavecar",
+        choices=("copy", "none"),
+        default="copy",
+        help="copy: start from the parent WAVECAR (ISTART=1, ICHARG=0); none: atomic start",
+    )
+    tight_scf.add_argument(
+        "--dipol",
+        choices=("keep", "suggested"),
+        default="keep",
+        help="keep the parent DIPOL (default) or use the audit's suggested centre",
+    )
+    tight_scf.add_argument(
+        "--copy",
+        action="append",
+        help="Extra parent files to copy, as a glob (e.g. '*.sbatch'); repeatable",
+    )
+    tight_scf.add_argument("--overwrite", action="store_true", help="Refresh inputs in existing unrun folders")
+    tight_scf.add_argument("--dry-run", action="store_true", help="Write only the plan in root")
+    tight_scf.set_defaults(func=cmd_slab_tight_scf, with_references=True)
 
     slab_publication = vasp_commands.add_parser(
         "slab-publish",

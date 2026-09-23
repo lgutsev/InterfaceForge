@@ -140,6 +140,57 @@ residual field. The proposal preserves existing `DIPOL_x` and `DIPOL_y`, fixes
 `IDIPOL = 3`, and should be accepted only after checking the structure,
 compactness, SCF convergence, and vacuum thickness.
 
+## Tight static SCF for flagged slabs
+
+A sloped vacuum with correct `LDIPOL`/`IDIPOL` is often an electronic
+convergence problem rather than a dipole-placement problem. A relaxation run at
+`EDIFF=1E-4` with `AMIN=0.10` on a >50 A cell is exactly the case where VASP
+warns about charge sloshing along the long vector. Moving `DIPOL` does not
+repair an unconverged density. `slab-tight-scf` prepares a controlled test:
+
+```bash
+iface vasp slab-tight-scf . --config slab_alignment_fapi.json --dry-run   # plan only
+iface vasp slab-tight-scf . --config slab_alignment_fapi.json --copy '*.sbatch'
+```
+
+The command reads `band_edge_alignment.json` and parses every daughter's OUTCAR
+for EDIFF, NELM, AMIN, the per-ionic-step SCF convergence, and the
+charge-sloshing and vacuum-charge warnings. It then writes
+`tight_scf/<folder>/` for every flagged daughter (`SUSPECT_*`,
+`FAILED_FLATNESS`, or a VASP vacuum warning), plus that daughter's configured
+reference as a same-settings control. Each new folder contains:
+
+- `POSCAR` copied from the parent `CONTCAR`, which keeps the final geometry and
+  cell;
+- the parent `KPOINTS`, `POTCAR`, and `WAVECAR` (`--wavecar none` gives an
+  atomic start);
+- `INCAR`, changed only in `NSW=0`, `IBRION=-1`, `ISTART`/`ICHARG`
+  (self-consistent, never `ICHARG=11`), `EDIFF=1E-7`, `NELM=200`,
+  `AMIN=0.01`, `LDIPOL`, `IDIPOL`, `LVHAR`, `LVACPOTAV`, and `LCHARG`. The
+  functional, cutoff, `LREAL`, and `DIPOL` are kept so that any change can be
+  attributed to convergence;
+- `INCAR.parent` and `TIGHT_SCF_PROVENANCE.json`, which holds the audit
+  metrics, parent SCF diagnostics, and the tag-level INCAR diff.
+
+Parents are never modified and nothing is submitted. Folders that pass the
+audit, or whose LOCPOT audit failed, are skipped unless `--select all` is
+given. A parent without a final OUTCAR timing block, or with a CONTCAR/POSCAR
+count or POTCAR species-order mismatch, is `BLOCKED` with a reason in
+`tight_scf/tight_scf_plan.txt`. Existing output folders are never
+overwritten; `--overwrite` refreshes inputs only while no OUTCAR is present.
+`--dipol suggested` moves DIPOL to the audit's ionic centre, but change one
+variable at a time.
+
+After the runs finish, re-audit the new tree with the same configuration and
+compare `selected_swing_eV` and the work function against the parent audit:
+
+```bash
+iface vasp slab-align tight_scf --config slab_alignment_fapi.json --no-write-dipole-fixes
+```
+
+If the slope persists at tight convergence, inspect the planar-averaged CHGCAR
+for a genuinely charge-free vacuum region, and then test additional vacuum.
+
 ## Publication figures for the selected structures
 
 After the final four calculations pass the flatness audit, copy the dedicated
