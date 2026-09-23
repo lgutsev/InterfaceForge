@@ -385,6 +385,25 @@ class PrepareTightScfTests(unittest.TestCase):
             with self.assertRaisesRegex(SafetyError, "relax_ediffg"):
                 prepare_tight_scf(root, relax_ediffg=0.03)
 
+    def test_nested_repair_family_rows_are_not_repaired_recursively(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _family(root)
+            payload = json.loads((root / "band_edge_alignment.json").read_text())
+            for row in payload["rows"]:
+                row["family"] = "root"
+                row["case_name"] = row["folder"]
+            payload["rows"].append({
+                **payload["rows"][1],
+                "folder": "tight_scf/Ref_A",
+                "family": "tight_scf",
+                "case_name": "Ref_A",
+                "reference": "tight_scf/Ref",
+            })
+            (root / "band_edge_alignment.json").write_text(json.dumps(payload), encoding="utf-8")
+            result = prepare_tight_scf(root, dry_run=True)
+            self.assertEqual(result["ignored_nested_audit_rows"], 1)
+            self.assertNotIn("tight_scf/Ref_A", {entry["folder"] for entry in result["plan"]})
     def test_missing_audit_is_an_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(SafetyError):
