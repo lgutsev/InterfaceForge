@@ -1,0 +1,47 @@
+# Five-calculation pilot for `iface vasp density-init-bench prepare`.
+#
+# Point each `source` at a COMPLETED calculation (INCAR + CONTCAR/POSCAR +
+# POTCAR + KPOINTS + launcher; KPOINTS/POTCAR/launcher may sit one or two
+# directories up).  Nothing is rerun in place: prepare copies the final
+# structure into <bench>/<name>/{standard,neural} with identical settings.
+#
+# mode: static   -> both arms get NSW=0, IBRION=-1, ISTART=0, LWAVE/LCHARG off
+#                   (ISIF=2 if the source had ISIF=0) so forces AND stress exist.
+# grid           -> optional [NGXF, NGYF, NGZF]; otherwise reused from the
+#                   source OUTCAR when ENCUT/PREC/ENAUG and lattice agree, else a
+#                   launch-time NELM=1 VASP dry run (counted as overhead).
+# expect_magnetic_order: none | afm-ii | mixed-sign | sign-uniform
+#                   afm-ii refuses to prepare unless the INCAR MAGMOM is signed.
+
+defaults:
+  mode: static
+  structure: CONTCAR
+
+# Options forwarded to `iface vasp initialize-density` inside the neural job.
+backend_options:
+  python: /path/to/envs/ndi/bin/python   # interpreter with neural_paw_dft
+  device: auto                           # cuda on a GPU node, else cpu
+  # weights_dir: /path/to/ndi_weights    # pre-fetched with density-init-probe --prefetch
+
+cases:
+  - name: perovskite_interface_a
+    category: nonmagnetic perovskite/interface
+    source: /path/to/completed/SrTiO3_LaAlO3_interface/OPT
+
+  - name: perovskite_interface_b
+    category: nonmagnetic perovskite/interface
+    source: /path/to/completed/BaTiO3_slab/OPT
+
+  - name: metallic_interface
+    category: metallic / narrow-gap interface
+    source: /path/to/completed/TiN_SiN_interface/OPT
+
+  - name: nio_afm2_bulk
+    category: NiO AFM-II
+    source: /path/to/completed/NiO_bulk_AFM2
+    expect_magnetic_order: afm-ii
+
+  - name: nio_afm2_slab
+    category: NiO AFM-II surface
+    source: /path/to/completed/NiO_m110_Big_U46/OPT
+    expect_magnetic_order: afm-ii

@@ -15,10 +15,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .cli import build_parser
+from .cli import build_parser, step1_density_init_kwargs
 from .errors import InterfaceForgeError, SafetyError
 from .vasp import prepare_step1_series
-
 
 STEP1_PROFILES: dict[str, dict[str, Any]] = {
     "nio": {
@@ -126,6 +125,7 @@ def _cmd_vasp_step1_prepare_profiled(args: argparse.Namespace) -> int:
         ramp_from=resolved["ramp_from_k"],
         keep_velocities=args.keep_velocities,
         precondition=resolved["precondition"],
+        **step1_density_init_kwargs(args),
     )
     if resolved["name"] is not None:
         profile_settings = {
