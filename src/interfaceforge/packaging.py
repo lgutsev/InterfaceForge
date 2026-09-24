@@ -43,13 +43,22 @@ if TYPE_CHECKING:
     from .config import Campaign
 
 _COMPRESSION = {"deflated": zipfile.ZIP_DEFLATED, "stored": zipfile.ZIP_STORED}
-_LFS_PATTERNS = ("*.model", "*.pth", "*.pt", "*.pt2", "*.pb", "*.npy", "*.extxyz", "*.xyz")
+_LFS_PATTERNS = ("*.model", "*.pth", "*.pt", "*.pt2", "*.pb", "*.npy", "*.extxyz", "*.xyz", "*.zip", "*.ckpt")
 _DATASET_TOP_FILES = ("manifest.json", "manifest.csv", "frames.csv")
 _LEAF_DATASET_TOP_FILES = ("leaf_manifest.json", "leaf_manifest.csv")
 _DATASET_EXTXYZ = ("train.extxyz", "valid.extxyz", "test.extxyz")
 
 _MACE_TAGS = ("mace",)
 _DEEPMD_TAGS = ("deepmd", "deepmd-kit")
+_NEQUIP_TAGS = ("nequip", "equivariant")
+_ENGINE_TAGS = {"mace": _MACE_TAGS, "deepmd": _DEEPMD_TAGS, "nequip": _NEQUIP_TAGS}
+_ENGINE_NAMES = {"mace": "MACE", "deepmd": "DeePMD", "nequip": "NequIP"}
+_ENGINE_LIBRARY = {"mace": "mace", "deepmd": "deepmd-kit", "nequip": "nequip"}
+_ENGINE_CITATION = {
+    "mace": "MACE",
+    "deepmd": "DeePMD-kit / DPA",
+    "nequip": "NequIP (Batzner et al., Nat. Commun. 2022)",
+}
 _COMMON_TAGS = (
     "interatomic-potential",
     "machine-learning-potential",
@@ -738,7 +747,7 @@ def pack_huggingface(
     verification = verify_committee_bundle(bundle)
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
     engine = str(manifest.get("engine", "")).lower()
-    if engine not in ("mace", "deepmd"):
+    if engine not in _ENGINE_TAGS:
         raise ConfigurationError(f"Unsupported committee engine for HF packaging: {engine!r}")
     members = manifest.get("members") or []
     if not members:
@@ -777,6 +786,15 @@ def pack_huggingface(
             if sha256_file(destination) != member.get("sha256"):
                 raise SafetyError(f"Checksum drift while copying {stored_rel}")
             model_lines.append(stored_rel)
+            for extra in member.get("extra_files", []) or []:
+                extra_source = bundle / str(extra["stored"])
+                if not extra_source.is_file():
+                    raise SafetyError(f"Committee bundle is missing {extra['stored']}")
+                extra_destination = temporary / str(extra["stored"])
+                extra_destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(extra_source, extra_destination)
+                if sha256_file(extra_destination) != extra.get("sha256"):
+                    raise SafetyError(f"Checksum drift while copying {extra['stored']}")
             member_input = member.get("input")
             index = member.get("model_index")
             if member_input and index is not None:
@@ -902,10 +920,18 @@ def _load_metrics(path: Path, *, engine: str | None = None) -> dict[str, Any] | 
             if row.get("energy_rmse_mev_per_atom") is not None
             or row.get("force_rmse_mev_per_angstrom") is not None
         ]
-        if engine == "mace":
+        if payload.get("artifact_type") == "committee_evaluation" and payload.get("ensemble"):
+            rows = [payload["ensemble"]]
+        elif engine == "mace":
             rows = [row for row in rows if "mace" in str(row.get("engine", "")).lower()] or rows
+        elif engine == "nequip":
+            rows = [row for row in rows if "nequip" in str(row.get("engine", "")).lower()] or rows
         elif engine == "deepmd":
-            rows = [row for row in rows if "mace" not in str(row.get("engine", "")).lower()] or rows
+            rows = [
+                row
+                for row in rows
+                if not any(name in str(row.get("engine", "")).lower() for name in ("mace", "nequip"))
+            ] or rows
         if rows:
             row = rows[0]
             return {
@@ -1014,9 +1040,16 @@ def _hf_provenance(
                 "stored_model": member.get("stored_model"),
                 "sha256": member.get("sha256"),
                 "size_bytes": member.get("size_bytes"),
+                "extra_files": member.get("extra_files"),
             }
             for member in manifest.get("members", [])
         ],
+        "dataset": manifest.get("dataset"),
+        "hyperparameters": manifest.get("hyperparameters"),
+        "defaults_applied": manifest.get("defaults_applied"),
+        "training_interfaceforge_commit": manifest.get("training_interfaceforge_commit"),
+        "bundle_interfaceforge_commit": manifest.get("interfaceforge_commit"),
+        "committee_evaluation": manifest.get("committee_evaluation"),
         "training_data": manifest.get("training_data", []),
         "metrics": metrics,
     }
@@ -1040,7 +1073,7 @@ def _render_model_card(
     label = manifest.get("label") or repo_id or "InterfaceForge committee"
     architecture = manifest.get("architecture")
 
-    tags = list(_MACE_TAGS if engine == "mace" else _DEEPMD_TAGS)
+    tags = list(_ENGINE_TAGS[engine])
     if architecture:
         tags.append(str(architecture).replace("_", "-"))
     if architecture and str(architecture).endswith("_ft"):
@@ -1050,7 +1083,7 @@ def _render_model_card(
     tags = _dedupe(tags)
 
     frontmatter: dict[str, Any] = {
-        "library_name": "mace" if engine == "mace" else "deepmd-kit",
+        "library_name": _ENGINE_LIBRARY[engine],
         "tags": tags,
         "license": license_id,
     }
@@ -1112,7 +1145,7 @@ def _card_body(
     repo_id: str | None,
     dataset_repo_id: str | None,
 ) -> str:
-    engine_name = "MACE" if engine == "mace" else "DeePMD"
+    engine_name = _ENGINE_NAMES[engine]
     architecture = manifest.get("architecture")
     model_count = len(manifest.get("members", []))
     type_map = manifest.get("type_map") or []
@@ -1128,7 +1161,8 @@ def _card_body(
         f"A {model_count}-member {descriptor} committee interatomic potential produced with "
         f"[InterfaceForge](https://github.com/lgutsev/InterfaceForge) {__version__}. "
         "Committee members differ only by random seed; evaluate all of them and use the "
-        "mean prediction, with the spread as a rough epistemic-uncertainty signal."
+        "mean prediction. The member spread is committee disagreement, not a calibrated "
+        "uncertainty."
     )
 
     if ft_checkpoint:
@@ -1170,6 +1204,15 @@ def _card_body(
         names = ", ".join(Path(str(item.get("path", ""))).name for item in manifest["training_data"])
         data.append(f"- Training-data provenance files: {names}")
     data.append(f"- Bundle digest: `{manifest.get('bundle_sha256', '')}`")
+    dataset_identity = manifest.get("dataset") or {}
+    if dataset_identity.get("dataset_hash"):
+        data.append(f"- Canonical dataset hash: `{dataset_identity['dataset_hash']}`")
+        data.append(f"- Split hash: `{dataset_identity.get('split_hash')}`")
+    if manifest.get("defaults_applied"):
+        data.append(
+            "- Hyperparameters left at InterfaceForge starting-point defaults (not tuned): "
+            + ", ".join(f"`{key}`" for key in manifest["defaults_applied"])
+        )
     sections.append("\n".join(data))
 
     sections.append(_load_snippet(engine, manifest))
@@ -1199,7 +1242,7 @@ def _card_body(
     citation = (
         "## Citation\n\n"
         "If this potential contributes to published work, cite the underlying method "
-        f"({'MACE' if engine == 'mace' else 'DeePMD-kit / DPA'}), your DFT reference dataset, "
+        f"({_ENGINE_CITATION[engine]}), your DFT reference dataset, "
         "and InterfaceForge:\n\n"
         "```bibtex\n"
         "@software{interfaceforge,\n"
@@ -1379,6 +1422,23 @@ def _load_snippet(engine: str, manifest: dict[str, Any]) -> str:
             "`MACECalculator` with several `model_paths` returns the committee mean and "
             "exposes the per-model spread."
         )
+    if engine == "nequip":
+        first = stored[0] if stored else "models/seed_0.nequip.zip"
+        return (
+            "## How to load\n\n"
+            "The stored models are portable `nequip-package` archives. Compile each one on the "
+            "machine and GPU type that will run it, then load the compiled file:\n\n"
+            "```bash\n"
+            f"nequip-compile {first} member.nequip.pt2 --device cuda --mode aotinductor --target ase\n"
+            "```\n\n"
+            "```python\n"
+            "from nequip.integrations.ase import NequIPCalculator\n\n"
+            'calc = NequIPCalculator.from_compiled_model("member.nequip.pt2", device="cuda")\n'
+            "atoms.calc = calc\n"
+            "```\n\n"
+            "Evaluate every member and average; `models/*.nequip.pt2` (if present) were compiled for the "
+            "training cluster and may not load elsewhere."
+        )
     first = stored[0] if stored else "models/model_000.pth"
     model_args = " ".join(stored) or "models/model_000.pth"
     return (
@@ -1405,6 +1465,7 @@ def pack_campaign(
     mace_committee_root: str | Path | None = None,
     deepmd_root: str | Path | None = None,
     dataset_root: str | Path | None = None,
+    nequip_root: str | Path | None = None,
     repo_prefix: str | None = None,
     license_id: str = "mit",
     expected_members: int = 4,
@@ -1480,7 +1541,9 @@ def pack_campaign(
     def _repo_id(component: str) -> str | None:
         return f"{repo_prefix}-{component}" if repo_prefix else None
 
-    def _collect_and_package(step: str, source: Path, *, engine: str, component: str) -> None:
+    def _collect_and_package(
+        step: str, source: Path, *, engine: str, component: str, members: int | None = None
+    ) -> None:
         if not source.is_dir():
             _skip(step, f"not found: {source}")
             return
@@ -1492,7 +1555,7 @@ def pack_campaign(
                 source,
                 bundle_out,
                 engine=engine,
-                expected_members=expected_members,
+                expected_members=members or expected_members,
                 label=f"{campaign.name} {component}",
             )
         except Exception as exc:  # noqa: BLE001 - one bad committee must not abort the sweep
@@ -1547,6 +1610,24 @@ def pack_campaign(
             engine="deepmd",
             component=architecture,
         )
+
+    nequip_models_root = _resolved(nequip_root) if nequip_root is not None else campaign.root / "models" / "nequip"
+    nequip_manifest_path = nequip_models_root / "training_manifest.json"
+    if nequip_manifest_path.is_file():
+        try:
+            nequip_seeds = json.loads(nequip_manifest_path.read_text(encoding="utf-8")).get("seeds") or []
+        except json.JSONDecodeError:
+            nequip_seeds = []
+        _collect_and_package(
+            "nequip_committee",
+            nequip_models_root,
+            engine="nequip",
+            component="nequip",
+            members=len(nequip_seeds) or None,
+        )
+    elif nequip_root is not None or dict(campaign.models.get("nequip", {})).get("enabled"):
+        # Only an expected piece is "skipped"; campaigns that never used NequIP stay quiet.
+        _skip("nequip_committee", f"no NequIP training_manifest.json at {nequip_models_root}")
 
     return result
 

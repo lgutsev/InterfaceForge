@@ -29,11 +29,13 @@ configuration and Slurm launch pattern.
 
 | Guide | Use it for |
 |---|---|
+| [Canonical NiO dataset](nio-dataset.md) | One leakage-safe NiO Step1/Step2 dataset and split for MACE, DeePMD and NequIP; frame QC; readiness audit |
 | [DeePMD campaigns](deepmd.md) | DPA architectures, backends, fine-tuning, preflight/smoke/training/evaluation, and runtime gates |
+| [NequIP committees](nequip.md) | NequIP GNN committee generation, LONI launch, restart, status, evaluation and packaging |
 | [MACE committees](mace-committee.md) | Committee collection, checksums, verification, and restoration |
 | [MACE-ROI](mace-roi.md) | Interface-local force weighting and thermodynamic-cycle loss |
 | [Allegro](allegro.md) | Allegro job generation and LAMMPS-oriented preflight |
-| [Matched MLIP comparison](mlip-comparison.md) | Exact-frame MACE/DeePMD comparison, metrics, calibration, figures, and live progress |
+| [Matched MLIP comparison](mlip-comparison.md) | Exact-frame MACE/DeePMD/NequIP comparison, metrics, calibration, figures, and live progress |
 | [Packaging](packaging.md) | Committee archives, dataset backups, and upload-ready Hugging Face repositories |
 
 For mapped collections spanning unrelated VASP roots, see the

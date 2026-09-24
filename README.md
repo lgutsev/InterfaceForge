@@ -18,8 +18,8 @@ questionable outputs are flagged instead of silently repaired or relaunched.
 | Area | What InterfaceForge provides |
 |---|---|
 | VASP campaigns | Input preparation, OPT → Step1 → Step2 AIMD staging, guarded Slurm launch, live status, failed-run repair, VASP-MLFF audit/recovery, slab vacuum and band-alignment analysis |
-| Datasets | Streaming OUTCAR collection, synchronized MACE extxyz and DeePMD NPY layouts, provenance, leakage-aware splitting, mapped multi-root campaigns |
-| MLIPs | MACE and DeePMD committee generation/evaluation, live progress summaries, matched-frame cross-backend comparison, Allegro scaffolding, optional MACE-ROI training |
+| Datasets | Streaming OUTCAR collection, synchronized MACE extxyz and DeePMD NPY layouts, provenance, leakage-aware splitting, mapped multi-root campaigns, canonical NiO Step1/Step2 export with case-lineage splits and a pre-GPU readiness audit |
+| MLIPs | MACE, DeePMD and NequIP committee generation/evaluation, live progress summaries, matched-frame cross-backend comparison, Allegro scaffolding, optional MACE-ROI training |
 | Interface validation | Work of adhesion, rigid separation curves, separation energy, stratified errors, committee uncertainty and publication-oriented summaries |
 | Chemical ordering | Fixed-composition N/O swap Monte Carlo over MLIP-relaxed interfaces, provenance archive, DFT-verification shortlist and VASP export (after PAIPAI) |
 | Surface chemistry | AFM-compatible reactive oxide cells, hydroxylation/proton-transfer states, phosphonate docking, VASP export and post-relaxation audits |
@@ -59,6 +59,7 @@ iface audit runs/vasp
 iface collect
 iface train mace
 iface train deepmd
+iface train nequip        # requires models.nequip.r_max; see docs/nequip.md
 iface mlip-progress .
 ```
 
@@ -73,7 +74,9 @@ run for each engine, version, chemistry, and cluster environment.
 | Install, configure, or choose a workflow | [Getting started](docs/getting-started.md) |
 | Prepare, audit, launch, monitor, or repair VASP runs | [VASP workflows](docs/vasp.md) |
 | Configure and evaluate DeePMD/DPA committees | [DeePMD campaigns](docs/deepmd.md) |
-| Compare MACE and DeePMD on identical frames | [MLIP comparison](docs/mlip-comparison.md) |
+| Build one canonical NiO dataset/split for every MLIP backend | [Canonical NiO dataset](docs/nio-dataset.md) |
+| Train and evaluate a NequIP committee | [NequIP committees](docs/nequip.md) |
+| Compare MACE, DeePMD and NequIP on identical frames | [MLIP comparison](docs/mlip-comparison.md) |
 | Archive committees/datasets or package for Hugging Face | [Packaging](docs/packaging.md) |
 | Build reactive magnetic oxide campaigns | [Reactive surfaces](docs/reactive-surfaces.md) |
 | Validate adhesion or separation energetics | [Interface energy](docs/interface-energy.md) and [separation energy](docs/separation-energy.md) |
@@ -104,7 +107,9 @@ monitoring on the periodic SiN/TiN/TiO campaign.
 
 That evidence is specific to the tested chemistry, architecture, runtime, and
 LONI environment. Other DPA architectures, foundation-model fine-tuning,
-MACE-ROI, Allegro, LAMMPS deployment, active-learning loops, and optional
+NequIP (automated-test-only: no NequIP model has been trained through
+InterfaceForge yet), the canonical NiO dataset exporter, MACE-ROI, Allegro,
+LAMMPS deployment, active-learning loops, and optional
 interface-generation adapters retain their documented narrower status. See
 [Verification and maturity](docs/verification.md).
 

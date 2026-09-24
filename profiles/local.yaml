@@ -14,3 +14,7 @@ jobs:
     command: "nequip-train"
   allegro_lammps:
     command: "lmp"
+  nequip_gpu:
+    command: "nequip-train"
+  nequip_cpu:
+    command: "nequip-train"

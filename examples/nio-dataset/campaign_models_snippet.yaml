@@ -1,0 +1,24 @@
+# Paste under `models:` in campaign.yaml. All three backends read the same
+# canonical dataset written by `iface dataset export ... --output datasets/canonical`.
+mace:
+  enabled: true
+  profile: mace_gpu
+  train_file: datasets/canonical/train.extxyz
+  valid_file: datasets/canonical/valid.extxyz
+  test_file: datasets/canonical/test.extxyz
+deepmd:
+  enabled: true
+  profile: deepmd_gpu
+  backend: pytorch
+  architectures: [dpa2]
+  dataset_root: datasets/canonical/deepmd
+  seeds: [11, 23, 37, 53]
+nequip:
+  enabled: true
+  profile: nequip_gpu
+  device: cuda
+  dataset: datasets/canonical
+  seeds: [11, 23, 37, 53]
+  max_concurrent: 2
+  r_max: null                # REQUIRED: choose the cutoff explicitly before `iface train nequip`
+  # max_time: "02:23:00:00"  # optional: stop cleanly inside the 72 h walltime

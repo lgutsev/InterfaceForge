@@ -222,6 +222,10 @@ def _validate_models(models: dict[str, Any]) -> None:
         )
         models["deepmd"] = deepmd
 
+    nequip = _mapping(models.get("nequip"), "models.nequip")
+    if nequip:
+        models["nequip"] = _validate_nequip(nequip)
+
     mace = _mapping(models.get("mace"), "models.mace")
     if mace:
         mace["batch_size"] = int(mace.get("batch_size", 16))
@@ -304,6 +308,77 @@ def _validate_models(models: dict[str, Any]) -> None:
                 raise ConfigurationError("models.mace.roi.component_key cannot be empty")
             mace["roi"] = roi
         models["mace"] = mace
+
+
+def _validate_nequip(nequip: dict[str, Any]) -> dict[str, Any]:
+    """Validate ``models.nequip`` (the NequIP GNN; Allegro lives in ``models.allegro``).
+
+    Structural checks only. Scientifically important hyperparameters that have
+    no safe universal value (the cutoff ``r_max``) must be explicit when the
+    backend is enabled; InterfaceForge records which remaining keys fell back
+    to documented defaults instead of silently inventing them.
+    """
+
+    enabled = nequip.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigurationError("models.nequip.enabled must be a boolean")
+    seeds_raw = nequip.get("seeds", [11, 23, 37, 53])
+    if not isinstance(seeds_raw, list) or not seeds_raw:
+        raise ConfigurationError("models.nequip.seeds must be a non-empty list of integers")
+    try:
+        seeds = [int(seed) for seed in seeds_raw]
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("models.nequip.seeds must contain integers") from exc
+    if any(isinstance(seed, bool) for seed in seeds_raw):
+        raise ConfigurationError("models.nequip.seeds must contain integers")
+    try:
+        committee = int(nequip.get("committee", len(seeds)))
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("models.nequip.committee must be an integer") from exc
+    if committee < 1:
+        raise ConfigurationError("models.nequip.committee must be positive")
+    if len(seeds) < committee:
+        raise ConfigurationError("models.nequip.seeds must cover every committee member")
+    if len(set(seeds[:committee])) != committee:
+        raise ConfigurationError("models.nequip committee seeds must be unique")
+    if any(seed < 0 for seed in seeds[:committee]):
+        raise ConfigurationError("models.nequip seeds must be non-negative")
+    device = str(nequip.get("device", "cuda")).lower()
+    if device not in {"cuda", "cpu"}:
+        raise ConfigurationError("models.nequip.device must be cuda or cpu")
+    dtype = str(nequip.get("model_dtype", "float32")).lower()
+    if dtype not in {"float32", "float64"}:
+        raise ConfigurationError("models.nequip.model_dtype must be float32 or float64")
+    if enabled:
+        if "r_max" not in nequip or nequip["r_max"] is None:
+            raise ConfigurationError(
+                "models.nequip.r_max (cutoff radius, angstrom) must be set explicitly; "
+                "InterfaceForge does not choose a NequIP cutoff for you"
+            )
+        try:
+            r_max = float(nequip["r_max"])
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError("models.nequip.r_max must be a number") from exc
+        if not math.isfinite(r_max) or r_max <= 0:
+            raise ConfigurationError("models.nequip.r_max must be positive")
+        nequip["r_max"] = r_max
+    try:
+        max_concurrent = int(nequip.get("max_concurrent", 2))
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("models.nequip.max_concurrent must be an integer") from exc
+    if max_concurrent < 1:
+        raise ConfigurationError("models.nequip.max_concurrent must be positive")
+    nequip.update(
+        {
+            "enabled": enabled,
+            "seeds": seeds[:committee],
+            "committee": committee,
+            "device": device,
+            "model_dtype": dtype,
+            "max_concurrent": max_concurrent,
+        }
+    )
+    return nequip
 
 
 def _validate_active_learning(active_learning: dict[str, Any], models: dict[str, Any]) -> None:

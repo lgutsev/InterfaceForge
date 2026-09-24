@@ -1,9 +1,10 @@
 # ruff: noqa: E501
 """Filesystem-level progress across MLIP training, evaluation, and comparison runs.
 
-Reads only generated artifacts (``lcurve.out``, MACE logs, evaluation detail
-files, comparison manifests), so it works whether or not ``campaign.yaml`` is
-still in sync and never touches a running job.
+Reads only generated artifacts (``lcurve.out``, MACE logs, NequIP Lightning
+``metrics.csv`` / ``status.json``, evaluation detail files, comparison
+manifests), so it works whether or not ``campaign.yaml`` is still in sync and
+never touches, submits, repairs or restarts a job.
 """
 
 from __future__ import annotations
@@ -279,6 +280,16 @@ def _mace_committees(mace_root: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _prediction_count(output: Path, systems: list[dict[str, Any]], engine: str, models: list[dict[str, Any]]) -> str:
+    expected = len(systems) * len(models)
+    have = sum(
+        (output / "predictions" / engine.lower() / model["model"] / f"{system['system_id']}.npz").is_file()
+        for system in systems
+        for model in models
+    )
+    return f"{have}/{expected}"
+
+
 def _comparisons(campaign: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for output in sorted((campaign / "audit").glob("mlip_compare*")):
@@ -290,22 +301,41 @@ def _comparisons(campaign: Path) -> list[dict[str, Any]]:
         except (OSError, ValueError):
             continue
         systems = data.get("systems", [])
-        models = data.get("models", [])
-        expected = len(systems) * len(models)
-        have = sum(
-            (output / "predictions" / "mace" / model["model"] / f"{system['system_id']}.npz").is_file()
-            for system in systems
-            for model in models
-        )
+        engines = data.get("engines") or {"MACE": data.get("models", []), "DPA2": data.get("models", [])}
         rows.append(
             {
                 "output_root": output.name,
                 "deepmd_architecture": data.get("deepmd_architecture", "dpa2"),
+                "engines": list(engines),
                 "systems": len(systems),
-                "mace_predictions": f"{have}/{expected}",
+                "mace_predictions": _prediction_count(output, systems, "MACE", engines["MACE"])
+                if "MACE" in engines
+                else None,
+                "nequip_predictions": _prediction_count(output, systems, "NEQUIP", engines["NEQUIP"])
+                if "NEQUIP" in engines
+                else None,
                 "finalized": (output / "comparison.json").is_file(),
             }
         )
+    return rows
+
+
+def _nequip_committees(roots: list[Path]) -> list[dict[str, Any]]:
+    from .nequip import discover_members
+
+    rows: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for root in roots:
+        resolved = root.expanduser().resolve()
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        if not any(resolved.glob("seed_*")) and not (resolved / "training_manifest.json").is_file():
+            continue
+        payload = discover_members(resolved)
+        evaluation = resolved / "evaluation" / "summary.json"
+        payload["committee_evaluation"] = evaluation.is_file()
+        rows.append(payload)
     return rows
 
 
@@ -313,6 +343,7 @@ def mlip_progress(
     campaign_root: str | Path,
     *,
     mace_committee_root: str | Path | None = None,
+    nequip_roots: list[str | Path] | None = None,
 ) -> dict[str, Any]:
     campaign = Path(campaign_root).expanduser().resolve()
     deepmd_root = campaign / "models" / "deepmd"
@@ -329,6 +360,9 @@ def mlip_progress(
         "deepmd_training": training,
         "deepmd_evaluation": _deepmd_evaluation(deepmd_root, committees),
         "mace_committees": _mace_committees(mace_root),
+        "nequip_committees": _nequip_committees(
+            [campaign / "models" / "nequip", *(Path(value) for value in (nequip_roots or []))]
+        ),
         "comparisons": _comparisons(campaign),
     }
 
@@ -398,13 +432,27 @@ def render(payload: dict[str, Any]) -> str:
                 )
             )
 
+    lines += ["", "NequIP training"]
+    if not payload.get("nequip_committees"):
+        lines.append("  (no models/nequip/seed_* members; generate with 'iface train nequip')")
+    else:
+        from .nequip import render_status as render_nequip
+
+        for row in payload["nequip_committees"]:
+            lines.append(render_nequip(row))
+            lines.append(
+                f"      committee evaluation: {'yes' if row.get('committee_evaluation') else 'no'}"
+                "  (iface nequip evaluate)"
+            )
+
     lines += ["", "Comparisons"]
     if not payload["comparisons"]:
         lines.append("  (no audit/mlip_compare* runs prepared)")
     for row in payload["comparisons"]:
         flag = "OK" if row["finalized"] else ".."
+        extra = f"  NequIP preds {row['nequip_predictions']}" if row.get("nequip_predictions") else ""
         lines.append(
-            f"  [{flag}] {row['output_root']}  vs {row['deepmd_architecture']}  MACE preds {row['mace_predictions']}  finalized={'yes' if row['finalized'] else 'no'}"
+            f"  [{flag}] {row['output_root']}  vs {row['deepmd_architecture']}  MACE preds {row['mace_predictions']}{extra}  finalized={'yes' if row['finalized'] else 'no'}"
         )
     return "\n".join(lines)
 
@@ -413,9 +461,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("campaign_root", nargs="?", default=".")
     parser.add_argument("--mace-committee-root")
+    parser.add_argument("--nequip-root", action="append", default=[])
     parser.add_argument("--json", action="store_true", help="Emit the raw payload instead of a table")
     args = parser.parse_args(argv)
-    payload = mlip_progress(args.campaign_root, mace_committee_root=args.mace_committee_root)
+    payload = mlip_progress(
+        args.campaign_root, mace_committee_root=args.mace_committee_root, nequip_roots=args.nequip_root
+    )
     print(json.dumps(payload, indent=2) if args.json else render(payload))
     return 0
 
