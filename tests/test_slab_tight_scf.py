@@ -341,6 +341,33 @@ class PrepareTightScfTests(unittest.TestCase):
             self.assertEqual(provenance["overrides"]["EDIFFG"], "-0.03")
             self.assertEqual(result["relax_counts"]["PREPARED"], 1)
 
+    def test_only_restricts_relax_restarts_too(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _family(root)
+            for name in ("Ref_A", "Ref_Ok"):
+                (root / name / "OUTCAR").write_text(
+                    _outcar(converged_steps=3, nsw=3, reached=False, forces=[(0.2, 0.0, 0.0)]),
+                    encoding="utf-8",
+                )
+            result = prepare_tight_scf(root, only=["Ref_A"])
+            actions = {entry["folder"]: entry["relax_restart_action"] for entry in result["plan"]}
+            self.assertEqual(actions["Ref_A"], "PREPARED")
+            self.assertEqual(actions["Ref_Ok"], "SKIPPED")
+            self.assertTrue((root / "relax_continue" / "Ref_A").is_dir())
+            self.assertFalse((root / "relax_continue" / "Ref_Ok").exists())
+
+    def test_overflowed_force_row_is_treated_as_high_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "OUTCAR"
+            path.write_text(
+                _outcar(converged_steps=2).replace("0.010000", "**********", 1),
+                encoding="utf-8",
+            )
+            diag = scf_diagnostics_from_outcar(path)
+            self.assertEqual(diag.final_max_force_eV_per_A, float("inf"))
+            self.assertTrue(needs_relax_restart(diag, 0.05))
+
     def test_relax_restart_helpers(self) -> None:
         overrides = relax_restart_overrides(
             reuse_wavecar=False,

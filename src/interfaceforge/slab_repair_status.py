@@ -70,6 +70,9 @@ def _status_for(family: str, calc: Path, force_target: float) -> dict[str, Any]:
             row["status"] = "RUNNING_STATIC"
         elif diag.final_scf_converged is False:
             row["status"] = "STATIC_SCF_FAILED"
+        elif diag.final_scf_converged is None:
+            row["status"] = "STATIC_SCF_UNKNOWN"
+            row["note"] = "OUTCAR finished but no electronic iteration could be parsed"
         else:
             row["status"] = "STATIC_CONVERGED"
             row["ready_for_workfunction_audit"] = row["LOCPOT"]
@@ -83,6 +86,15 @@ def _status_for(family: str, calc: Path, force_target: float) -> dict[str, Any]:
         row["status"] = "RELAX_NSW_LIMIT"
     elif diag.ionic_converged is False:
         row["status"] = "RELAX_NOT_CONVERGED"
+    elif diag.ionic_converged is None:
+        row["status"] = "RELAX_STATE_UNKNOWN"
+        row["note"] = "OUTCAR finished but IBRION/NSW did not identify a relaxation"
+    elif diag.final_scf_converged is not True:
+        # Forces read off an unconverged final SCF do not certify the geometry.
+        row["status"] = "RELAX_FINAL_SCF_UNCONVERGED"
+    elif diag.final_max_force_eV_per_A is None:
+        row["status"] = "RELAX_FORCES_UNKNOWN"
+        row["note"] = "OUTCAR finished but no TOTAL-FORCE block could be parsed"
     elif (
         diag.final_max_force_eV_per_A is not None
         and diag.final_max_force_eV_per_A > force_target

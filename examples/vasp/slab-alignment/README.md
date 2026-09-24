@@ -232,7 +232,7 @@ iface vasp slab-repair-status .
 cat slab_repair_status.txt
 ```
 
-The live status reports running/completed static SCFs, relaxation progress, final forces, NSW exhaustion, LOCPOT availability, calculations already ready for work-function auditing, and converged relaxations ready for their final static calculation. The default final-geometry target is 0.03 eV/A and can be changed with `--force-target`.
+The live status reports running/completed static SCFs, relaxation progress, final forces, NSW exhaustion, LOCPOT availability, calculations already ready for work-function auditing, and converged relaxations ready for their final static calculation. The default final-geometry target is 0.03 eV/A and can be changed with `--force-target`. A relaxation is only reported ready when its final SCF converged and its final forces were parsed; otherwise it is reported as `RELAX_FINAL_SCF_UNCONVERGED`, `RELAX_FORCES_UNKNOWN`, or `RELAX_STATE_UNKNOWN` (and a static SCF with no parsable iterations as `STATIC_SCF_UNKNOWN`), and the command exits 1.
 
 After the runs finish, re-audit the new tree with the same configuration and
 compare `selected_swing_eV` and the work function against the parent audit:

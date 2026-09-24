@@ -1193,7 +1193,18 @@ def cmd_slab_repair_status(args: argparse.Namespace) -> int:
     bad = sum(
         count
         for status, count in payload["counts"].items()
-        if status in {"PARSE_ERROR", "STATIC_SCF_FAILED", "RELAX_NSW_LIMIT", "RELAX_NOT_CONVERGED", "RELAX_FORCE_HIGH"}
+        if status
+        in {
+            "PARSE_ERROR",
+            "STATIC_SCF_FAILED",
+            "STATIC_SCF_UNKNOWN",
+            "RELAX_NSW_LIMIT",
+            "RELAX_NOT_CONVERGED",
+            "RELAX_STATE_UNKNOWN",
+            "RELAX_FINAL_SCF_UNCONVERGED",
+            "RELAX_FORCES_UNKNOWN",
+            "RELAX_FORCE_HIGH",
+        }
     )
     return 1 if bad else 0
 
@@ -2937,7 +2948,10 @@ def build_parser() -> argparse.ArgumentParser:
         "root",
         nargs="?",
         default=".",
-        help="Project head; scans direct slabs plus tight_scf/<daughter>, relax_continue/<daughter>, and final_static/<daughter> (default: .)",
+        help=(
+            "Project head; scans direct slabs plus tight_scf/<daughter>, "
+            "relax_continue/<daughter>, and final_static/<daughter> (default: .)"
+        ),
     )
     slab_alignment.add_argument(
         "--config",

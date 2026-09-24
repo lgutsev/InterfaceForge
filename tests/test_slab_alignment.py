@@ -9,6 +9,7 @@ from unittest import mock
 
 import numpy as np
 
+from interfaceforge.errors import SafetyError
 from interfaceforge.slab_alignment import (
     _run_sumo,
     add_alignment_deltas,
@@ -120,6 +121,43 @@ Direct
             with mock.patch.object(Path, "read_text", side_effect=AssertionError("full-file read")):
                 _structure, _grid, planar = read_locpot(path)
         self.assertTrue(np.allclose(planar, [2.5, 6.5, 10.5, 14.5]))
+
+    def test_locpot_text_after_the_grid_is_ignored(self) -> None:
+        values = " ".join(str(float(index)) for index in range(1, 17))
+        locpot = POSCAR + "\n2 2 4\n" + values + "\ntrailing block 1 2 3\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "LOCPOT"
+            path.write_text(locpot, encoding="utf-8")
+            _structure, _grid, planar = read_locpot(path)
+        self.assertTrue(np.allclose(planar, [2.5, 6.5, 10.5, 14.5]))
+
+    def test_locpot_numpy1_truncation_warning_uses_strict_parser(self) -> None:
+        def numpy1_fromstring(text: str, sep: str) -> np.ndarray:
+            import warnings
+
+            warnings.warn("string or file could not be read to its end", DeprecationWarning, stacklevel=2)
+            return np.array([1.0])
+
+        values = " ".join(str(float(index)) for index in range(1, 17))
+        locpot = POSCAR + "\n2 2 4\n" + values + "\ntrailing block\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "LOCPOT"
+            path.write_text(locpot, encoding="utf-8")
+            with mock.patch("interfaceforge.slab_alignment.np.fromstring", numpy1_fromstring):
+                _structure, _grid, planar = read_locpot(path)
+        self.assertTrue(np.allclose(planar, [2.5, 6.5, 10.5, 14.5]))
+
+    def test_locpot_overflow_or_nan_grid_value_is_rejected(self) -> None:
+        for bad in ("**********", "nan"):
+            values = [str(float(index)) for index in range(1, 17)]
+            values[5] = bad
+            locpot = POSCAR + "\n2 2 4\n" + " ".join(values) + "\n"
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "LOCPOT"
+                path.write_text(locpot, encoding="utf-8")
+                with self.assertRaises(SafetyError):
+                    read_locpot(path)
+
     def test_physical_sides_are_never_merged(self) -> None:
         structure = parse_poscar_lines(POSCAR.splitlines())
         z_grid = np.linspace(0, 40, 800, endpoint=False)

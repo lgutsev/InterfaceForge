@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import subprocess
+import warnings
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -368,14 +369,37 @@ def _read_locpot_header(handle: Any, input_path: Path) -> tuple[Structure, list[
             grid = [int(value) for value in fields[:3]]
         except ValueError as exc:
             raise SafetyError(f"LOCPOT grid dimensions not found in {input_path}") from exc
-        if len(grid) != 3:
+        if len(grid) != 3 or min(grid) <= 0:
             raise SafetyError(f"LOCPOT grid dimensions not found in {input_path}")
         return structure, grid
+
+
+def _parse_locpot_values(text: str, remaining: int, input_path: Path) -> np.ndarray:
+    """Parse at most ``remaining`` grid values from whole lines of LOCPOT text.
+
+    ``np.fromstring`` is the fast path, but it stops at the first token it
+    cannot parse: NumPy 1.x silently truncates the chunk (shifting every later
+    value onto the wrong grid point) and NumPy 2.x raises even when the token
+    lies after the last value still needed. Either way, fall back to strict
+    parsing of exactly the tokens that are still required.
+    """
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            values = np.fromstring(text, sep=" ")
+    except (ValueError, DeprecationWarning):
+        try:
+            values = np.array(text.split()[:remaining], dtype=np.float64)
+        except ValueError as exc:
+            raise SafetyError(f"{input_path} contains a non-numeric LOCPOT grid value") from exc
+    return values[:remaining]
 
 
 def _accumulate_locpot_chunk(
     text: str,
     *,
+    input_path: Path,
     offset: int,
     required: int,
     nx: int,
@@ -387,12 +411,9 @@ def _accumulate_locpot_chunk(
 
     if offset >= required or not text:
         return offset
-    values = np.fromstring(text, sep=" ")
+    values = _parse_locpot_values(text, required - offset, input_path)
     if values.size == 0:
         return offset
-    remaining = required - offset
-    if values.size > remaining:
-        values = values[:remaining]
     indices = np.arange(offset, offset + values.size, dtype=np.int64)
     if axis_index == 0:
         groups = indices % nx
@@ -453,6 +474,7 @@ def read_locpot(
             if buffered_chars >= chunk_chars:
                 offset = _accumulate_locpot_chunk(
                     "".join(buffer),
+                    input_path=input_path,
                     offset=offset,
                     required=required,
                     nx=nx,
@@ -465,6 +487,7 @@ def read_locpot(
         if offset < required and buffer:
             offset = _accumulate_locpot_chunk(
                 "".join(buffer),
+                input_path=input_path,
                 offset=offset,
                 required=required,
                 nx=nx,
@@ -474,11 +497,14 @@ def read_locpot(
             )
         if offset != required:
             raise SafetyError(f"{input_path} has {offset} grid values; expected {required}")
+    if not np.all(np.isfinite(sums)):
+        raise SafetyError(f"{input_path} contains non-finite LOCPOT grid values")
 
     plane_size = required // count
     potential = sums / plane_size
     z_grid = np.arange(count, dtype=float) * structure.normal_length / count
     return structure, z_grid, potential
+
 
 def efermi_from_outcar(path: str | Path) -> float:
     matches = re.findall(
@@ -1128,7 +1154,11 @@ def _write_audit_markers(
     vasp_warning = str(row.get("vasp_vacuum_warning", ""))
     no_field_free_region = "NO_FIELD_FREE_REGION" in vasp_warning
     fix_path = (
-        write_dipole_preview(calc_dir, float(row.get("suggested_DIPOL_normal", row.get("suggested_DIPOL_z"))), str(row.get("axis", "z")))
+        write_dipole_preview(
+            calc_dir,
+            float(row.get("suggested_DIPOL_normal", row.get("suggested_DIPOL_z"))),
+            str(row.get("axis", "z")),
+        )
         if write_fix and not no_field_free_region
         else None
     )
@@ -1297,7 +1327,10 @@ def _analyze_folder(
         row["dipole_axis_status"] = "MATCH" if axis_matches else ("UNKNOWN" if recorded_idipol is None else "MISMATCH")
         if recorded_idipol is not None and not axis_matches:
             selected_status = "FAILED_DIPOLE_AXIS"
-            row["error"] = f"OUTCAR IDIPOL={recorded_idipol}; selected axis {structure.axis} requires IDIPOL={expected_idipol}"
+            row["error"] = (
+                f"OUTCAR IDIPOL={recorded_idipol}; selected axis {structure.axis} "
+                f"requires IDIPOL={expected_idipol}"
+            )
         elif recorded_idipol is None and incar["IDIPOL"] != expected_idipol:
             selected_status = "SUSPECT_DIPOLE_AXIS"
             row["error"] = "INCAR dipole direction does not match selected axis; OUTCAR direction unavailable"

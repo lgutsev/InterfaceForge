@@ -70,6 +70,39 @@ class SlabRepairStatusTests(unittest.TestCase):
             self.assertTrue((root / "slab_repair_status.txt").is_file())
             self.assertTrue((root / "slab_repair_status.json").is_file())
 
+    def test_unparsed_or_unconverged_runs_are_never_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            static = root / "tight_scf" / "NoIterations"
+            static.mkdir(parents=True)
+            (static / "OUTCAR").write_text(
+                "   NSW    =      0\n General timing and accounting informations for this job:\n",
+                encoding="utf-8",
+            )
+            (static / "LOCPOT").write_text("ready\n", encoding="utf-8")
+
+            no_forces = root / "relax_continue" / "NoForces"
+            no_forces.mkdir(parents=True)
+            text = _outcar(nsw=200, ibrion=2, reached=True, finished=True, force=0.01)
+            (no_forces / "OUTCAR").write_text(
+                text.replace("TOTAL-FORCE", "TOTAL-FARCE"), encoding="utf-8"
+            )
+
+            unconverged = root / "relax_continue" / "LastScfUnconverged"
+            unconverged.mkdir(parents=True)
+            (unconverged / "OUTCAR").write_text(
+                text.replace("aborting loop because EDIFF is reached", "EDIFF was not reached"),
+                encoding="utf-8",
+            )
+
+            result = slab_repair_status(root, write_json=None, write_text=None)
+            rows = {row["folder"]: row for row in result["rows"]}
+            self.assertEqual(rows["NoIterations"]["status"], "STATIC_SCF_UNKNOWN")
+            self.assertEqual(rows["NoForces"]["status"], "RELAX_FORCES_UNKNOWN")
+            self.assertEqual(rows["LastScfUnconverged"]["status"], "RELAX_FINAL_SCF_UNCONVERGED")
+            self.assertEqual(result["workfunction_ready"], 0)
+            self.assertEqual(result["final_static_ready"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

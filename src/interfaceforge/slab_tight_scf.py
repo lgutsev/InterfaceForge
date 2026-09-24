@@ -148,8 +148,13 @@ def scf_diagnostics_from_outcar(path: str | Path, free_mask: list[bool] | None =
                 if force_state == 2:
                     fields = line.split()
                     if len(fields) >= 6:
-                        fx, fy, fz = (float(value) for value in fields[3:6])
-                        forces.append((fx * fx + fy * fy + fz * fz) ** 0.5)
+                        try:
+                            fx, fy, fz = (float(value) for value in fields[3:6])
+                            forces.append((fx * fx + fy * fy + fz * fz) ** 0.5)
+                        except ValueError:
+                            # Fortran prints ****** for a force too large for
+                            # its field; that atom's force is effectively huge.
+                            forces.append(float("inf"))
                         continue
                     force_state = 0
             if "TOTAL-FORCE" in line:
@@ -687,11 +692,17 @@ def prepare_tight_scf(
                 }
             )
             diag_error = ""
-        except (OSError, SafetyError) as exc:
+        except (OSError, ValueError, SafetyError) as exc:
             diag = None
             diag_error = str(exc)
 
-        if prepare_relax_restarts and diag is not None and needs_relax_restart(diag, force_warn):
+        wants_relax_restart = (
+            prepare_relax_restarts and diag is not None and needs_relax_restart(diag, force_warn)
+        )
+        if wants_relax_restart and only_set is not None and name not in only_set:
+            entry["relax_restart_action"] = "SKIPPED"
+            entry["relax_restart_reason"] = "not in --only"
+        elif wants_relax_restart:
             relax_destination = relax_out_path / name
             try:
                 relax_result = _prepare_relax_restart(
