@@ -1530,7 +1530,7 @@ def _write_outputs(root: Path, rows: list[dict[str, Any]], details: list[dict[st
     }
 
 
-REPAIR_FAMILIES = ("tight_scf", "relax_continue")
+REPAIR_FAMILIES = ("tight_scf", "relax_continue", "final_static")
 
 
 def discover_slab_calculations(
@@ -1595,7 +1595,7 @@ def analyze_slab_alignment(
     calculations = discover_slab_calculations(root_path, settings, only=only)
     if not calculations:
         raise SafetyError(
-            "No matching slab calculation contains LOCPOT under the root, tight_scf/, or relax_continue/"
+            "No matching slab calculation contains LOCPOT under the root, tight_scf/, relax_continue/, or final_static/"
         )
     rows: list[dict[str, Any]] = []
     details: list[dict[str, Any]] = []

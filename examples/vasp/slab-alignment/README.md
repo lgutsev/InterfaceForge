@@ -195,7 +195,7 @@ variable at a time.
 
 `slab-align` is project-head aware: when run from the main work-function
 directory it analyzes direct calculation daughters plus completed
-`tight_scf/<daughter>/` and `relax_continue/<daughter>/` calculations. Output
+`tight_scf/<daughter>/`, `relax_continue/<daughter>/`, and `final_static/<daughter>/` calculations. Output
 rows use relative paths such as `tight_scf/FAPI_FAI_Surf_BCF`, and band-edge
 deltas are only formed against a reference in the same family; a repair result
 is never silently compared against a differently prepared root reference.

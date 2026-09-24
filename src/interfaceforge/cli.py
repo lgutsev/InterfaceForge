@@ -2937,7 +2937,7 @@ def build_parser() -> argparse.ArgumentParser:
         "root",
         nargs="?",
         default=".",
-        help="Project head; scans direct slabs plus tight_scf/<daughter> and relax_continue/<daughter> (default: .)",
+        help="Project head; scans direct slabs plus tight_scf/<daughter>, relax_continue/<daughter>, and final_static/<daughter> (default: .)",
     )
     slab_alignment.add_argument(
         "--config",

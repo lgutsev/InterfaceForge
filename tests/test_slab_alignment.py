@@ -360,13 +360,21 @@ Direct
             root = Path(temporary)
             _write_calculation(root / "MAPI_MAI_Surf", 5.4, -1.0, 1.0)
             _write_calculation(root / "MAPI_MAI_Surf_BPDCA", 5.2, -0.9, 1.1)
+
             tight = root / "tight_scf"
             tight.mkdir()
             _write_calculation(tight / "MAPI_MAI_Surf", 5.45, -1.0, 1.0)
             _write_calculation(tight / "MAPI_MAI_Surf_BPDCA", 5.25, -0.9, 1.1)
+
             relax = root / "relax_continue"
             relax.mkdir()
             _write_calculation(relax / "MAPI_MAI_Surf_BPDCA", 5.3, -0.9, 1.1)
+
+            final_static = root / "final_static"
+            final_static.mkdir()
+            _write_calculation(final_static / "MAPI_MAI_Surf", 5.5, -1.0, 1.0)
+            _write_calculation(final_static / "MAPI_MAI_Surf_BPDCA", 5.35, -0.9, 1.1)
+
             config_path = root / "slab_alignment.json"
             config_path.write_text(
                 json.dumps({
@@ -377,15 +385,33 @@ Direct
             )
             payload = analyze_slab_alignment(root, config=config_path)
             rows = {row["folder"]: row for row in payload["rows"]}
-            self.assertEqual(payload["family_counts"], {"root": 2, "tight_scf": 2, "relax_continue": 1})
+            self.assertEqual(
+                payload["family_counts"],
+                {"root": 2, "tight_scf": 2, "relax_continue": 1, "final_static": 2},
+            )
             self.assertIn("MAPI_MAI_Surf_BPDCA", rows)
             self.assertIn("tight_scf/MAPI_MAI_Surf_BPDCA", rows)
             self.assertIn("relax_continue/MAPI_MAI_Surf_BPDCA", rows)
-            self.assertEqual(rows["tight_scf/MAPI_MAI_Surf_BPDCA"]["reference"], "tight_scf/MAPI_MAI_Surf")
+            self.assertIn("final_static/MAPI_MAI_Surf_BPDCA", rows)
+            self.assertEqual(
+                rows["tight_scf/MAPI_MAI_Surf_BPDCA"]["reference"],
+                "tight_scf/MAPI_MAI_Surf",
+            )
             self.assertEqual(rows["relax_continue/MAPI_MAI_Surf_BPDCA"]["reference"], "")
+            self.assertEqual(
+                rows["final_static/MAPI_MAI_Surf_BPDCA"]["reference"],
+                "final_static/MAPI_MAI_Surf",
+            )
             self.assertEqual(rows["tight_scf/MAPI_MAI_Surf_BPDCA"]["family"], "tight_scf")
-            self.assertIsInstance(rows["tight_scf/MAPI_MAI_Surf_BPDCA"]["delta_cbm_eV"], float)
+            self.assertEqual(rows["final_static/MAPI_MAI_Surf_BPDCA"]["family"], "final_static")
+            self.assertIsInstance(
+                rows["tight_scf/MAPI_MAI_Surf_BPDCA"]["delta_cbm_eV"], float
+            )
+            self.assertIsInstance(
+                rows["final_static/MAPI_MAI_Surf_BPDCA"]["delta_cbm_eV"], float
+            )
             self.assertEqual(rows["relax_continue/MAPI_MAI_Surf_BPDCA"]["delta_cbm_eV"], "")
+
     def test_nonflat_case_is_flagged_and_gets_preview_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
