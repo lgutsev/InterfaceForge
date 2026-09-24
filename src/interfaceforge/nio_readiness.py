@@ -147,7 +147,7 @@ def readiness_audit(
     campaign: Campaign | None = None,
     dataset: str | Path | None = None,
 ) -> dict[str, Any]:
-    plan = plan_export(roots, config)
+    plan = plan_export(roots, config, require_usable=False)
     summary = _plan_summary(plan)
     rows = [_trajectory_row(analysis, plan) for analysis in plan.analyses]
     usable = [row for row in rows if row["status"] in {"ok", "ok_incomplete"}]
@@ -175,10 +175,51 @@ def readiness_audit(
         blocking.append("exported dataset failed verification")
     if consumption.get("status") == "checked" and not consumption.get("all_enabled_backends_share_dataset_and_split"):
         blocking.append("enabled backends do not all read the canonical dataset")
+    sampling = summary["sampling"]
+    grouped: dict[tuple[str, str | None], list[dict[str, Any]]] = defaultdict(list)
+    for problem in sampling["problems"]:
+        grouped[(problem["kind"], problem.get("manifest"))].append(problem)
+    labels = {
+        "missing_requested_frames": "requests frames that are missing from the parsed OUTCAR",
+        "invalid_manifest": "is invalid",
+        "stale_manifest": "does not select frames for runs that have them (stale)",
+    }
+    for (kind, manifest), items in grouped.items():
+        blocking.append(
+            f"step2_sample.json {manifest} {labels[kind]} for {len(items)} trajectory(ies); "
+            f"first: {items[0]['trajectory_id']}: {items[0]['detail']}"
+        )
+    attention: list[str] = []
+    rejected_requested = sampling["qc_rejected_requested_frames"]
+    if rejected_requested:
+        trajectories = len({item["trajectory_id"] for item in rejected_requested})
+        attention.append(
+            f"{len(rejected_requested)} frame(s) requested by step2_sample.json in {trajectories} trajectory(ies) "
+            "failed QC and are not exported (not blocking; see the Step2 sampling section)"
+        )
     if dataset is None:
         blocking.append(
             "dataset not exported/verified yet (run `iface dataset export`, then re-run readiness with --dataset)"
         )
+    sampling_rows = [
+        {
+            "trajectory_id": row["trajectory_id"],
+            "state": row["sample_state"],
+            "used": row["sample_state"] == "used",
+            "manifest": row["sample_manifest"],
+            "requested": row["sample_count_requested"],
+            "present": row["sample_count_present"],
+            "rejected_by_qc": row["sample_count_rejected_by_qc"],
+            "selected": row["sample_count_selected"],
+            "exported": row["sample_count_exported"],
+            "missing": row["sample_count_missing"],
+            "rejected_indices": row["sample_indices_rejected_by_qc"],
+            "missing_indices": row["sample_indices_missing"],
+            "errors": row["sample_errors"],
+        }
+        for row in rows
+        if row["stage"] == "Step2" and row["status"] != "stage_not_selected"
+    ]
 
     payload = {
         "schema": "interfaceforge-nio-readiness",
@@ -208,10 +249,12 @@ def readiness_audit(
             "leakage": summary["leakage"],
             "backend_consumption": consumption,
             "dataset_verification": verification,
+            "step2_sampling": {**sampling, "per_trajectory": sampling_rows},
         },
         "summary": summary,
         "ready_for_gpu_smoke_tests": not blocking,
         "blocking_items": blocking,
+        "attention_items": attention,
         "scope_note": (
             "Readiness means the data plumbing is consistent. It does not validate the DFT "
             "labels, the MLIPs, or their transferability to phosphonate chemistry or long MD."
@@ -247,6 +290,8 @@ def render_markdown(payload: dict[str, Any]) -> str:
     ]
     if payload["blocking_items"]:
         lines += ["Blocking items:", ""] + [f"- {item}" for item in payload["blocking_items"]] + [""]
+    if payload.get("attention_items"):
+        lines += ["Needs attention (not blocking):", ""] + [f"- {item}" for item in payload["attention_items"]] + [""]
     lines += [
         f"> {payload['scope_note']}",
         "",
@@ -325,5 +370,43 @@ def render_markdown(payload: dict[str, Any]) -> str:
     if verification is not None:
         lines += ["", f"Dataset verification: **{'valid' if verification.get('valid') else 'INVALID'}**."]
         lines += [f"- {problem}" for problem in verification.get("problems", [])[:20]]
+    lines += _sampling_markdown(answers.get("step2_sampling"))
     lines += ["", "Machine-readable detail: `readiness.json` (every trajectory with QC counts and reasons).", ""]
     return "\n".join(lines)
+
+
+def _sampling_markdown(sampling: dict[str, Any] | None) -> list[str]:
+    lines = ["", "## 7. Step2 sampling (`step2_sample.json`)", ""]
+    if not sampling or not sampling["per_trajectory"]:
+        return lines + ["No selected Step2 trajectories."]
+    totals = sampling["totals"]
+    lines += [
+        f"{sampling['trajectories_using_step2_sample']} trajectory(ies) selected frames from `step2_sample.json`: "
+        f"requested {totals['requested']}, present {totals['present']}, rejected by QC {totals['rejected_by_qc']}, "
+        f"exported {totals['exported']}, missing {totals['missing']}.",
+        "",
+        f"Consistent: **{'no' if sampling['blocking'] else 'yes'}** "
+        "(missing requested frames or an invalid/stale manifest block export).",
+        "",
+        "| Trajectory | step2_sample used | Requested | Present | Rejected by QC | Exported | Missing | State |",
+        "|---|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in sampling["per_trajectory"]:
+        used = {"used": "yes", "absent": "no (stride)", "disabled": "no (disabled)"}.get(row["state"], row["state"])
+        state = "used, MISSING FRAMES" if row["state"] == "used" and row["missing"] else row["state"]
+        if row["state"] in {"invalid", "stale"}:
+            state = f"{row['state'].upper()}: {row['errors'] or 'see blocking problems'}"
+        lines.append(
+            f"| `{row['trajectory_id']}` | {used} | {_fmt(row['requested'])} | {_fmt(row['present'])} | "
+            f"{_fmt(row['rejected_by_qc'])} | {_fmt(row['exported'])} | {_fmt(row['missing'])} | {state} |"
+        )
+    if sampling["qc_rejected_requested_frames"]:
+        lines += ["", "Requested frames rejected by QC:", ""]
+        lines += [
+            f"- `{item['trajectory_id']}` frame {item['index']}: {item['reason']}"
+            for item in sampling["qc_rejected_requested_frames"][:50]
+        ]
+    if sampling["problems"]:
+        lines += ["", "Blocking sampling problems:", ""]
+        lines += [f"- `{problem['trajectory_id']}`: {problem['detail']}" for problem in sampling["problems"][:50]]
+    return lines

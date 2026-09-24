@@ -101,9 +101,48 @@ in `rejected_frames.csv` with its reason, and every trajectory in
 | OSZICAR/OUTCAR step-count mismatch, OUTCAR error markers, missing constraints | Warning. |
 | Byte-identical OUTCAR under two paths | Second copy excluded as a duplicate. |
 
+## Step2 sampling provenance (`step2_sample.json`)
+
 `step2_sample.json` (written by `iface vasp step2-sample`) selects the
-decorrelated frames of each Step2 run; sampled frames that fail QC are dropped
-and counted.
+decorrelated frames of each Step2 run. Once a Step2 root has one, it governs
+every run in that root: the exporter never falls back to stride selection
+behind your back. For each Step2 trajectory it records a `sample_state`:
+
+| State | Meaning | Blocking |
+|---|---|---|
+| `absent` | No `step2_sample.json` in the Step2 root; stride selection applies | no |
+| `disabled` | `--no-step2-sample` (or `use_step2_sample: false`); stride selection | no |
+| `used` | A valid `OK` entry selects the frames | only if requested frames are missing |
+| `pending` | Listed as not `OK` (or not listed) and the run has no frames yet | no |
+| `invalid` | The file or this run's entry is malformed: not JSON, `runs` not a list, a run entry without `relative_path`, unexpected `format`, non-string `status`, `indices` missing or not a list, non-integer, negative or duplicate indices, `kept_frames` disagreeing with `indices`, or several entries for the run with different selections (identical repeats are accepted with a warning) | yes |
+| `stale` | The run has frames, but the manifest does not list it or lists it as not `OK` | yes |
+
+For a `used` trajectory the requested indices are partitioned exactly:
+
+- `requested = present + missing`, where *present* means parsed from the OUTCAR;
+- `present = selected + rejected_by_qc`;
+- `exported = selected` when the trajectory is exported, otherwise 0.
+
+A requested frame that is **missing** (beyond the parsed OUTCAR, or after the
+parser stopped at a truncated/unreadable step) marks the manifest as stale:
+the trajectory gets status `sampling_inconsistent`, `iface dataset export`
+refuses to write the dataset, and `iface dataset readiness` reports it as
+blocking. The error names the trajectory, the sampling file, the missing
+frame(s) and the parsed frame range. An `invalid` or `stale` manifest gives
+status `sampling_invalid` and blocks in the same way. A requested frame that
+is present but fails QC (SCF ceiling, temperature runaway, non-finite labels,
+missing virial, an explicit threshold) stays rejected; readiness lists it with
+its reason under "Needs attention" and in the Step2 sampling section, but it
+does not block.
+
+`trajectories.csv` carries `sample_state`, `sample_manifest`,
+`sample_manifest_sha256`, `sample_run_status`, the six `sample_count_*`
+columns (`requested`, `present`, `rejected_by_qc`, `selected`, `missing`,
+`exported`), the corresponding space-separated `sample_indices_*` lists and
+`sample_errors`, so the outcome can be reconstructed without reopening the
+sampling file. `step2_sample_indices` is kept as a legacy alias of
+`sample_count_requested`. `manifest.json` has a compact `sampling` section
+(state counts, totals and the sha256 of every sampling manifest used).
 
 Reference labels follow the repository convention: `REF_energy` is ASE's
 `energy(sigma->0)` in eV (TOTEN is kept as `REF_free_energy`), `REF_forces` are
@@ -166,7 +205,9 @@ The layout is the `iface collect` layout, so `iface train mace` (default
 
 1. which trajectories are discoverable (by stage / temperature / status);
 2. usable frames per system and temperature;
-3. incomplete or problematic runs and the rejection reasons;
+3. incomplete or problematic runs and the rejection reasons, plus, per Step2
+   trajectory, whether `step2_sample.json` was used and how many requested
+   frames were present, rejected by QC, exported or missing;
 4. frames, trajectories and groups per split versus the target ratios;
 5. leakage checks;
 6. with `--dataset` (and optionally `-c campaign.yaml`): whether the enabled

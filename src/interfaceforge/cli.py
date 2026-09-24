@@ -406,6 +406,10 @@ def cmd_dataset(args: argparse.Namespace) -> int:
         {
             "ready_for_gpu_smoke_tests": payload["ready_for_gpu_smoke_tests"],
             "blocking_items": payload["blocking_items"],
+            "attention_items": payload["attention_items"],
+            "step2_sampling": {
+                key: payload["answers"]["step2_sampling"][key] for key in ("totals", "state_counts", "blocking")
+            },
             "frames_per_split": payload["answers"]["frames_per_split"],
             "leakage_detected": payload["answers"]["leakage"]["leakage_detected"],
             "outputs": payload["outputs"],

@@ -437,7 +437,22 @@ class TrajectoryAnalysis:
     md_temperature_mean_k: float | None = None
     md_temperature_max_k: float | None = None
     selection: str = "stride"
+    # Legacy: number of indices requested by step2_sample.json (trajectories.csv
+    # column ``step2_sample_indices``); kept as an alias of sample_count_requested.
     sampled_indices: int | None = None
+    # step2_sample.json outcome. sample_state is one of SAMPLE_STATES; the index
+    # lists are None when no sampling manifest applies to this trajectory.
+    sample_state: str = "not-applicable"
+    sample_manifest: str | None = None
+    sample_manifest_sha256: str | None = None
+    sample_run_status: str | None = None
+    sample_errors: list[str] = field(default_factory=list)
+    sample_indices_requested: list[int] | None = None
+    sample_indices_present: list[int] | None = None
+    sample_indices_selected: list[int] | None = None
+    sample_indices_rejected_by_qc: list[int] | None = None
+    sample_indices_missing: list[int] | None = None
+    sampling_problems: list[dict[str, Any]] = field(default_factory=list)
     frames_valid: int = 0
     frames_selected: int = 0
     rejected: list[dict[str, Any]] = field(default_factory=list)
@@ -528,23 +543,133 @@ def _mask_from_atoms(atoms: Any) -> np.ndarray:
     return mask
 
 
-def _step2_sample_indices(trajectory: Trajectory) -> list[int] | None:
+SAMPLE_MANIFEST = "step2_sample.json"
+SAMPLE_FORMAT = "interfaceforge-step2-sample"
+# not-applicable: not a Step2 trajectory | disabled: --no-step2-sample
+# absent: no step2_sample.json in the Step2 root (stride selection applies)
+# used: a valid OK entry selects the frames
+# pending: listed as not OK / not listed, and the trajectory has no frames (consistent)
+# invalid: the manifest or this run's entry is malformed (blocking)
+# stale: listed as not OK / not listed although the trajectory has frames (blocking)
+SAMPLE_STATES = ("not-applicable", "disabled", "absent", "used", "pending", "invalid", "stale")
+SAMPLE_BLOCKING_STATES = ("invalid", "stale")
+
+
+def _sample_index_errors(indices: Any, where: str) -> list[str]:
+    if not isinstance(indices, list):
+        return [f"{where}: 'indices' must be a list, got {type(indices).__name__}"]
+    errors: list[str] = []
+    bad = [value for value in indices if isinstance(value, bool) or not isinstance(value, int)]
+    if bad:
+        errors.append(f"{where}: non-integer indices {bad[:5]}")
+    negative = [value for value in indices if isinstance(value, int) and not isinstance(value, bool) and value < 0]
+    if negative:
+        errors.append(f"{where}: negative indices {negative[:5]}")
+    counts = Counter(value for value in indices if isinstance(value, int) and not isinstance(value, bool))
+    duplicates = sorted(value for value, count in counts.items() if count > 1)
+    if duplicates:
+        errors.append(f"{where}: duplicate indices {duplicates[:5]} (refusing to de-duplicate silently)")
+    return errors
+
+
+def read_step2_sample(trajectory: Trajectory) -> dict[str, Any]:
+    """Look up this trajectory in its Step2 root's ``step2_sample.json``.
+
+    Returns ``{"state", "path", "sha256", "indices", "run_status", "errors",
+    "warnings"}``. ``state`` distinguishes a missing manifest (``absent``)
+    from a manifest that exists but is unusable (``invalid``), a run that the
+    manifest does not list (``not-listed``) and a run it lists without an OK
+    selection (``listed-not-ok``); the last two are resolved against the parsed
+    frame count by :func:`analyze_trajectory`. A malformed file is never
+    treated as if no sampling manifest existed.
+    """
+
+    result: dict[str, Any] = {
+        "state": "not-applicable",
+        "path": None,
+        "sha256": None,
+        "indices": None,
+        "run_status": None,
+        "errors": [],
+        "warnings": [],
+    }
     if trajectory.stage != "Step2" or trajectory.stage_root is None:
-        return None
-    sample = trajectory.stage_root / "step2_sample.json"
+        return result
+    sample = trajectory.stage_root / SAMPLE_MANIFEST
     if not sample.is_file():
-        return None
+        result["state"] = "absent"
+        return result
+    result["path"] = str(sample)
+    result["sha256"] = sha256_file(sample)
+    result["state"] = "invalid"
     try:
         payload = json.loads(sample.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        result["errors"].append(f"unreadable or not valid JSON ({type(exc).__name__}: {exc})")
+        return result
+    if not isinstance(payload, dict):
+        result["errors"].append(f"top level must be an object, got {type(payload).__name__}")
+        return result
+    if "format" in payload and payload["format"] != SAMPLE_FORMAT:
+        result["errors"].append(f"format is {payload['format']!r}, expected {SAMPLE_FORMAT!r}")
+        return result
+    runs = payload.get("runs")
+    if not isinstance(runs, list):
+        result["errors"].append(f"malformed runs: expected a list, got {type(runs).__name__}")
+        return result
+    for position, row in enumerate(runs):
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("relative_path"), str)
+            or not row["relative_path"].strip("/")
+        ):
+            result["errors"].append(f"malformed runs[{position}]: needs an object with a non-empty relative_path")
+    if result["errors"]:
+        return result
     case_relative = Path(trajectory.directory).relative_to(trajectory.stage_root).as_posix()
-    for row in payload.get("runs", []) or []:
-        if str(row.get("relative_path", "")).strip("/") == case_relative and row.get("status") == "OK":
-            indices = row.get("indices")
-            if isinstance(indices, list):
-                return sorted({int(value) for value in indices})
-    return None
+    matches = [(position, row) for position, row in enumerate(runs) if row["relative_path"].strip("/") == case_relative]
+    if not matches:
+        result["state"] = "not-listed"
+        return result
+    distinct = {
+        json.dumps({"status": row.get("status"), "indices": row.get("indices")}, sort_keys=True) for _, row in matches
+    }
+    if len(distinct) > 1:
+        positions = [position for position, _ in matches]
+        result["errors"].append(f"ambiguous: runs{positions} all match {case_relative!r} with different selections")
+        return result
+    if len(matches) > 1:
+        result["warnings"].append(
+            f"{len(matches)} identical step2_sample.json entries for {case_relative!r}; using one"
+        )
+    position, row = matches[0]
+    where = f"runs[{position}] ({case_relative})"
+    status = row.get("status")
+    result["run_status"] = status
+    if not isinstance(status, str):
+        result["errors"].append(f"{where}: 'status' must be a string")
+        return result
+    if status != "OK":
+        result["state"] = "listed-not-ok"
+        return result
+    errors = _sample_index_errors(row.get("indices"), where)
+    kept = row.get("kept_frames")
+    if (
+        not errors
+        and kept is not None
+        and (isinstance(kept, bool) or not isinstance(kept, int) or kept != len(row["indices"]))
+    ):
+        errors.append(f"{where}: kept_frames={kept!r} disagrees with {len(row['indices'])} listed indices")
+    if errors:
+        result["errors"].extend(errors)
+        return result
+    result["state"] = "listed"
+    result["indices"] = sorted(row["indices"])
+    return result
+
+
+def _format_frame_range(frames_parsed: int) -> str:
+    return f"{frames_parsed} parsed frame(s), indices 0-{frames_parsed - 1}" if frames_parsed else "no parsed frames"
 
 
 def analyze_trajectory(trajectory: Trajectory, config: ExportConfig) -> TrajectoryAnalysis:
@@ -614,11 +739,35 @@ def analyze_trajectory(trajectory: Trajectory, config: ExportConfig) -> Trajecto
             contcar.get_chemical_symbols(), contcar.cell.array, contcar.get_scaled_positions(wrap=False)
         )
 
-    sampled = _step2_sample_indices(trajectory) if config.use_step2_sample else None
-    if sampled is not None:
+    if config.use_step2_sample:
+        lookup = read_step2_sample(trajectory)
+    else:
+        lookup = {
+            "state": "disabled" if trajectory.stage == "Step2" else "not-applicable",
+            "path": None,
+            "sha256": None,
+            "indices": None,
+            "run_status": None,
+            "errors": [],
+            "warnings": [],
+        }
+    analysis.sample_manifest = lookup["path"]
+    analysis.sample_manifest_sha256 = lookup["sha256"]
+    analysis.sample_run_status = lookup["run_status"]
+    analysis.sample_errors = list(lookup["errors"])
+    analysis.warnings.extend(lookup["warnings"])
+    sampled: list[int] | None = lookup["indices"]
+    sampled_set: set[int] | None
+    if lookup["state"] in {"not-applicable", "disabled", "absent"}:
+        analysis.sample_state = lookup["state"]
+        sampled_set = None  # stride selection
+    else:
+        # A sampling manifest governs this Step2 root: never fall back to stride.
         analysis.selection = "step2_sample"
+        sampled_set = set(sampled or [])
+        analysis.sample_state = {"listed": "used", "invalid": "invalid"}.get(lookup["state"], lookup["state"])
+    if sampled is not None:
         analysis.sampled_indices = len(sampled)
-    sampled_set = set(sampled) if sampled is not None else None
 
     try:
         from ase.io import iread
@@ -766,13 +915,7 @@ def analyze_trajectory(trajectory: Trajectory, config: ExportConfig) -> Trajecto
         analysis.warnings.append(
             f"OSZICAR has {analysis.oszicar_steps} MD steps but OUTCAR has {analysis.ionic_blocks} ionic blocks"
         )
-    if sampled is not None:
-        rejected_sampled = sorted(set(sampled) & {row["source_frame"] for row in analysis.rejected})
-        missing = sorted(set(sampled) - set(range(analysis.frames_parsed)))
-        if rejected_sampled:
-            analysis.warnings.append(f"{len(rejected_sampled)} step2_sample frame(s) failed QC and were dropped")
-        if missing:
-            analysis.warnings.append(f"{len(missing)} step2_sample index(es) beyond the parsed OUTCAR")
+    _resolve_sampling(analysis, sampled)
 
     chemistry = trajectory.chemistry or {}
     if chemistry.get("ligand") and analysis.elements and "P" not in analysis.elements:
@@ -788,6 +931,12 @@ def analyze_trajectory(trajectory: Trajectory, config: ExportConfig) -> Trajecto
     if analysis.frames_parsed == 0:
         analysis.status = "empty"
         analysis.reasons.append("no readable labelled frames")
+    elif analysis.sample_state in SAMPLE_BLOCKING_STATES:
+        analysis.status = "sampling_invalid"
+        analysis.reasons.extend(problem["detail"] for problem in analysis.sampling_problems)
+    elif analysis.sample_indices_missing:
+        analysis.status = "sampling_inconsistent"
+        analysis.reasons.extend(problem["detail"] for problem in analysis.sampling_problems)
     elif not analysis.complete:
         analysis.status = "incomplete"
         analysis.reasons.append("OUTCAR has no completion marker (running, killed or crashed)")
@@ -795,6 +944,89 @@ def analyze_trajectory(trajectory: Trajectory, config: ExportConfig) -> Trajecto
         analysis.status = "no_usable_frames"
         analysis.reasons.append("every frame failed QC or selection")
     return analysis
+
+
+def _resolve_sampling(analysis: TrajectoryAnalysis, sampled: list[int] | None) -> None:
+    """Record the complete step2_sample.json outcome and any blocking inconsistency.
+
+    Invariants (enforced here):
+      requested == present + missing           (disjoint)
+      present   == selected + rejected_by_qc   (disjoint)
+    ``missing`` (requested but not parsed from the OUTCAR) and an invalid or
+    stale manifest are blocking; QC rejection of a present frame is reported
+    but legitimate.
+    """
+
+    tid = analysis.trajectory.trajectory_id
+    manifest = analysis.sample_manifest
+    if analysis.sample_state == "invalid":
+        analysis.sampling_problems.append(
+            {
+                "trajectory_id": tid,
+                "manifest": manifest,
+                "kind": "invalid_manifest",
+                "detail": f"{manifest} is invalid for this run: " + "; ".join(analysis.sample_errors),
+            }
+        )
+        return
+    if analysis.sample_state in {"not-listed", "listed-not-ok"}:
+        if analysis.frames_parsed == 0:
+            analysis.sample_state = "pending"
+            return
+        listed = (
+            "does not list this run"
+            if analysis.sample_state == "not-listed"
+            else f"lists this run as {analysis.sample_run_status!r}, not 'OK'"
+        )
+        analysis.sample_state = "stale"
+        analysis.sampling_problems.append(
+            {
+                "trajectory_id": tid,
+                "manifest": manifest,
+                "kind": "stale_manifest",
+                "parsed_frames": analysis.frames_parsed,
+                "detail": (
+                    f"{manifest} {listed}, but the OUTCAR has {_format_frame_range(analysis.frames_parsed)}; "
+                    "re-run `iface vasp step2-sample` for this root (or export with --no-step2-sample)"
+                ),
+            }
+        )
+        return
+    if analysis.sample_state != "used" or sampled is None:
+        return
+    rejected = {int(row["source_frame"]) for row in analysis.rejected}
+    selected = sorted(frame.source_frame for frame in analysis.frames)
+    requested = sorted(sampled)
+    present = [index for index in requested if index < analysis.frames_parsed]
+    missing = [index for index in requested if index >= analysis.frames_parsed]
+    rejected_by_qc = [index for index in present if index in rejected]
+    if sorted(selected + rejected_by_qc) != present or set(present) & set(missing):
+        raise AssertionError(f"step2_sample bookkeeping violated for {tid}")
+    analysis.sample_indices_requested = requested
+    analysis.sample_indices_present = present
+    analysis.sample_indices_selected = selected
+    analysis.sample_indices_rejected_by_qc = rejected_by_qc
+    analysis.sample_indices_missing = missing
+    if rejected_by_qc:
+        analysis.warnings.append(
+            f"step2_sample requested {len(requested)} frame(s): {len(present)} present, "
+            f"{len(rejected_by_qc)} rejected by QC {rejected_by_qc[:10]}, {len(selected)} selected"
+        )
+    if missing:
+        shown = ", ".join(map(str, missing[:10])) + (" ..." if len(missing) > 10 else "")
+        analysis.sampling_problems.append(
+            {
+                "trajectory_id": tid,
+                "manifest": manifest,
+                "kind": "missing_requested_frames",
+                "missing_indices": missing,
+                "parsed_frames": analysis.frames_parsed,
+                "detail": (
+                    f"{manifest} requests frame(s) {shown} that are not in the parsed OUTCAR "
+                    f"({_format_frame_range(analysis.frames_parsed)}); the sampling manifest is stale or inconsistent"
+                ),
+            }
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1066,7 +1298,7 @@ class ExportPlan:
     type_map: list[str]
 
 
-def plan_export(roots: Sequence[str | Path], config: ExportConfig) -> ExportPlan:
+def plan_export(roots: Sequence[str | Path], config: ExportConfig, *, require_usable: bool = True) -> ExportPlan:
     trajectories = discover_trajectories(roots, layout=config.layout)
     if not trajectories:
         raise SafetyError(f"No VASP OUTCAR trajectories found below {', '.join(map(str, roots))}")
@@ -1092,7 +1324,7 @@ def plan_export(roots: Sequence[str | Path], config: ExportConfig) -> ExportPlan
         analyses.append(analysis)
 
     usable = [analysis for analysis in analyses if analysis.status in {"ok", "ok_incomplete"} and analysis.frames]
-    if not usable:
+    if not usable and require_usable:
         raise SafetyError("No trajectory has usable frames after QC; see the discovery report")
     groups = assign_groups(usable, config.group_by)
     group_members: dict[str, list[TrajectoryAnalysis]] = defaultdict(list)
@@ -1129,6 +1361,49 @@ def plan_export(roots: Sequence[str | Path], config: ExportConfig) -> ExportPlan
     )
 
 
+USABLE_STATUSES = ("ok", "ok_incomplete")
+
+
+def _indices_text(values: Sequence[int] | None) -> str | None:
+    return None if values is None else " ".join(str(value) for value in values)
+
+
+def _sample_counts(analysis: TrajectoryAnalysis) -> dict[str, int | None]:
+    def count(values: Sequence[int] | None) -> int | None:
+        return None if values is None else len(values)
+
+    selected = count(analysis.sample_indices_selected)
+    exported = None
+    if selected is not None:
+        exported = selected if analysis.status in USABLE_STATUSES and analysis.frames else 0
+    return {
+        "sample_count_requested": count(analysis.sample_indices_requested),
+        "sample_count_present": count(analysis.sample_indices_present),
+        "sample_count_rejected_by_qc": count(analysis.sample_indices_rejected_by_qc),
+        "sample_count_selected": selected,
+        "sample_count_missing": count(analysis.sample_indices_missing),
+        "sample_count_exported": exported,
+    }
+
+
+def _sampling_row(analysis: TrajectoryAnalysis) -> dict[str, Any]:
+    """Everything needed to reconstruct the step2_sample.json outcome from trajectories.csv."""
+
+    return {
+        "sample_state": analysis.sample_state,
+        "sample_manifest": analysis.sample_manifest,
+        "sample_manifest_sha256": analysis.sample_manifest_sha256,
+        "sample_run_status": analysis.sample_run_status,
+        **_sample_counts(analysis),
+        "sample_indices_requested": _indices_text(analysis.sample_indices_requested),
+        "sample_indices_present": _indices_text(analysis.sample_indices_present),
+        "sample_indices_selected": _indices_text(analysis.sample_indices_selected),
+        "sample_indices_rejected_by_qc": _indices_text(analysis.sample_indices_rejected_by_qc),
+        "sample_indices_missing": _indices_text(analysis.sample_indices_missing),
+        "sample_errors": "; ".join(analysis.sample_errors),
+    }
+
+
 def _trajectory_row(analysis: TrajectoryAnalysis, plan: ExportPlan | None) -> dict[str, Any]:
     trajectory = analysis.trajectory
     chemistry = trajectory.chemistry or {}
@@ -1161,7 +1436,8 @@ def _trajectory_row(analysis: TrajectoryAnalysis, plan: ExportPlan | None) -> di
         "frames_rejected": len(analysis.rejected),
         "frames_selected": len(analysis.frames),
         "selection": analysis.selection if analysis.status != "stage_not_selected" else None,
-        "step2_sample_indices": analysis.sampled_indices,
+        "step2_sample_indices": analysis.sampled_indices,  # legacy alias of sample_count_requested
+        **_sampling_row(analysis),
         "oszicar_steps": analysis.oszicar_steps,
         "scf_nelm": analysis.scf_nelm,
         "scf_unconverged_steps": analysis.scf_unconverged_steps,
@@ -1197,6 +1473,48 @@ def _rejection_reasons(analyses: Iterable[TrajectoryAnalysis]) -> dict[str, int]
             for reason in str(row["reason"]).split("; "):
                 counter[re.sub(r"\d+(?:\.\d+)?", "#", reason)] += 1
     return dict(counter.most_common())
+
+
+def sampling_problems(analyses: Iterable[TrajectoryAnalysis]) -> list[dict[str, Any]]:
+    """Blocking step2_sample.json problems (invalid/stale manifest, missing requested frames)."""
+
+    return [problem for analysis in analyses for problem in analysis.sampling_problems]
+
+
+def _sampling_summary(analyses: Sequence[TrajectoryAnalysis]) -> dict[str, Any]:
+    considered = [analysis for analysis in analyses if analysis.status != "stage_not_selected"]
+    used = [analysis for analysis in considered if analysis.sample_state == "used"]
+    totals = {key: 0 for key in ("requested", "present", "rejected_by_qc", "selected", "missing", "exported")}
+    for analysis in used:
+        for key, value in _sample_counts(analysis).items():
+            totals[key.removeprefix("sample_count_")] += int(value or 0)
+    qc_rejected: list[dict[str, Any]] = []
+    for analysis in used:
+        reasons = {int(row["source_frame"]): row["reason"] for row in analysis.rejected}
+        for index in analysis.sample_indices_rejected_by_qc or []:
+            qc_rejected.append(
+                {"trajectory_id": analysis.trajectory.trajectory_id, "index": index, "reason": reasons[index]}
+            )
+    problems = sampling_problems(considered)
+    return {
+        "state_counts": dict(sorted(Counter(analysis.sample_state for analysis in considered).items())),
+        "trajectories_using_step2_sample": len(used),
+        "totals": totals,
+        "manifests": {
+            analysis.sample_manifest: analysis.sample_manifest_sha256
+            for analysis in sorted(considered, key=lambda item: str(item.sample_manifest))
+            if analysis.sample_manifest
+        },
+        "qc_rejected_requested_frames": qc_rejected,
+        "blocking": bool(problems),
+        "problems": problems,
+        "invariants": [
+            "requested = present + missing (disjoint)",
+            "present = selected + rejected_by_qc (disjoint)",
+            "exported = selected when the trajectory is exported, else 0",
+            "missing requested frames or an invalid/stale manifest block export and readiness",
+        ],
+    }
 
 
 def _plan_summary(plan: ExportPlan) -> dict[str, Any]:
@@ -1235,6 +1553,7 @@ def _plan_summary(plan: ExportPlan) -> dict[str, Any]:
         "frames_by_split_coverage": _counts_by(usable_rows, "split", "coverage_pct"),
         "type_map": plan.type_map,
         "leakage": plan.leakage,
+        "sampling": _sampling_summary(plan.analyses),
         "problem_trajectories": [
             {
                 "trajectory_id": row["trajectory_id"],
@@ -1251,7 +1570,7 @@ def _plan_summary(plan: ExportPlan) -> dict[str, Any]:
 def discover_report(roots: Sequence[str | Path], config: ExportConfig) -> dict[str, Any]:
     """Read-only inventory plus the split the export would produce."""
 
-    plan = plan_export(roots, config)
+    plan = plan_export(roots, config, require_usable=False)
     return {
         "schema": f"{SCHEMA}-plan",
         "schema_version": 1,
@@ -1409,7 +1728,17 @@ def export_dataset(
 
     from .packaging import _extxyz_frame_text
 
-    plan = plan_export(roots, config)
+    plan = plan_export(roots, config, require_usable=False)
+    problems = sampling_problems(plan.analyses)
+    if problems:
+        details = "\n".join(f"  - {problem['trajectory_id']}: {problem['detail']}" for problem in problems[:20])
+        more = f"\n  ... and {len(problems) - 20} more" if len(problems) > 20 else ""
+        raise SafetyError(
+            f"step2_sample.json is inconsistent with the parsed trajectories ({len(problems)} problem(s)); "
+            f"refusing to write a canonical dataset:\n{details}{more}"
+        )
+    if not plan.usable:
+        raise SafetyError("No trajectory has usable frames after QC; see the discovery report")
     if plan.leakage["leakage_detected"]:
         raise SafetyError(f"Split leakage detected; refusing to write: {plan.leakage['problems'][:3]}")
     out = Path(output).expanduser().resolve()
@@ -1545,6 +1874,11 @@ def export_dataset(
         "deepmd": {split: str(deepmd_root / split) for split in SPLITS},
         "deepmd_systems": systems,
         "split_hash": split_identity,
+        "sampling": {
+            key: value
+            for key, value in _sampling_summary(plan.analyses).items()
+            if key in {"state_counts", "trajectories_using_step2_sample", "totals", "manifests", "invariants"}
+        },
         "file_hashes": file_hashes,
         "dataset_hash": dataset_content_hash(file_hashes),
         "summary": _plan_summary(plan),
