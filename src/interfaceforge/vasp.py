@@ -2310,7 +2310,7 @@ def _step1_density_init_plan(
         wrap_launcher_with_density_init,
     )
     from .density_init.neural_paw import NeuralPawInitializer
-    from .density_init.workflow import backend_option_args, hook_command
+    from .density_init.workflow import backend_option_args, hook_command, potcar_declaration_args
 
     label = relative.as_posix() or "."
     if istart == 1 and not precondition:
@@ -2342,6 +2342,7 @@ def _step1_density_init_plan(
     )
     grid, grid_source = reusable_grid(run, run, target_incar=tags, target_poscar=structure)
     extra = backend_option_args(dict(options.get("backend_options") or {}))
+    extra += potcar_declaration_args(options.get("potcar_definitions"), options.get("potcar_generator"))
     if grid is not None:
         extra += ["--grid", *(str(value) for value in grid)]
     else:
@@ -2410,6 +2411,8 @@ def prepare_step1_series(
     precondition: bool = False,
     density_init: str | None = None,
     density_init_options: Mapping[str, Any] | None = None,
+    potcar_definitions: str | Path | None = None,
+    potcar_generator: str | None = None,
 ) -> dict[str, Any]:
     """Promote a recursive OPT tree into a sibling ``Step1`` preheat tree.
 
@@ -2451,6 +2454,12 @@ def prepare_step1_series(
     takes ``magmom_source``, ``spin_channel``, ``on_failure``,
     ``interfaceforge_command`` and ``backend_options``.
 
+    Every run's POTCAR provenance (SHA-256, dataset per element) is recorded
+    in ``step1_manifest.json``.  ``potcar_definitions``/``potcar_generator``
+    declare how the POTCARs were generated (e.g. ``POTCAR_gen --defs FILE``);
+    the declaration is checked against each inherited POTCAR, never used to
+    generate one, and is passed on to the launch-time density initializer.
+
     A launcher (``runvasp.sh`` / ``run.slurm``) is also accepted from the
     current working directory — the folder the command is run from — even
     when it sits above ``source`` and so falls outside the normal
@@ -2478,6 +2487,10 @@ def prepare_step1_series(
     elif density_init != "neural-paw":
         raise SafetyError(f"--density-init must be standard or neural-paw, got {density_init!r}")
     density_options = dict(density_init_options or {})
+    if potcar_definitions:
+        density_options["potcar_definitions"] = str(Path(potcar_definitions).expanduser().resolve())
+    if potcar_generator:
+        density_options["potcar_generator"] = potcar_generator
     if density_init is not None:
         from .density_init.launch import ON_FAILURE
 
@@ -2487,10 +2500,9 @@ def prepare_step1_series(
         density_options.setdefault("backend_options", {})
         if density_options["on_failure"] not in ON_FAILURE:
             raise SafetyError(f"--density-init-on-failure must be one of {', '.join(ON_FAILURE)}")
-        if precondition and density_options["on_failure"] == "abort":
-            raise SafetyError("--density-init-on-failure abort is not supported with --precondition")
 
     from .aimd import resolve_protocol
+    from .density_init.potcar import potcar_provenance
 
     nsw = int(resolve_protocol(protocol)["step1"]["nsw"])
     invocation_dir = Path.cwd().resolve()
@@ -2591,6 +2603,15 @@ def prepare_step1_series(
             )
         if not ({"runvasp.sh", "run.slurm"} & resolved_inputs.keys()):
             raise SafetyError(f"No runvasp.sh or run.slurm found for OPT run {run}")
+        try:
+            potcar_record = potcar_provenance(
+                resolved_inputs.get("POTCAR", run / "POTCAR"),
+                elements,
+                definitions=potcar_definitions,
+                generator=potcar_generator,
+            )
+        except SafetyError as exc:
+            raise SafetyError(f"{relative.as_posix() or '.'}: {exc}") from exc
 
         rendered = _render_step1_incar(
             (run / "INCAR").read_text(encoding="utf-8", errors="ignore"),
@@ -2664,6 +2685,7 @@ def prepare_step1_series(
                 "precondition_incar": precondition_incar,
                 "wrapped_launcher": wrapped_launcher,
                 "density_init": density_plan,
+                "potcar": potcar_record,
             }
         )
 
@@ -2719,6 +2741,12 @@ def prepare_step1_series(
                 "keep_velocities": bool(keep_velocities),
                 "precondition": bool(precondition),
                 "density_init": _step1_density_init_summary(density_init, density_options, plans),
+                "potcar_declaration": {
+                    "potcar_definitions": (
+                        str(Path(potcar_definitions).expanduser().resolve()) if potcar_definitions else None
+                    ),
+                    "potcar_generator": potcar_generator,
+                },
                 "warnings": warnings,
                 "precedence": {
                     "ordinary_incar_tags": "Step1 template",
@@ -2741,6 +2769,7 @@ def prepare_step1_series(
                         "step1_incar_sha256": _sha256_file(plan["destination"] / "INCAR"),
                         "step1_poscar_sha256": _sha256_file(plan["destination"] / "POSCAR"),
                         "density_init": plan["density_init"],
+                        "potcar": plan["potcar"],
                     }
                     for plan in plans
                 ],

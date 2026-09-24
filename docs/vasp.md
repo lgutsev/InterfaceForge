@@ -166,7 +166,12 @@ preparation fails with a clear message.
 each fresh-start run's launcher so the job runs `iface vasp
 initialize-density` on the compute node immediately before the fresh-start
 SCF (the preconditioner under `--precondition`). The signed INCAR `MAGMOM` stays
-authoritative and inference failures fall back to the standard start. See
+authoritative and inference failures fall back to the standard start
+(`--density-init-on-failure abort` stops the job instead); the job records any
+fallback in `density_init_fallback.json`, and `step1-status` reports
+requested / compatible / executed per run. `--potcar-definitions FILE` declares
+the POTCAR_gen mapping the POTCARs were made with; it is checked against each
+POTCAR and recorded in `step1_manifest.json`. See
 [Neural density initialization](density-init.md) for installation, the NiO
 AFM-II caveat, POTCAR compatibility, and the benchmark.
 

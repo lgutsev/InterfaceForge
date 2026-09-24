@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
-from ..errors import InterfaceForgeError, SafetyError
+from ..errors import DependencyError, InterfaceForgeError, SafetyError
 from ..vasp import parse_incar, update_incar
 from .base import (
     MAGMOM_SOURCES,
@@ -62,6 +62,7 @@ from .inputs import (
     structure_identity,
 )
 from .neural_paw import InferenceError, NeuralPawInitializer
+from .potcar import potcar_provenance
 
 REPORT_NAME = "density_init.json"
 LOG_NAME = "density_init.log"
@@ -318,8 +319,14 @@ def initialize_density(
     force: bool = False,
     set_icharg: bool = True,
     backend_options: dict[str, Any] | None = None,
+    potcar_definitions: str | Path | None = None,
+    potcar_generator: str | None = None,
 ) -> dict[str, Any]:
-    """Generate (and by default promote) an initial density for one VASP run."""
+    """Generate (and by default promote) an initial density for one VASP run.
+
+    ``potcar_definitions`` / ``potcar_generator`` only *declare* how the POTCAR
+    was made; the declaration is recorded and must match the POTCAR actually present.
+    """
 
     if magmom_source not in MAGMOM_SOURCES:
         raise SafetyError(f"--magmom-source must be one of {', '.join(MAGMOM_SOURCES)}")
@@ -359,6 +366,9 @@ def initialize_density(
             "A neural density is only meaningful for a fresh electronic start; set ISTART = 0 or "
             "remove the WAVECAR"
         )
+    potcar_record = potcar_provenance(
+        run / "POTCAR", species, definitions=potcar_definitions, generator=potcar_generator
+    )
     settings = magnetic_settings(incar, len(species))
     magnetism = resolve_magnetism(
         settings, magmom_source=magmom_source, spin_channel=spin_channel, backend=initializer
@@ -409,6 +419,7 @@ def initialize_density(
         "interfaceforge": interfaceforge_provenance(),
         "structure": structure_identity(run / "POSCAR"),
         "inputs": {"required": list(REQUIRED_INPUTS), "sha256_before": hashes},
+        "potcar": potcar_record,
         "grid": {"dims": list(resolved_grid) if resolved_grid else None, "source": plan.grid_source},
         "nelect": {"value": nelect_value, "source": nelect_source},
         "lmaxmix": plan.lmaxmix,
@@ -608,6 +619,9 @@ def initialize_density(
             record["status"] = "FAILED"
             record["active"] = False
             record["error"] = f"{type(exc).__name__}: {exc}"
+            record["failure_code"] = getattr(exc, "code", None) or (
+                "BACKEND_UNAVAILABLE" if isinstance(exc, DependencyError) else None
+            )
             record["rolled_back"] = [kind for kind, _, _ in rollback]
             timing["total_s"] = time.perf_counter() - wall_start
             record["timing"] = timing
@@ -670,6 +684,17 @@ def backend_option_args(options: dict[str, Any]) -> list[str]:
             raise SafetyError(f"Unknown density-init backend option {key!r}")
         flag = BACKEND_OPTION_FLAGS[key]
         args.extend([flag] if value is True else [flag, str(value)])
+    return args
+
+
+def potcar_declaration_args(definitions: str | Path | None, generator: str | None) -> list[str]:
+    """``initialize-density`` flags declaring how the POTCAR was generated."""
+
+    args: list[str] = []
+    if definitions:
+        args += ["--potcar-definitions", str(definitions)]
+    if generator:
+        args += ["--potcar-generator", str(generator)]
     return args
 
 

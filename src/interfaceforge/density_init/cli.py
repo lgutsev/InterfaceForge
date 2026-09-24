@@ -47,6 +47,21 @@ def add_backend_options(parser: argparse.ArgumentParser, *, prefix: str = "") ->
     )
 
 
+def add_potcar_declaration_options(parser: argparse.ArgumentParser) -> None:
+    """How the POTCAR was generated (recorded, and checked against the POTCAR itself)."""
+
+    group = parser.add_argument_group("POTCAR provenance")
+    group.add_argument(
+        "--potcar-definitions",
+        help=(
+            "Element-to-POTCAR definitions file the POTCAR was generated with (POTCAR_gen format, "
+            "'El|variant'). Recorded with its SHA-256 and refused if the "
+            "POTCAR's datasets disagree with it. Never used to (re)generate a POTCAR"
+        ),
+    )
+    group.add_argument("--potcar-generator", help="POTCAR generator to record, e.g. /home/user/bin/POTCAR_gen")
+
+
 def backend_options(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "python": args.ndi_python,
@@ -77,6 +92,8 @@ def cmd_initialize_density(args: argparse.Namespace) -> int:
             force=args.force,
             set_icharg=not args.no_set_icharg,
             backend_options=backend_options(args) if args.backend != "standard" else None,
+            potcar_definitions=args.potcar_definitions,
+            potcar_generator=args.potcar_generator,
         )
     )
     return 0
@@ -111,6 +128,8 @@ def cmd_density_init_bench_prepare(args: argparse.Namespace) -> int:
             neural_init=args.neural_init,
             interfaceforge_command=args.interfaceforge_command,
             backend_options={k: v for k, v in backend_options(args).items() if v is not None},
+            potcar_definitions=args.potcar_definitions,
+            potcar_generator=args.potcar_generator,
             dry_run=args.dry_run,
         )
     )
@@ -189,6 +208,7 @@ def register_vasp_commands(vasp_commands: argparse._SubParsersAction) -> None:
         help="Leave INCAR untouched (VASP then ignores the CHGCAR unless ICHARG = 1 is already set)",
     )
     add_backend_options(init)
+    add_potcar_declaration_options(init)
     init.set_defaults(func=cmd_initialize_density)
 
     probe = vasp_commands.add_parser(
@@ -231,6 +251,7 @@ def register_vasp_commands(vasp_commands: argparse._SubParsersAction) -> None:
     )
     prepare.add_argument("--dry-run", action="store_true")
     add_backend_options(prepare)
+    add_potcar_declaration_options(prepare)
     prepare.set_defaults(func=cmd_density_init_bench_prepare)
 
     compare = bench_commands.add_parser("compare", help="Compare finished arms; write JSON/Markdown/TSV reports")

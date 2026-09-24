@@ -26,6 +26,7 @@ from unittest import mock
 from density_init_fixtures import NIO_INCAR, NIO_MAGMOM, write_run
 
 from interfaceforge.density_init import InferenceError, NeuralPawInitializer, initialize_density
+from interfaceforge.density_init.status import density_init_run_status
 from interfaceforge.errors import DependencyError
 
 STUB_FILES = {
@@ -241,6 +242,13 @@ class WorkerContractTests(unittest.TestCase):
         with self.assertRaisesRegex(InferenceError, "augmentation schema differs"):
             initialize_density(run, backend=self.backend, grid=(20, 20, 24), force=True)
         self.assertFalse((run / "CHGCAR").exists())
+        report = json.loads((run / "density_init.json").read_text())
+        self.assertEqual(report["failure_code"], "UNSUPPORTED_POTCAR_SCHEMA")
+        self.assertEqual(report["potcar"]["potcar_variants"], {"Ni": "Ni", "O": "O"})
+        status = density_init_run_status(run, {"requested": "neural-paw", "applied": True})
+        self.assertEqual(status["density_init_status"], "UNSUPPORTED_POTCAR_SCHEMA")
+        self.assertIs(status["density_init_compatible"], False)
+        self.assertIs(status["density_init_executed"], False)
 
     def test_worker_exception_is_reported_and_rolled_back(self) -> None:
         run = write_run(self.tmp / "run")

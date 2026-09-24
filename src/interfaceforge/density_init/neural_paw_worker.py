@@ -118,6 +118,14 @@ def prefetch(out: str, weights_dir: str | None, spin: bool) -> int:
         return 1
 
 
+class PotcarRefused(RuntimeError):
+    """The run's POTCAR cannot (or may not) be seeded by the models; ``code`` is machine-readable."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def _potcar_check(request: dict, structure) -> tuple[list[str], list[str]]:
     """Compare the run's POTCAR datasets with the Materials Project set the models learned.
 
@@ -176,9 +184,12 @@ def run(request_path: str) -> int:
 
         schema_errors, problems = _potcar_check(request, structure)
         if schema_errors:
-            raise RuntimeError("POTCAR incompatible with the models: " + "; ".join(schema_errors))
+            raise PotcarRefused(
+                "UNSUPPORTED_POTCAR_SCHEMA", "POTCAR incompatible with the models: " + "; ".join(schema_errors)
+            )
         if problems and not request.get("allow_potcar_variant"):
-            raise RuntimeError(
+            raise PotcarRefused(
+                "POTCAR_VARIANT_NOT_ALLOWED",
                 "POTCAR datasets differ from the models' training set: "
                 + "; ".join(problems)
                 + " (pass --allow-potcar-variant to proceed out of distribution)"
@@ -304,6 +315,7 @@ def run(request_path: str) -> int:
             {
                 "status": "error",
                 "error": f"{type(exc).__name__}: {exc}",
+                "error_code": getattr(exc, "code", None),
                 "traceback": traceback.format_exc(),
                 "timing": timing,
             },

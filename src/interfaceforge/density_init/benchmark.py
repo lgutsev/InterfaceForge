@@ -32,12 +32,14 @@ from ..errors import SafetyError
 from ..vasp import _write_poscar_without_velocities, parse_incar, update_incar
 from .inputs import magnetic_settings, nonempty, poscar_species, reusable_grid, sha256_file
 from .launch import (
+    FALLBACK_NAME,
     default_interfaceforge_command,
     vasp_command_from_launcher,
     wrap_launcher_with_density_init,
 )
 from .outputs import magnetic_pattern, summarize_run
-from .workflow import backend_option_args, hook_command, initialize_density
+from .potcar import potcar_provenance
+from .workflow import backend_option_args, hook_command, initialize_density, potcar_declaration_args
 
 MANIFEST_NAME = "density_init_bench.json"
 REPORT_JSON = "density_init_bench_report.json"
@@ -45,6 +47,8 @@ REPORT_MD = "density_init_bench_report.md"
 REPORT_TSV = "density_init_bench_report.tsv"
 MODES = ("static", "as-is")
 ARMS = ("standard", "neural")
+#: Inputs that must be byte-identical between the arms (INCAR differs only in the start).
+SHARED_INPUTS = ("POSCAR", "POTCAR", "KPOINTS")
 ORDERS = ("none", "afm-ii", "mixed-sign", "sign-uniform")
 LAUNCHERS = ("runvasp.sh", "run.slurm")
 
@@ -78,6 +82,9 @@ def load_pilot(path: str | Path) -> dict[str, Any]:
         names.add(case["name"])
         src = Path(str(case["source"])).expanduser()
         case["source"] = str((source.parent / src).resolve() if not src.is_absolute() else src)
+        if case.get("potcar_definitions"):
+            defs = Path(str(case["potcar_definitions"])).expanduser()
+            case["potcar_definitions"] = str((source.parent / defs).resolve() if not defs.is_absolute() else defs)
         case.setdefault("structure", "CONTCAR")
         case.setdefault("mode", "static")
         case.setdefault("expect_magnetic_order", "none")
@@ -164,9 +171,17 @@ def prepare_benchmark(
     neural_init: str = "launch",
     interfaceforge_command: str | None = None,
     backend_options: dict[str, Any] | None = None,
+    potcar_definitions: str | Path | None = None,
+    potcar_generator: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Create ``<output_root>/<case>/{standard,neural}`` benchmark arms."""
+    """Create ``<output_root>/<case>/{standard,neural}`` benchmark arms.
+
+    Both arms get the *same* POTCAR (copied once from the source and hash
+    checked).  Its provenance is recorded per case; ``potcar_definitions``
+    (or a case's own ``potcar_definitions`` key) declares the mapping it was
+    generated with and must agree with the POTCAR actually copied.
+    """
 
     if neural_init not in {"launch", "now"}:
         raise SafetyError("--neural-init must be 'launch' or 'now'")
@@ -232,17 +247,26 @@ def prepare_benchmark(
             }
             standard_dir = case_root / "standard"
             neural_dir = case_root / "neural"
-            for name in ("POSCAR", "POTCAR", "KPOINTS"):
-                if (standard_dir / name).is_file() and sha256_file(standard_dir / name) != sha256_file(
-                    neural_dir / name
-                ):
-                    raise SafetyError(f"case {case['name']}: arms differ in {name}")
-            initialize_density(standard_dir, backend="standard")
+            shared = _shared_input_hashes(standard_dir, neural_dir)
+            mismatched = [name for name, same in shared["identical"].items() if not same]
+            if mismatched:
+                raise SafetyError(f"case {case['name']}: arms differ in {', '.join(mismatched)}")
+            case_defs = case.get("potcar_definitions") or potcar_definitions
+            case_generator = case.get("potcar_generator") or potcar_generator
+            potcar = potcar_provenance(
+                standard_dir / "POTCAR",
+                poscar_species(standard_dir / "POSCAR"),
+                definitions=case_defs,
+                generator=case_generator,
+            )
+            initialize_density(
+                standard_dir, backend="standard", potcar_definitions=case_defs, potcar_generator=case_generator
+            )
 
             grid, grid_source = reusable_grid(neural_dir, Path(case["source"]))
             if case.get("grid"):
                 grid, grid_source = tuple(int(x) for x in case["grid"]), "pilot 'grid'"
-            extra = backend_option_args(options)
+            extra = backend_option_args(options) + potcar_declaration_args(case_defs, case_generator)
             launcher_name = arms["neural"]["launcher"]
             launcher_path = neural_dir / launcher_name
             launcher_text = launcher_path.read_text(encoding="utf-8", errors="ignore")
@@ -271,6 +295,8 @@ def prepare_benchmark(
                     magmom_source=magmom_source,
                     grid=grid,
                     backend_options={k: v for k, v in options.items() if v is not None},
+                    potcar_definitions=case_defs,
+                    potcar_generator=case_generator,
                 )
                 initialization["status"] = report["status"]
             else:
@@ -297,6 +323,8 @@ def prepare_benchmark(
                     "incar_magmom": item["magnetism"]["incar_magmom"],
                     "n_ions": item["n_ions"],
                     "arms": arms,
+                    "shared_inputs_sha256": shared["sha256"],
+                    "potcar": potcar,
                     "neural_initialization": initialization,
                 }
             )
@@ -331,6 +359,23 @@ def prepare_benchmark(
     }
 
 
+def _shared_input_hashes(standard: Path, neural: Path) -> dict[str, Any]:
+    """SHA-256 of each shared input in both arms and whether they are identical."""
+
+    hashes: dict[str, dict[str, str | None]] = {}
+    identical: dict[str, bool] = {}
+    for name in SHARED_INPUTS:
+        pair = {
+            arm: sha256_file(directory / name) if nonempty(directory / name) else None
+            for arm, directory in (("standard", standard), ("neural", neural))
+        }
+        if name == "KPOINTS" and pair["standard"] is None and pair["neural"] is None:
+            continue  # KSPACING runs have no KPOINTS in either arm
+        hashes[name] = pair
+        identical[name] = pair["standard"] is not None and pair["standard"] == pair["neural"]
+    return {"sha256": hashes, "identical": identical}
+
+
 # ----------------------------------------------------------------------------
 # compare
 # ----------------------------------------------------------------------------
@@ -360,7 +405,14 @@ def _case_metrics(row: dict[str, Any], tolerances: dict[str, float]) -> dict[str
     patterns = {arm: magnetic_pattern(arms[arm]["local_moments"], reference) for arm in ARMS}
     states = {arm: arms[arm]["electronic"]["state"] for arm in ARMS}
     init = neu["density_init"]
-    init_ok = init.get("status") == "PROMOTED" and bool(init.get("active"))
+    neural_dir = Path(row["arms"]["neural"]["directory"])
+    fallback = nonempty(neural_dir / FALLBACK_NAME)
+    init_ok = init.get("status") == "PROMOTED" and bool(init.get("active")) and not fallback
+    shared = _shared_input_hashes(Path(row["arms"]["standard"]["directory"]), neural_dir)
+    same_inputs = all(shared["identical"].values())
+    recorded = row.get("shared_inputs_sha256")
+    if recorded is not None and recorded != shared["sha256"]:
+        same_inputs = False  # an arm's input was replaced after prepare (e.g. a regenerated POTCAR)
     complete = all(state in {"CONVERGED", "UNCONVERGED"} for state in states.values())
     if states["neural"] == "NOT_RUN" and init.get("status") == "FAILED":
         complete = True  # the initializer failure itself is the neural arm's outcome
@@ -381,6 +433,7 @@ def _case_metrics(row: dict[str, Any], tolerances: dict[str, float]) -> dict[str
     moment_diff = _max_abs_diff(std["local_moments"], neu["local_moments"])
 
     checks: dict[str, bool | None] = {
+        "same_inputs": same_inputs,
         "both_converged": None if not complete else states["standard"] == states["neural"] == "CONVERGED",
         "neural_init_active": init_ok if complete else None,
         "energy": None if energy_diff is None else abs(energy_diff) / n_ions <= tolerances["energy_ev_per_atom"],
@@ -399,7 +452,9 @@ def _case_metrics(row: dict[str, Any], tolerances: dict[str, float]) -> dict[str
             if patterns["standard"]["status"] == "UNKNOWN"
             else patterns["standard"]["status"] in {"PRESERVED", "PRESERVED_GLOBAL_FLIP"}
         )
-    if not complete:
+    if not same_inputs:
+        verdict = "INPUT_MISMATCH"
+    elif not complete:
         verdict = "INCOMPLETE"
     elif states["neural"] != "CONVERGED" or not init_ok:
         verdict = "NEURAL_FAILED" if states["standard"] == "CONVERGED" else "BOTH_FAILED"
@@ -424,6 +479,8 @@ def _case_metrics(row: dict[str, Any], tolerances: dict[str, float]) -> dict[str
         "verdict": verdict,
         "electronic_state": states,
         "density_init": init,
+        "neural_fallback_occurred": fallback,
+        "shared_inputs": shared,
         "scf_iterations": {**scf, "difference": _diff(scf["standard"], scf["neural"])},
         "scf_iterations_all_ionic": scf_total,
         "vasp_wall_s": {**wall, "difference": _diff(wall["standard"], wall["neural"])},
@@ -509,7 +566,8 @@ def render_case_table(metrics: dict[str, Any]) -> str:
 
 
 def _aggregate(cases: list[dict[str, Any]]) -> dict[str, Any]:
-    finished = [case for case in cases if case["verdict"] != "INCOMPLETE"]
+    # INPUT_MISMATCH arms are not a valid pair: they block evaluation like unfinished cases.
+    finished = [case for case in cases if case["verdict"] not in {"INCOMPLETE", "INPUT_MISMATCH"}]
     compared = [case for case in finished if case["verdict"] in {"SAME_SOLUTION", "DIFFERENT_SOLUTION"}]
     std_fail = sum(1 for case in finished if case["electronic_state"]["standard"] != "CONVERGED")
     neu_fail = sum(1 for case in finished if case["verdict"] in {"NEURAL_FAILED", "BOTH_FAILED"})
@@ -529,6 +587,7 @@ def _aggregate(cases: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "cases": len(cases),
         "finished": len(finished),
+        "input_mismatch": sum(1 for case in cases if case["verdict"] == "INPUT_MISMATCH"),
         "compared": len(compared),
         "same_solution": sum(1 for case in compared if case["verdict"] == "SAME_SOLUTION"),
         "failures": {"standard": std_fail, "neural": neu_fail},
@@ -563,7 +622,7 @@ def _aggregate(cases: list[dict[str, Any]]) -> dict[str, Any]:
         "claim_policy": (
             "SCF acceleration and end-to-end acceleration are reported separately; inference, model "
             "loading, CHGCAR writing and any grid dry run count against the neural arm. No criterion "
-            "is evaluated until every case has finished."
+            "is evaluated until every case has finished with identical POSCAR/POTCAR/KPOINTS in both arms."
         ),
     }
 
