@@ -182,6 +182,49 @@ POTCAR, which changes the DFT method, and this feature must not do that. Use
 it only for campaigns whose POTCARs already match, or decide on the POTCAR on
 scientific grounds first.
 
+A refused POTCAR is recorded as `failure_code: UNSUPPORTED_POTCAR_SCHEMA`
+(projector mismatch) or `POTCAR_VARIANT_NOT_ALLOWED` (name differs, projectors
+agree) in `density_init.json`, so a status audit can report it without logs.
+
+### POTCAR selection and provenance
+
+POTCAR selection belongs to the VASP workflow, never to the initializer:
+
+```text
+workflow/profile -> choose POTCAR mapping -> POTCAR_gen -> actual POTCAR
+                 -> density-init compatibility check -> neural seed if compatible
+```
+
+The initializer inspects the POTCAR it is given and either seeds it or refuses
+it; it never regenerates or substitutes one. For a controlled test with the
+Materials Project-compatible mapping, generate the POTCAR explicitly, e.g.
+`POTCAR_gen --defs /path/to/POTCAR_DEFS_MP.txt` (plain `POTCAR_gen` keeps the
+production mapping), and keep such runs out of production training datasets:
+`Ni → Ni_pv` changes the reference electronic structure.
+
+Every run's POTCAR provenance is recorded: `density_init.json` → `potcar` and
+each `step1_manifest.json` run → `potcar`, with `potcar_sha256` and the
+dataset per element (`potcar_variants`) read from the POTCAR itself, which is
+authoritative. Declare how it was generated with `--potcar-definitions FILE`
+(and optionally `--potcar-generator PATH`) on `initialize-density`,
+`step1-prepare` or `density-init-bench prepare` (or `potcar_definitions:` per
+pilot case). The declared file is recorded with its SHA-256 and checked
+against the POTCAR: a declaration that disagrees with the actual datasets is
+refused before anything is written. `$POTCAR_DEFS` is deliberately not read,
+since a job environment may export it for an unrelated POTCAR.
+
+```json
+"potcar": {
+  "potcar_generator": "/home/user/bin/POTCAR_gen",
+  "potcar_definitions": "/home/user/bin/POTCAR_DEFS_MP.txt",
+  "potcar_definitions_sha256": "…",
+  "potcar_sha256": "…",
+  "potcar_variants": {"Ni": "Ni_pv", "O": "O"},
+  "declared_variants": {"Ni": "Ni_pv", "O": "O"},
+  "consistent_with_definitions": true
+}
+```
+
 ## File safety
 
 | Situation | Behavior |
@@ -221,7 +264,10 @@ Format `interfaceforge-density-init`, schema version 1. The key fields are:
 - `timing`: `model_load_s`, `inference_s`, `write_s`, `grid_discovery_s`,
   `subprocess_s`, and `total_s`/`overhead_s`, which is what the benchmark
   charges to the neural arm;
-- `warnings`, plus `error` when the status is `FAILED`.
+- `potcar`: POTCAR provenance (see [POTCAR selection and provenance](#potcar-selection-and-provenance));
+- `warnings`, plus `error` and `failure_code` (`UNSUPPORTED_POTCAR_SCHEMA`,
+  `POTCAR_VARIANT_NOT_ALLOWED`, `BACKEND_UNAVAILABLE`, or null) when the status
+  is `FAILED`.
 
 Example (mocked backend):
 [`examples/density-init/example_density_init_nio_afm2.json`](../examples/density-init/example_density_init_nio_afm2.json).
@@ -261,8 +307,37 @@ Instead:
 4. On failure (`--density-init-on-failure standard`, the default), the job
    prints a message and VASP proceeds with its **standard start**. The inputs
    are guaranteed untouched, so a broken ML stack costs seconds rather than an
-   allocation. `abort` stops the job instead; it is not available with
-   `--precondition`.
+   allocation. `abort` stops the job with exit code 3 instead, also under
+   `--precondition` (the job stops before the preconditioner's VASP call and
+   before the MD). Either way the launcher writes `density_init_fallback.json`
+   (`action`, the hook's `exit_code`, UTC time) next to the seeded inputs; a
+   successful hook removes a stale one. The hook is written
+   `hook || density_init_rc=$?`, so launchers running under `set -e` still
+   reach the fallback branch.
+
+### Requested vs executed (`iface vasp step1-status`)
+
+`step1-status` (and `--json`) reports, per run, whether initialization was
+requested, compatible and actually executed, so campaign audits do not depend
+on job logs:
+
+| Field | Meaning |
+|---|---|
+| `density_init_requested` | `neural-paw` or `standard` (from `step1_manifest.json`) |
+| `density_init_compatible` | `true` once the worker accepted the POTCAR, `false` for a refused POTCAR, `null` while unknown |
+| `density_init_executed` | `true` only when a generated density was promoted and VASP reads it (`ICHARG = 1`), with no fallback record |
+| `density_init_status` | `PROMOTED`, `STAGED`, `PENDING` (job not run yet), `SKIPPED` (ISTART = 1 restart), `UNSUPPORTED_POTCAR_SCHEMA`, `POTCAR_VARIANT_NOT_ALLOWED`, `BACKEND_UNAVAILABLE`, `FAILED`, or `NOT_REQUESTED` |
+| `density_init_fallback_occurred` / `_action` | whether the launcher fell back (`standard`) or aborted (`abort`) |
+
+```json
+{"density_init_requested": "neural-paw", "density_init_compatible": false,
+ "density_init_executed": false, "density_init_status": "UNSUPPORTED_POTCAR_SCHEMA",
+ "density_init_fallback_occurred": true, "density_init_fallback_action": "standard"}
+```
+
+The payload also carries a `density_init_tally`. For `--precondition` runs the
+report and fallback record live in `precondition/`, where they are looked up
+too. The detailed `density_init.json` is kept unchanged.
 
 A separate GPU pre-step is also supported. Run `iface vasp initialize-density`
 on each prepared run from a GPU job, then `iface vasp step1-launch`. The launch
@@ -292,9 +367,15 @@ iface vasp density-init-bench compare BENCH --markdown      # per-case tables to
   The neural arm's launcher runs the initializer before VASP with
   `on_failure = abort`, so an initializer failure counts as a neural failure
   rather than silently becoming a standard run.
+- Both arms get the *same* POSCAR/POTCAR/KPOINTS (hash-checked at `prepare`;
+  their SHA-256s and the POTCAR provenance go into the manifest). `compare`
+  re-hashes them: if either arm's input was replaced afterwards (for example
+  a regenerated POTCAR), the case is `INPUT_MISMATCH` and no acceptance
+  criterion is evaluated. A `density_init_fallback.json` in the neural arm
+  makes it a neural failure even if a report says `PROMOTED`.
 - `compare` reports, per case, the table below, plus a verdict:
   `SAME_SOLUTION`, `DIFFERENT_SOLUTION`, `NEURAL_FAILED`, `STANDARD_FAILED`,
-  `BOTH_FAILED` or `INCOMPLETE`.
+  `BOTH_FAILED`, `INPUT_MISMATCH` or `INCOMPLETE`.
 
 | Metric | Standard start | Neural start | Difference |
 | --- | ---: | ---: | ---: |

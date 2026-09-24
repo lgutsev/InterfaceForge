@@ -42,7 +42,15 @@ Runner = Callable[[list[str], Path, Path, float | None], int]
 
 
 class InferenceError(InterfaceForgeError):
-    """The initializer ran but did not produce a usable initial state."""
+    """The initializer ran but did not produce a usable initial state.
+
+    ``code`` is a machine-readable reason when one is known (e.g.
+    ``UNSUPPORTED_POTCAR_SCHEMA``); it is recorded as ``failure_code``.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def subprocess_runner(argv: list[str], cwd: Path, log: Path, timeout: float | None) -> int:
@@ -212,7 +220,8 @@ class NeuralPawInitializer(DensityInitializer):
             raise InferenceError(f"neural-paw worker exited {code} without a result:\n{_tail(log)}")
         if code != 0 or payload.get("status") != "ok":
             raise InferenceError(
-                f"neural-paw inference failed (exit {code}): {payload.get('error')}\n{_tail(log, 10)}"
+                f"neural-paw inference failed (exit {code}): {payload.get('error')}\n{_tail(log, 10)}",
+                code=payload.get("error_code"),
             )
         if not (chgcar.is_file() and chgcar.stat().st_size):
             raise InferenceError("neural-paw worker reported success but wrote no CHGCAR")

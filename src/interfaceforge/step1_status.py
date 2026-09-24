@@ -12,7 +12,10 @@ this reports three things a human checks by hand:
   plus ``ENCUT/ENMAX`` when a ``POTCAR`` is present;
 * **which job is done** -- ``not-started`` / ``running`` / ``stalled?`` /
   ``done`` / ``done-early`` / ``error``, from ``OUTCAR`` completion markers
-  and the last written step.
+  and the last written step;
+* **density initialization** -- requested vs compatible vs executed, the
+  initializer status and whether the launcher fell back to the standard start
+  (``density_init_*`` fields, see :mod:`interfaceforge.density_init.status`).
 
 Never touches a running job; only reads generated files.
 """
@@ -28,6 +31,7 @@ from typing import Any
 
 from .aimd import _first_float, _first_int, preheat_ps
 from .audit import parse_oszicar, read_tail
+from .density_init.status import density_init_run_status
 from .step1_repair import diagnose_step1_run, parse_step1_oszicar
 from .vasp import parse_incar
 
@@ -290,10 +294,18 @@ def step1_status(root: str | Path, *, stale_hours: float = _STALE_HOURS_DEFAULT)
         except (OSError, ValueError):
             manifest = None
 
+    plans_by_destination = {
+        str(Path(row["destination"]).resolve()): row.get("density_init")
+        for row in (manifest or {}).get("runs", [])
+        if isinstance(row, dict) and row.get("destination")
+    }
     runs = [_run_status(run, stale_hours=stale_hours) for run in _discover_runs(root_path)]
     tally: dict[str, int] = {}
+    density_tally: dict[str, int] = {}
     for row in runs:
         tally[row["state"]] = tally.get(row["state"], 0) + 1
+        row.update(density_init_run_status(row["path"], plans_by_destination.get(str(Path(row["path"]).resolve()))))
+        density_tally[row["density_init_status"]] = density_tally.get(row["density_init_status"], 0) + 1
 
     return {
         "schema_version": 1,
@@ -303,6 +315,7 @@ def step1_status(root: str | Path, *, stale_hours: float = _STALE_HOURS_DEFAULT)
         "manifest_temperature_k": (manifest or {}).get("temperature_k"),
         "manifest_nsw": (manifest or {}).get("nsw"),
         "state_tally": tally,
+        "density_init_tally": density_tally,
         "runs": runs,
     }
 
@@ -398,6 +411,16 @@ def render(payload: dict[str, Any]) -> str:
                     f"{stability['scf_window_steps']} steps ({100.0*fraction:.0f}%)"
                 )
             lines.append("      stability: UNSTABLE — " + "; ".join(detail))
+        if row.get("density_init_requested", "standard") != "standard":
+            compatible = row.get("density_init_compatible")
+            density_txt = (
+                f"      density init: {row['density_init_requested']} -> {row['density_init_status']}  "
+                f"compatible={'?' if compatible is None else compatible}  "
+                f"executed={row.get('density_init_executed')}"
+            )
+            if row.get("density_init_fallback_occurred"):
+                density_txt += f"  FALLBACK ({row.get('density_init_fallback_action')})"
+            lines.append(density_txt)
 
     summary = "  ".join(f"{state}: {n}" for state, n in sorted(payload["state_tally"].items()))
     lines += ["", f"{len(payload['runs'])} runs  ({summary})"]

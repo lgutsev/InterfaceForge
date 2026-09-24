@@ -137,7 +137,7 @@ class LauncherHookTests(unittest.TestCase):
         wrapped = wrap_launcher_with_density_init(self.LAUNCHER, launcher_name="runvasp.sh", hook="iface-init")
         lines = wrapped.splitlines()
         self.assertIn(DENSITY_INIT_MARKER, wrapped)
-        self.assertLess(lines.index("if ! iface-init; then"), lines.index("srun vasp_std > vasp.out"))
+        self.assertLess(lines.index("iface-init || density_init_rc=$?"), lines.index("srun vasp_std > vasp.out"))
         self.assertIn("standard start", wrapped)
         self.assertEqual(wrap_launcher_with_density_init(wrapped, launcher_name="runvasp.sh", hook="x"), wrapped)
         aborting = wrap_launcher_with_density_init(
@@ -148,9 +148,10 @@ class LauncherHookTests(unittest.TestCase):
     def test_preconditioned_launcher_seeds_the_static_scf(self) -> None:
         pre = wrap_launcher_with_precondition(self.LAUNCHER, launcher_name="runvasp.sh")
         wrapped = wrap_launcher_with_density_init(pre, launcher_name="runvasp.sh", hook="iface-init")
-        self.assertIn("mv -f INCAR.precondition INCAR && { iface-init ||", wrapped)
-        with self.assertRaises(SafetyError):
-            wrap_launcher_with_density_init(pre, launcher_name="runvasp.sh", hook="x", on_failure="abort")
+        self.assertIn("mv -f INCAR.precondition INCAR && { rm -f density_init_fallback.json;", wrapped)
+        self.assertIn("iface-init || density_init_rc=$?", wrapped)
+        aborting = wrap_launcher_with_density_init(pre, launcher_name="runvasp.sh", hook="x", on_failure="abort")
+        self.assertIn("exit 3", aborting)
 
     def test_ambiguous_launcher_refused(self) -> None:
         with self.assertRaises(SafetyError):

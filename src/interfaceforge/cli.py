@@ -30,6 +30,7 @@ from .committee import collect_committee, verify_committee_bundle
 from .config import load_campaign, merge_interface_metadata, references_for
 from .data import collect_dataset
 from .density_init.cli import add_backend_options as add_density_init_backend_options
+from .density_init.cli import add_potcar_declaration_options
 from .density_init.cli import backend_options as density_init_backend_options
 from .density_init.cli import register_vasp_commands as register_density_init_commands
 from .errors import InterfaceForgeError, SafetyError
@@ -682,6 +683,8 @@ def cmd_vasp_step1_prepare(args: argparse.Namespace) -> int:
             ramp_from=args.ramp_from,
             keep_velocities=args.keep_velocities,
             precondition=args.precondition,
+            potcar_definitions=args.potcar_definitions,
+            potcar_generator=args.potcar_generator,
             **step1_density_init_kwargs(args),
         )
     )
@@ -2636,6 +2639,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Command the job uses to run InterfaceForge (default: '<this python> -m interfaceforge')",
     )
     add_density_init_backend_options(step1_prepare, prefix="density-init-")
+    add_potcar_declaration_options(step1_prepare)
     step1_prepare.add_argument("--dry-run", action="store_true")
     step1_prepare.add_argument("--audit-only", action="store_true")
     step1_prepare.set_defaults(func=cmd_vasp_step1_prepare)
