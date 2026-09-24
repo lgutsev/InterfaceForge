@@ -1,0 +1,240 @@
+{
+  "_note": "Illustrative only: synthetic fixtures from tests/test_density_init_bench.py; no VASP or inference was run.",
+  "cases": [
+    {
+      "category": "nonmagnetic-perovskite",
+      "checks": {
+        "both_converged": true,
+        "energy": true,
+        "forces": true,
+        "neural_init_active": true,
+        "stress": true
+      },
+      "density_init": {
+        "active": true,
+        "backend": "neural-paw",
+        "grid_discovery_s": null,
+        "inference_s": 5.0,
+        "model_load_s": 20.0,
+        "overhead_s": 30.0,
+        "status": "PROMOTED"
+      },
+      "electronic_state": {
+        "neural": "CONVERGED",
+        "standard": "CONVERGED"
+      },
+      "end_to_end_speedup": 1.3333333333333333,
+      "expect_magnetic_order": "none",
+      "final_energy_ev": {
+        "difference": 9.999999974752427e-07,
+        "difference_per_atom": 1.9999999949504855e-07,
+        "neural": -38.499999,
+        "standard": -38.5
+      },
+      "final_local_moments": {
+        "neural": null,
+        "standard": null
+      },
+      "inference_overhead_s": {
+        "neural": 30.0,
+        "standard": 0.0
+      },
+      "magnetic_pattern": {
+        "neural": {
+          "detail": "no reference MAGMOM",
+          "status": "NOT_APPLICABLE"
+        },
+        "standard": {
+          "detail": "no reference MAGMOM",
+          "status": "NOT_APPLICABLE"
+        }
+      },
+      "max_force_difference_ev_per_a": 0.0,
+      "max_local_moment_difference_mu_b": null,
+      "max_stress_difference_kb": 0.0,
+      "n_ions": 5,
+      "name": "sto",
+      "scf_iterations": {
+        "difference": -7,
+        "neural": 15,
+        "standard": 22
+      },
+      "scf_iterations_all_ionic": {
+        "neural": 15,
+        "standard": 22
+      },
+      "scf_speedup": 1.4666666666666666,
+      "total_wall_s": {
+        "difference": -150.0,
+        "neural": 450.0,
+        "standard": 600.0
+      },
+      "vasp_wall_s": {
+        "difference": -180.0,
+        "neural": 420.0,
+        "standard": 600.0
+      },
+      "verdict": "SAME_SOLUTION"
+    },
+    {
+      "category": "NiO AFM-II",
+      "checks": {
+        "both_converged": true,
+        "energy": true,
+        "forces": true,
+        "magnetic_pattern_neural": true,
+        "magnetic_pattern_standard": true,
+        "moments": true,
+        "neural_init_active": true,
+        "stress": true
+      },
+      "density_init": {
+        "active": true,
+        "backend": "neural-paw",
+        "grid_discovery_s": null,
+        "inference_s": 5.0,
+        "model_load_s": 20.0,
+        "overhead_s": 30.0,
+        "status": "PROMOTED"
+      },
+      "electronic_state": {
+        "neural": "CONVERGED",
+        "standard": "CONVERGED"
+      },
+      "end_to_end_speedup": 1.075268817204301,
+      "expect_magnetic_order": "afm-ii",
+      "final_energy_ev": {
+        "difference": 0.0,
+        "difference_per_atom": 0.0,
+        "neural": -40.0,
+        "standard": -40.0
+      },
+      "final_local_moments": {
+        "neural": [
+          1.68,
+          -1.679,
+          0.0,
+          0.0
+        ],
+        "standard": [
+          1.68,
+          -1.68,
+          0.0,
+          0.0
+        ]
+      },
+      "inference_overhead_s": {
+        "neural": 30.0,
+        "standard": 0.0
+      },
+      "magnetic_pattern": {
+        "neural": {
+          "final_abs_moment_range": [
+            1.679,
+            1.68
+          ],
+          "mismatched_sites": [],
+          "net_final_moment": 0.001,
+          "pattern": "mixed-sign",
+          "quenched_sites": [],
+          "reference_sites": [
+            1,
+            2
+          ],
+          "status": "PRESERVED",
+          "thresholds": {
+            "min_moment": 0.5,
+            "reference": 0.5
+          }
+        },
+        "standard": {
+          "final_abs_moment_range": [
+            1.68,
+            1.68
+          ],
+          "mismatched_sites": [],
+          "net_final_moment": 0.0,
+          "pattern": "mixed-sign",
+          "quenched_sites": [],
+          "reference_sites": [
+            1,
+            2
+          ],
+          "status": "PRESERVED",
+          "thresholds": {
+            "min_moment": 0.5,
+            "reference": 0.5
+          }
+        }
+      },
+      "max_force_difference_ev_per_a": 0.0,
+      "max_local_moment_difference_mu_b": 0.0009999999999998899,
+      "max_stress_difference_kb": 0.0,
+      "n_ions": 4,
+      "name": "nio_afm2",
+      "scf_iterations": {
+        "difference": -5,
+        "neural": 35,
+        "standard": 40
+      },
+      "scf_iterations_all_ionic": {
+        "neural": 35,
+        "standard": 40
+      },
+      "scf_speedup": 1.1428571428571428,
+      "total_wall_s": {
+        "difference": -70.0,
+        "neural": 930.0,
+        "standard": 1000.0
+      },
+      "vasp_wall_s": {
+        "difference": -100.0,
+        "neural": 900.0,
+        "standard": 1000.0
+      },
+      "verdict": "SAME_SOLUTION"
+    }
+  ],
+  "format": "interfaceforge-density-init-bench-report",
+  "output_root": "/scratch/project/bench",
+  "schema_version": 1,
+  "summary": {
+    "acceptance": {
+      "1_same_electronic_solution": true,
+      "2_forces_and_stress_unchanged": true,
+      "3_no_increase_in_failure_rate": true,
+      "4_afm_ii_preserved": true,
+      "5_scf_reduced_in_some_cases": true,
+      "6_end_to_end_wall_time_saved": true
+    },
+    "cases": 2,
+    "claim_policy": "SCF acceleration and end-to-end acceleration are reported separately; inference, model loading, CHGCAR writing and any grid dry run count against the neural arm. No criterion is evaluated until every case has finished.",
+    "compared": 2,
+    "failures": {
+      "neural": 0,
+      "standard": 0
+    },
+    "finished": 2,
+    "same_solution": 2,
+    "scf_iterations_saved": {
+      "cases_reduced": 2,
+      "median": 6.0,
+      "per_case": [
+        7,
+        5
+      ]
+    },
+    "total_wall_s": {
+      "end_to_end_speedup": 1.1594202898550725,
+      "neural_including_overhead": 1380.0,
+      "saved": 220.0,
+      "standard": 1600.0
+    }
+  },
+  "tolerances": {
+    "energy_ev_per_atom": 0.0001,
+    "max_force_ev_per_a": 0.005,
+    "moment_mu_b": 0.05,
+    "stress_kb": 0.5
+  }
+}

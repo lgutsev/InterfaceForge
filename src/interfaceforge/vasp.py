@@ -2286,6 +2286,110 @@ def _render_step1_incar(
     return {"text": rendered_text, "inherited_tags": inherited_values}
 
 
+def _step1_density_init_plan(
+    run: Path,
+    structure: Path,
+    *,
+    relative: Path,
+    istart: int,
+    precondition: bool,
+    incar_text: str,
+    resolved_inputs: Mapping[str, Path],
+    wrapped_launcher: tuple[str, str] | None,
+    options: Mapping[str, Any],
+    ion_count: int,
+    warnings: list[str],
+) -> tuple[dict[str, Any], tuple[str, str] | None]:
+    """Record the density-init request for one Step1 run and wrap its launcher."""
+
+    from .density_init.base import resolve_magnetism
+    from .density_init.inputs import magnetic_settings, reusable_grid
+    from .density_init.launch import (
+        default_interfaceforge_command,
+        vasp_command_from_launcher,
+        wrap_launcher_with_density_init,
+    )
+    from .density_init.neural_paw import NeuralPawInitializer
+    from .density_init.workflow import backend_option_args, hook_command
+
+    label = relative.as_posix() or "."
+    if istart == 1 and not precondition:
+        warnings.append(
+            f"{label}: --density-init neural-paw skipped; the run restarts from the OPT WAVECAR (ISTART=1)"
+        )
+        return {
+            "requested": "neural-paw",
+            "applied": False,
+            "reason": "ISTART=1 WAVECAR restart: converged orbitals are a better start than a density seed",
+        }, wrapped_launcher
+    tags = {
+        assignment[0]: assignment[1]
+        for line in incar_text.splitlines()
+        if (assignment := _incar_assignment(line)) is not None
+    }
+    # Fail at preparation, not in the job, when the magnetic policy forbids the request.
+    resolve_magnetism(
+        magnetic_settings(tags, ion_count),
+        magmom_source=str(options["magmom_source"]),
+        spin_channel=str(options["spin_channel"]),
+        backend=NeuralPawInitializer(),
+    )
+    launcher_name = next(name for name in ("runvasp.sh", "run.slurm") if name in resolved_inputs)
+    base_text = (
+        wrapped_launcher[1]
+        if wrapped_launcher is not None
+        else resolved_inputs[launcher_name].read_text(encoding="utf-8", errors="ignore")
+    )
+    grid, grid_source = reusable_grid(run, run, target_incar=tags, target_poscar=structure)
+    extra = backend_option_args(dict(options.get("backend_options") or {}))
+    if grid is not None:
+        extra += ["--grid", *(str(value) for value in grid)]
+    else:
+        vasp_line = vasp_command_from_launcher(base_text)
+        if vasp_line is None:
+            raise SafetyError(f"{label}: no reusable FFT grid ({grid_source}) and no VASP line for a grid dry run")
+        extra += ["--grid-dry-run-command", vasp_line]
+        grid_source = f"launch-time NELM=1 dry run ({grid_source})"
+    hook = hook_command(
+        interfaceforge=str(options.get("interfaceforge_command") or default_interfaceforge_command()),
+        magmom_source=str(options["magmom_source"]),
+        spin_channel=str(options["spin_channel"]),
+        extra=extra,
+    )
+    wrapped = wrap_launcher_with_density_init(
+        base_text, launcher_name=launcher_name, hook=hook, on_failure=str(options["on_failure"])
+    )
+    return {
+        "requested": "neural-paw",
+        "applied": True,
+        "stage": "launch",
+        "phase": "precondition" if precondition else "md",
+        "grid": list(grid) if grid is not None else None,
+        "grid_source": grid_source,
+        "on_failure": options["on_failure"],
+        "hook": hook,
+    }, (launcher_name, wrapped)
+
+
+def _step1_density_init_summary(
+    density_init: str | None, options: Mapping[str, Any], plans: list[dict[str, Any]]
+) -> dict[str, Any]:
+    if density_init is None:
+        return {"backend": "standard"}
+    return {
+        "backend": density_init,
+        "stage": "launch (compute node, immediately before the fresh-start SCF)",
+        "magmom_source": options.get("magmom_source"),
+        "spin_channel": options.get("spin_channel"),
+        "on_failure": options.get("on_failure"),
+        "backend_options": dict(options.get("backend_options") or {}),
+        "applied_runs": sum(1 for plan in plans if (plan.get("density_init") or {}).get("applied")),
+        "skipped_runs": sum(
+            1 for plan in plans if plan.get("density_init") and not plan["density_init"].get("applied")
+        ),
+    }
+
+
 def prepare_step1_series(
     source: str | Path,
     *,
@@ -2304,6 +2408,8 @@ def prepare_step1_series(
     ramp_from: float | None = None,
     keep_velocities: bool = False,
     precondition: bool = False,
+    density_init: str | None = None,
+    density_init_options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Promote a recursive OPT tree into a sibling ``Step1`` preheat tree.
 
@@ -2336,6 +2442,15 @@ def prepare_step1_series(
     in a ``precondition/`` subdirectory first and the MD restarts from its
     converged ``WAVECAR`` -- one job, no atomic-density first step.
 
+    ``density_init="neural-paw"`` (opt-in) records the request and wraps the
+    launcher of every fresh-start run so the *job* runs ``iface vasp
+    initialize-density`` on the compute node immediately before the
+    fresh-start SCF (the preconditioner under ``precondition=True``).  Nothing
+    is inferred here: preparation nodes may lack the GPU/Python environment.
+    ``ISTART=1`` WAVECAR restarts are left alone.  ``density_init_options``
+    takes ``magmom_source``, ``spin_channel``, ``on_failure``,
+    ``interfaceforge_command`` and ``backend_options``.
+
     A launcher (``runvasp.sh`` / ``run.slurm``) is also accepted from the
     current working directory — the folder the command is run from — even
     when it sits above ``source`` and so falls outside the normal
@@ -2358,6 +2473,22 @@ def prepare_step1_series(
         raise SafetyError("--langevin-gamma must be positive")
     if ramp_from is not None and ramp_from <= 0:
         raise SafetyError("--ramp-from must be a positive temperature in K")
+    if density_init in (None, "standard"):
+        density_init = None
+    elif density_init != "neural-paw":
+        raise SafetyError(f"--density-init must be standard or neural-paw, got {density_init!r}")
+    density_options = dict(density_init_options or {})
+    if density_init is not None:
+        from .density_init.launch import ON_FAILURE
+
+        density_options.setdefault("magmom_source", "incar")
+        density_options.setdefault("spin_channel", "auto")
+        density_options.setdefault("on_failure", "standard")
+        density_options.setdefault("backend_options", {})
+        if density_options["on_failure"] not in ON_FAILURE:
+            raise SafetyError(f"--density-init-on-failure must be one of {', '.join(ON_FAILURE)}")
+        if precondition and density_options["on_failure"] == "abort":
+            raise SafetyError("--density-init-on-failure abort is not supported with --precondition")
 
     from .aimd import resolve_protocol
 
@@ -2489,6 +2620,21 @@ def prepare_step1_series(
                     launcher_name=launcher_name,
                 ),
             )
+        density_plan = None
+        if density_init is not None:
+            density_plan, wrapped_launcher = _step1_density_init_plan(
+                run,
+                structure,
+                relative=relative,
+                istart=istart,
+                precondition=precondition,
+                incar_text=precondition_incar if precondition_incar else rendered["text"],
+                resolved_inputs=resolved_inputs,
+                wrapped_launcher=wrapped_launcher,
+                options=density_options,
+                ion_count=ion_count,
+                warnings=warnings,
+            )
         for tag in ("LDAUL", "LDAUU", "LDAUJ"):
             value = rendered["inherited_tags"].get(tag)
             if value is not None and _vasp_list_length(value) != len(elements):
@@ -2517,6 +2663,7 @@ def prepare_step1_series(
                 "precondition": bool(precondition),
                 "precondition_incar": precondition_incar,
                 "wrapped_launcher": wrapped_launcher,
+                "density_init": density_plan,
             }
         )
 
@@ -2571,6 +2718,7 @@ def prepare_step1_series(
                 ),
                 "keep_velocities": bool(keep_velocities),
                 "precondition": bool(precondition),
+                "density_init": _step1_density_init_summary(density_init, density_options, plans),
                 "warnings": warnings,
                 "precedence": {
                     "ordinary_incar_tags": "Step1 template",
@@ -2592,6 +2740,7 @@ def prepare_step1_series(
                         "source_incar_sha256": _sha256_file(plan["source"] / "INCAR"),
                         "step1_incar_sha256": _sha256_file(plan["destination"] / "INCAR"),
                         "step1_poscar_sha256": _sha256_file(plan["destination"] / "POSCAR"),
+                        "density_init": plan["density_init"],
                     }
                     for plan in plans
                 ],
@@ -2630,6 +2779,7 @@ def prepare_step1_series(
         "ramp_from_k": ramp_from if conservative else None,
         "keep_velocities": bool(keep_velocities),
         "precondition": bool(precondition),
+        "density_init": _step1_density_init_summary(density_init, density_options, plans),
         "prepared_runs": len(plans),
         "fresh_start_runs": sum(1 for plan in plans if plan["istart"] == 0),
         "wavecar_link_mode": link_modes,
@@ -2644,6 +2794,7 @@ def _audit_step1_plans(
     """Independently verify a prepared Step1 tree and write the audit files."""
 
     from .aimd import audit_step1_incar
+    from .density_init.launch import DENSITY_INIT_MARKER
 
     rows: list[dict[str, Any]] = []
     for plan in plans:
@@ -2686,18 +2837,21 @@ def _audit_step1_plans(
                 issues.append("--precondition: missing INCAR.precondition")
             elif parse_incar(precondition_incar).get("NSW") != "0":
                 issues.append("--precondition: INCAR.precondition is not a static (NSW=0)")
+        density_plan = plan.get("density_init") or {}
         for name in plan["inputs"]:
             target = destination / name
             is_wrapped_launcher = (
-                preconditioned
-                and name in {"runvasp.sh", "run.slurm"}
+                name in {"runvasp.sh", "run.slurm"}
                 and (plan.get("wrapped_launcher") or ("", ""))[0] == name
             )
             if is_wrapped_launcher:
-                if not target.is_file() or _PRECONDITION_MARKER not in target.read_text(
-                    encoding="utf-8", errors="ignore"
-                ):
+                text = target.read_text(encoding="utf-8", errors="ignore") if target.is_file() else ""
+                if preconditioned and _PRECONDITION_MARKER not in text:
                     issues.append(f"--precondition: {name} is not the two-phase wrapper")
+                elif density_plan.get("applied") and DENSITY_INIT_MARKER not in text:
+                    issues.append(f"--density-init: {name} lacks the initialize-density hook")
+                elif text != plan["wrapped_launcher"][1]:
+                    issues.append(f"wrapped launcher {name} differs from the deterministic render")
                 elif not os.access(target, os.X_OK):
                     issues.append(f"inherited launcher {name} is not executable")
                 continue

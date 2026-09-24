@@ -160,6 +160,16 @@ It stays a single scheduler job. The launcher must have exactly one line that
 invokes `vasp` (optionally via `srun`/`mpirun`/`ibrun`/…); otherwise
 preparation fails with a clear message.
 
+### Optional neural initial density (`--density-init neural-paw`)
+
+`step1-prepare --density-init neural-paw` (opt-in; default `standard`) wraps
+each fresh-start run's launcher so the job runs `iface vasp
+initialize-density` on the compute node immediately before the fresh-start
+SCF (the preconditioner under `--precondition`). The signed INCAR `MAGMOM` stays
+authoritative and inference failures fall back to the standard start. See
+[Neural density initialization](density-init.md) for installation, the NiO
+AFM-II caveat, POTCAR compatibility, and the benchmark.
+
 ### Submit the Step1 runs
 
 `iface vasp step1-launch <Step1_root>` is the submit step — dry-run by

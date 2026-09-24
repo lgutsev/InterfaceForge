@@ -29,6 +29,9 @@ from .campaign import build_plan, prepare_campaign, submit_campaign
 from .committee import collect_committee, verify_committee_bundle
 from .config import load_campaign, merge_interface_metadata, references_for
 from .data import collect_dataset
+from .density_init.cli import add_backend_options as add_density_init_backend_options
+from .density_init.cli import backend_options as density_init_backend_options
+from .density_init.cli import register_vasp_commands as register_density_init_commands
 from .errors import InterfaceForgeError, SafetyError
 from .exploration import generate_exploration
 from .geometry import (
@@ -679,9 +682,29 @@ def cmd_vasp_step1_prepare(args: argparse.Namespace) -> int:
             ramp_from=args.ramp_from,
             keep_velocities=args.keep_velocities,
             precondition=args.precondition,
+            **step1_density_init_kwargs(args),
         )
     )
     return 0
+
+
+def step1_density_init_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    """``prepare_step1_series`` density-init keywords from the step1-prepare flags."""
+
+    if getattr(args, "density_init", "standard") == "standard":
+        return {}
+    return {
+        "density_init": args.density_init,
+        "density_init_options": {
+            "magmom_source": args.density_init_magmom_source,
+            "spin_channel": args.density_init_spin_channel,
+            "on_failure": args.density_init_on_failure,
+            "interfaceforge_command": args.density_init_command,
+            "backend_options": {
+                key: value for key, value in density_init_backend_options(args).items() if value is not None
+            },
+        },
+    }
 
 
 def cmd_vasp_step1_status(args: argparse.Namespace) -> int:
@@ -2327,6 +2350,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     vasp = commands.add_parser("vasp", help="Safe VASP utilities")
     vasp_commands = vasp.add_subparsers(dest="vasp_command", required=True)
+    register_density_init_commands(vasp_commands)
     recover = vasp_commands.add_parser(
         "ml-recover",
         aliases=["recover"],
@@ -2582,6 +2606,36 @@ def build_parser() -> argparse.ArgumentParser:
             "WAVECAR instead of the atomic-density guess (one job)"
         ),
     )
+    step1_prepare.add_argument(
+        "--density-init",
+        choices=("standard", "neural-paw"),
+        default="standard",
+        help=(
+            "Opt-in pre-SCF initializer. neural-paw records the request and wraps each fresh-start "
+            "run's launcher so the job runs 'iface vasp initialize-density' on the compute node "
+            "immediately before VASP (WAVECAR-restart runs are left alone). Default: standard"
+        ),
+    )
+    step1_prepare.add_argument(
+        "--density-init-magmom-source",
+        choices=("incar", "initializer"),
+        default="incar",
+        help="incar (default): the signed INCAR MAGMOM stays authoritative (see initialize-density)",
+    )
+    step1_prepare.add_argument(
+        "--density-init-spin-channel", choices=("auto", "off", "model"), default="auto"
+    )
+    step1_prepare.add_argument(
+        "--density-init-on-failure",
+        choices=("standard", "abort"),
+        default="standard",
+        help="standard (default): VASP proceeds with its normal start if inference fails; abort: stop the job",
+    )
+    step1_prepare.add_argument(
+        "--density-init-command",
+        help="Command the job uses to run InterfaceForge (default: '<this python> -m interfaceforge')",
+    )
+    add_density_init_backend_options(step1_prepare, prefix="density-init-")
     step1_prepare.add_argument("--dry-run", action="store_true")
     step1_prepare.add_argument("--audit-only", action="store_true")
     step1_prepare.set_defaults(func=cmd_vasp_step1_prepare)
