@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from interfaceforge.cli import main
+from interfaceforge.errors import SafetyError
+from interfaceforge.step1_launch import launch_step1_runs
 from interfaceforge.step1_repair import diagnose_step1_run, prepare_step1_repair
 from interfaceforge.step1_status import step1_status
 from interfaceforge.vasp import parse_incar
@@ -159,7 +164,6 @@ class Step1RepairTests(unittest.TestCase):
     def test_completed_unstable_run_is_repairable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run = _run(Path(tmp))
-            incar = parse_incar(run / "INCAR")
             (run / "INCAR").write_text(
                 (run / "INCAR").read_text(encoding="utf-8").replace("NSW=400", "NSW=22"),
                 encoding="utf-8",
@@ -190,6 +194,82 @@ class Step1RepairTests(unittest.TestCase):
                 second["repair_nsw"],
                 second["original_nsw"] - second["safe_prefix_steps"],
             )
+
+    def test_repeat_repair_is_relaunchable_but_not_twice(self) -> None:
+        def sbatch(job_id: int) -> Mock:
+            response = Mock()
+            response.stdout = f"Submitted batch job {job_id}\n"
+            return response
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _run(Path(tmp))
+            first = prepare_step1_repair(run, execute=True, stale_hours=0.0)["runs"][0]
+            with patch("interfaceforge.vasp.subprocess.run", side_effect=[sbatch(7001)]):
+                launch_step1_runs([run], execute=True, only_repaired=True)
+
+            # The repaired segment runs away again and is repaired a second time.
+            (run / "OSZICAR").write_text(_oszicar(), encoding="utf-8")
+            (run / "XDATCAR").write_text(_xdatcar(), encoding="utf-8")
+            old = time.time() - 10 * 3600
+            os.utime(run / "OSZICAR", (old, old))
+            with patch("interfaceforge.vasp.datetime") as clock:
+                clock.now.return_value = datetime(2030, 1, 1, tzinfo=timezone.utc)
+                second = prepare_step1_repair(run, execute=True, stale_hours=0.0)["runs"][0]
+            self.assertNotEqual(first["archive"], second["archive"])
+
+            with patch("interfaceforge.vasp.subprocess.run", side_effect=[sbatch(7002)]) as mocked:
+                result = launch_step1_runs([run], execute=True, only_repaired=True)
+            self.assertEqual(mocked.call_count, 1)
+            self.assertEqual(result["jobs"][0]["repair_archive"], second["archive"])
+            # The same PREPARED repair is never submitted twice while queued.
+            with self.assertRaises(SafetyError):
+                launch_step1_runs([run], only_repaired=True)
+
+    def test_unwrappable_precondition_launcher_mutates_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _run(Path(tmp))
+            (run / "runvasp.sh").write_text(
+                "#!/bin/bash\nsrun vasp_std\nsrun vasp_gam\n", encoding="utf-8"
+            )
+            incar_before = (run / "INCAR").read_text(encoding="utf-8")
+            with self.assertRaisesRegex(SafetyError, "exactly one line"):
+                prepare_step1_repair(run, execute=True, precondition=True)
+            self.assertTrue((run / "OSZICAR").is_file())
+            self.assertEqual((run / "INCAR").read_text(encoding="utf-8"), incar_before)
+            self.assertFalse((run / ".interfaceforge").exists())
+
+    def test_tree_repair_is_all_or_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first = _run(Path(tmp))
+            second = first.parent / "OH50_run"
+            shutil.copytree(first, second)
+            old = time.time() - 10 * 3600
+            os.utime(second / "OSZICAR", (old, old))
+            (second / "POTCAR").unlink()
+            with self.assertRaisesRegex(SafetyError, "POTCAR"):
+                prepare_step1_repair(first.parent, execute=True)
+            self.assertTrue((first / "OSZICAR").is_file())
+            self.assertFalse((first / ".interfaceforge").exists())
+
+    def test_repeat_precondition_repair_drops_stale_preconditioner_wavecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _run(Path(tmp))
+            (run / "precondition").mkdir()
+            (run / "precondition" / "WAVECAR").write_text("old geometry\n", encoding="utf-8")
+            prepare_step1_repair(run, execute=True, precondition=True)
+            self.assertFalse((run / "precondition" / "WAVECAR").exists())
+
+    def test_temperature_limit_follows_ramp_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _run(Path(tmp))
+            (run / "INCAR").write_text(
+                (run / "INCAR")
+                .read_text(encoding="utf-8")
+                .replace("TEBEG=300", "TEBEG=100")
+                .replace("TEEND=300", "TEEND=1000"),
+                encoding="utf-8",
+            )
+            self.assertEqual(diagnose_step1_run(run)["temperature_limit_k"], 4000.0)
 
     def test_cli_is_dry_run_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

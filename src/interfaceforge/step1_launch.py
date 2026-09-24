@@ -42,13 +42,43 @@ def _json_or_empty(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _already_submitted(root: Path) -> set[str]:
+def _already_submitted(root: Path) -> dict[str, dict[str, Any]]:
     payload = _json_or_empty(root / "step1_launch.json")
     return {
-        str(row.get("relative_path"))
+        str(row.get("relative_path")): row
         for row in payload.get("runs", [])
         if row.get("status") == "SUBMITTED"
     }
+
+
+def _submission_superseded(
+    row: dict[str, Any],
+    repair: dict[str, Any],
+    *,
+    launch_record: Path,
+    repair_record: Path,
+) -> bool:
+    """Whether a recorded submission predates the currently PREPARED repair.
+
+    A repair can be prepared again after its previous segment ran and became
+    unstable, so a SUBMITTED row for the same directory may describe an older
+    job rather than the repair now waiting to run.
+    """
+
+    if repair.get("status") != "PREPARED":
+        return False
+    recorded = row.get("repair_archive")
+    if recorded:
+        return recorded != repair.get("archive")
+    if row.get("kind") != "repair-prepared":
+        # The recorded job ran the step1-prepare inputs. Any repair needs that
+        # job's OSZICAR, so the repair is necessarily newer than the record.
+        return True
+    # Records written before repair_archive was stored: fall back to file order.
+    try:
+        return repair_record.stat().st_mtime > launch_record.stat().st_mtime
+    except OSError:
+        return False
 
 
 def _manifest_rows(root: Path) -> dict[str, dict[str, Any]]:
@@ -61,7 +91,7 @@ def _preflight_run(
     tree_root: Path,
     *,
     manifest_rows: dict[str, dict[str, Any]],
-    submitted: set[str],
+    submitted: dict[str, dict[str, Any]],
     launcher: str | None,
     only_repaired: bool,
     emit: Callable[[str], None],
@@ -73,10 +103,17 @@ def _preflight_run(
     started = [name for name in _STARTED_MARKERS if _nonempty(run / name)]
     if started:
         return None, f"already started ({', '.join(started)})"
-    if relative in submitted:
-        return None, "already recorded as submitted in step1_launch.json"
 
     repair = _json_or_empty(run / "step1_repair.json")
+    previous = submitted.get(relative)
+    if previous is not None and not _submission_superseded(
+        previous,
+        repair,
+        launch_record=tree_root / "step1_launch.json",
+        repair_record=run / "step1_repair.json",
+    ):
+        return None, "already recorded as submitted in step1_launch.json"
+
     if repair:
         if repair.get("status") != "PREPARED":
             return None, f"step1_repair.json status is {repair.get('status')!r}, not PREPARED"
@@ -112,6 +149,7 @@ def _preflight_run(
         "directory": str(run),
         "launcher": script.name,
         "kind": kind,
+        "repair_archive": str(repair.get("archive") or "") if kind == "repair-prepared" else "",
         "notes": "; ".join(notes),
     }, ""
 
@@ -203,6 +241,18 @@ def launch_step1_runs(
             root_status = "FAILED"
         else:
             root_status = "SUBMITTED"
+        json_path = tree_root / "step1_launch.json"
+        tsv_path = tree_root / "step1_launch.tsv"
+        # Keep earlier records for directories this launch did not touch: a
+        # queued-but-not-started job is protected from resubmission only by
+        # its SUBMITTED row, so a later partial launch must not erase it.
+        launched_now = {row["relative_path"] for row in root_rows}
+        earlier = [
+            row
+            for row in _json_or_empty(json_path).get("runs", [])
+            if isinstance(row, dict) and row.get("relative_path") not in launched_now
+        ]
+        root_rows = earlier + root_rows
         payload = {
             "format": "interfaceforge-step1-launch",
             "schema_version": 1,
@@ -211,8 +261,6 @@ def launch_step1_runs(
             "preflight": "PASS",
             "runs": root_rows,
         }
-        json_path = tree_root / "step1_launch.json"
-        tsv_path = tree_root / "step1_launch.tsv"
         json_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         with tsv_path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(

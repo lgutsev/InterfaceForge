@@ -34,16 +34,29 @@ set -euo pipefail
 #   LANGEVIN_GAMMA=10  ps^-1, used only when USE_LANGEVIN=1
 
 ROOT="Step1"
+ROOT_SET=0
 EXECUTE=0
 
 for arg in "$@"; do
     case "$arg" in
         --execute) EXECUTE=1 ;;
         -h|--help)
-            sed -n '3,38p' "$0"
+            sed -n '3,34p' "$0"
             exit 0
             ;;
-        *) ROOT="$arg" ;;
+        -*)
+            # A mistyped flag (e.g. --exectue) must never be taken as the root.
+            echo "ERROR: unknown option: $arg (see --help)" >&2
+            exit 2
+            ;;
+        *)
+            if ((ROOT_SET)); then
+                echo "ERROR: more than one Step1 root given: '$ROOT' and '$arg'" >&2
+                exit 2
+            fi
+            ROOT="$arg"
+            ROOT_SET=1
+            ;;
     esac
 done
 
@@ -211,13 +224,35 @@ if ((EXECUTE)); then
     fi
 
     echo "Preparing conservative repairs..."
+    # step1-repair validates a leaf before mutating it, so a rejected leaf is
+    # left untouched. Keep going, then submit exactly the leaves that were
+    # repaired: stopping here would strand them rewound but never submitted,
+    # and a later rescue could not find them (their OSZICAR is archived).
+    REPAIRED=()
+    FAILED=()
     for run in "${RUNS[@]}"; do
-        iface vasp step1-repair "$run" "${REPAIR_ARGS[@]}" --execute
+        if iface vasp step1-repair "$run" "${REPAIR_ARGS[@]}" --execute; then
+            REPAIRED+=("$run")
+        else
+            FAILED+=("$run")
+        fi
     done
 
-    echo
-    echo "Submitting only repaired leaves..."
-    iface vasp step1-launch "${RUNS[@]}" --only-repaired --execute
+    if ((${#FAILED[@]})); then
+        echo >&2
+        echo "ERROR: step1-repair failed for ${#FAILED[@]} leaves; they will not be submitted:" >&2
+        printf '  %s\n' "${FAILED[@]}" >&2
+    fi
+
+    if ((${#REPAIRED[@]})); then
+        echo
+        echo "Submitting only repaired leaves..."
+        iface vasp step1-launch "${REPAIRED[@]}" --only-repaired --execute
+    fi
+
+    if ((${#FAILED[@]})); then
+        exit 4
+    fi
 else
     echo "DRY RUN: showing repair plans; nothing will be changed or submitted."
     for run in "${RUNS[@]}"; do

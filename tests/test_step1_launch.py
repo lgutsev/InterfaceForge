@@ -97,6 +97,40 @@ class Step1LaunchTests(unittest.TestCase):
             with self.assertRaises(SafetyError):
                 launch_step1_runs([step1])
 
+    def test_partial_launch_keeps_earlier_submitted_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            step1 = _tree(Path(tmp))
+            response = Mock()
+            response.stdout = "Submitted batch job 6001\n"
+            with patch("interfaceforge.vasp.subprocess.run", return_value=response):
+                launch_step1_runs([step1], execute=True, only_repaired=True)
+            with patch("interfaceforge.vasp.subprocess.run", return_value=response):
+                launch_step1_runs([step1], execute=True)
+            record = json.loads((step1 / "step1_launch.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                sorted(row["relative_path"] for row in record["runs"]),
+                ["fresh_run", "repaired_run"],
+            )
+            # Both queued jobs stay protected against a third launch.
+            with self.assertRaises(SafetyError):
+                launch_step1_runs([step1])
+
+    def test_record_from_original_launch_does_not_block_a_later_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            step1 = _tree(Path(tmp))
+            (step1 / "step1_launch.json").write_text(
+                json.dumps(
+                    {
+                        "runs": [
+                            {"relative_path": "repaired_run", "status": "SUBMITTED", "kind": "prepared"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            plan = launch_step1_runs([step1], only_repaired=True)
+            self.assertEqual([row["relative_path"] for row in plan["planned"]], ["repaired_run"])
+
     def test_hash_mismatch_after_prepare_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             step1 = _tree(Path(tmp))

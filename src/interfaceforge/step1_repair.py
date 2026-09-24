@@ -109,7 +109,12 @@ def diagnose_step1_run(
     nelm = _first_int(incar.get("NELM"), 60) or 60
     parsed = parse_step1_oszicar(folder / "OSZICAR", nelm=nelm)
     steps = parsed["steps"]
-    target_temperature = _first_float(incar.get("TEBEG"), 300.0) or 300.0
+    # A ramped segment starts TEBEG low (e.g. 100 K) and heats towards TEEND,
+    # so the runaway limit must follow the hotter end of the ramp.
+    target_temperature = max(
+        _first_float(incar.get("TEBEG"), 300.0) or 300.0,
+        _first_float(incar.get("TEEND"), 0.0) or 0.0,
+    )
     temperature_limit = (
         float(max_temperature_k)
         if max_temperature_k is not None
@@ -224,6 +229,20 @@ def _write_rewind_poscar(original: Path, frame: list[str], destination: Path) ->
         flags = old.split()[3:6]
         rebuilt.append("  " + "  ".join(xyz + flags))
     destination.write_text("\n".join(rebuilt) + "\n", encoding="utf-8")
+
+
+def _precondition_launcher(run: Path) -> tuple[Path, str]:
+    """Return the launcher ``--precondition`` would rewrap and its wrapped text."""
+
+    launcher_name = next((n for n in ("runvasp.sh", "run.slurm") if (run / n).is_file()), None)
+    if launcher_name is None:
+        raise SafetyError(f"{run}: --precondition needs runvasp.sh or run.slurm")
+    launcher = run / launcher_name
+    wrapped = wrap_launcher_with_precondition(
+        launcher.read_text(encoding="utf-8", errors="ignore"),
+        launcher_name=launcher_name,
+    )
+    return launcher, wrapped
 
 
 def _mtime_age_hours(path: Path) -> float | None:
@@ -350,10 +369,22 @@ def prepare_step1_repair(
                 "Refusing to partially mutate the tree because unstable runs are still "
                 f"active/recent (<{stale_hours:g} h): {labels}"
             )
+        # Check every run before touching any: a failure half-way through the
+        # mutation loop would leave rewound runs with deleted outputs and no
+        # step1_repair.json, which neither step1-launch nor a new repair can use.
+        for plan in plans:
+            run = Path(plan["run"])
+            require_files(run, ("INCAR", "POSCAR", "KPOINTS", "POTCAR", "OSZICAR"))
+            if int(plan["repair_nsw"]) <= 0:
+                raise SafetyError(
+                    f"{run}: the accepted prefix already covers NSW={plan['original_nsw']}; "
+                    "no MD steps remain to repair"
+                )
+            if precondition:
+                _precondition_launcher(run)
 
     for plan in (plans if execute else []):
         run = Path(plan["run"])
-        require_files(run, ("INCAR", "POSCAR", "KPOINTS", "POTCAR", "OSZICAR"))
         safe_segment_step = int(plan.get("safe_segment_steps", plan["safe_prefix_steps"]))
         nblock = _first_int(parse_incar(run / "INCAR").get("NBLOCK"), 1) or 1
         xdatcar = run / str(plan["source"])
@@ -400,25 +431,18 @@ def prepare_step1_repair(
             )
             incar_delete.add("SMASS")
         update_incar(run / "INCAR", incar_changes, delete=incar_delete)
+        # A preconditioner WAVECAR left by an earlier repair belongs to a
+        # different rewind geometry; the wrapped launcher would copy it up if
+        # the new static SCF failed before writing its own.
+        (run / "precondition" / "WAVECAR").unlink(missing_ok=True)
         if precondition:
-            launcher_name = next(
-                (n for n in ("runvasp.sh", "run.slurm") if (run / n).is_file()), None
-            )
-            if launcher_name is None:
-                raise SafetyError(f"{run}: --precondition needs runvasp.sh or run.slurm")
+            launcher, wrapped = _precondition_launcher(run)
             system = f"{parse_incar(run / 'INCAR').get('SYSTEM', 'Step1')}_precondition"
             (run / "INCAR.precondition").write_text(
                 build_precondition_incar((run / "INCAR").read_text(encoding="utf-8"), system=system),
                 encoding="utf-8",
             )
-            launcher = run / launcher_name
-            launcher.write_text(
-                wrap_launcher_with_precondition(
-                    launcher.read_text(encoding="utf-8", errors="ignore"),
-                    launcher_name=launcher_name,
-                ),
-                encoding="utf-8",
-            )
+            launcher.write_text(wrapped, encoding="utf-8")
             launcher.chmod(launcher.stat().st_mode | 0o111)
             (run / "WAVECAR").unlink(missing_ok=True)
         plan["repair_precondition"] = bool(precondition)

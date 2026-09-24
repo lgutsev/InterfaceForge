@@ -178,7 +178,11 @@ iface vasp step1-launch Step1 --only-repaired --execute
 ```
 
 Each root gets `step1_launch.{json,tsv}` recording the submitted job ids; a
-second launch refuses the folders it already submitted.
+second launch refuses the folders it already submitted, and later launches
+add to the record instead of replacing it, so queued jobs stay protected. A
+repair is recorded by its archive, so when a repaired segment runs away again
+and `step1-repair` prepares it once more, that new repair can be launched
+while the same repair is never submitted twice.
 
 Then feed `Step1/` to `step2-prepare` as usual.
 
