@@ -2819,8 +2819,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help=(
-            "Flag a running job as 'stalled?' (and a recently written run as active) when its files are "
-            "newer than this. " + _STEP1_STALE_HOURS_RULE
+            "Files modified within this window count as active; a started, unfinished run older than it is "
+            "'stalled?'. " + _STEP1_STALE_HOURS_RULE
         ),
     )
     _add_step1_scheduler_option(step1_status_parser, read_only=True)

@@ -735,10 +735,36 @@ class Step1StatusSchedulerTests(unittest.TestCase):
             self.assertEqual(row["state"], "interrupted")
             self.assertEqual(row["recovery"]["category"], "resume")
 
-            # The explicit default (6 h) keeps the file-age window even when Slurm is verified.
-            explicit = _only_row(step1_status(run, scheduler=fake_guard()))
+            # An explicit 6 h keeps the file-age window even when Slurm is verified.
+            explicit = _only_row(step1_status(run, stale_hours=6.0, scheduler=fake_guard()))
             self.assertEqual(explicit["state"], "interrupted")
             self.assertEqual(explicit["recovery"]["category"], "active")
+
+            # The Python default and the module CLI resolve like iface vasp step1-status (and recover).
+            default = step1_status(run, scheduler=fake_guard())
+            self.assertAlmostEqual(default["stale_hours"], 0.1)
+            self.assertEqual(_only_row(default)["recovery"]["category"], "resume")
+            from interfaceforge import step1_status as status_module
+
+            with patch.object(status_module, "as_guard", return_value=fake_guard()):
+                stream = io.StringIO()
+                with redirect_stdout(stream):
+                    status_module.main([str(run), "--json"])
+            payload = json.loads(stream.getvalue())
+            self.assertAlmostEqual(payload["stale_hours"], 0.1)
+            self.assertNotIn("explicit", payload["stale_hours_reason"])
+
+    def test_state_stale_flag_and_category_use_one_activity_moment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = write_step1_run(Path(tmp) / "Step1", "a", steps=40, age_hours=10.0)
+            moment = time.time() - 1800.0
+            os.utime(run / "OUTCAR", (moment, moment))  # only OUTCAR moved (a long SCF step)
+            row = _only_row(step1_status(run, scheduler="none"))
+            self.assertEqual(row["recovery"]["category"], "active")
+            self.assertEqual(row["state"], "running")
+            self.assertFalse(row["stale"])
+            self.assertAlmostEqual(row["age_hours"], 0.5, delta=0.05)
+            self.assertEqual(row["updated"], row["activity"]["updated"])
 
     def test_shared_guard_snapshot_is_reused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -555,7 +555,9 @@ def _run_status(
     outcar = run / "OUTCAR"
     outcar_tail = read_tail(outcar) if _nonempty(outcar) else ""
     started = _nonempty(outcar) or _nonempty(run / "OSZICAR")
-    updated = _mtime(run / "OSZICAR") or _mtime(outcar)
+    # One activity moment for the state, the stale flag, "updated" and the
+    # recovery category: the newest of OSZICAR/OUTCAR/CONTCAR/XDATCAR.
+    updated = max((moment for moment in (_mtime(run / name) for name in _ACTIVITY_FILES) if moment), default=None)
 
     state, stale = _classify(
         has_incar=incar_path.is_file(),
@@ -834,7 +836,7 @@ def recovery_category(row: dict[str, Any]) -> dict[str, str]:
 def step1_status(
     root: str | Path,
     *,
-    stale_hours: float | None = _STALE_HOURS_DEFAULT,
+    stale_hours: float | None = None,
     scheduler: str | SchedulerGuard = "auto",
 ) -> dict[str, Any]:
     """Read-only status of every Step1 run under ``root``.
@@ -1116,8 +1118,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--stale-hours",
         type=float,
-        default=_STALE_HOURS_DEFAULT,
-        help=f"Flag a running job as 'stalled?' if OSZICAR is older than this (default {_STALE_HOURS_DEFAULT})",
+        default=None,
+        help=(
+            "Files modified within this window count as active; a started, unfinished run older than it is "
+            "'stalled?'. Default: 0.1 h when squeue answered (Slurm verified), 6 h when Slurm is not verified"
+        ),
     )
     parser.add_argument(
         "--scheduler",
