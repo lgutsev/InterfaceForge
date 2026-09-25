@@ -137,18 +137,20 @@ LAUNCH_ROW_KEYS = (
     "submitted_at",
     "batch_id",
 )
+# The pre-lineage TSV's seven columns keep their positions (shell pipelines read
+# it with cut/awk); the generation-aware columns are appended.
 LAUNCH_TSV_COLUMNS = (
-    "batch_id",
-    "submitted_at",
     "status",
     "job_id",
     "kind",
-    "generation",
-    "generation_id",
     "relative_path",
     "directory",
     "launcher",
     "detail",
+    "batch_id",
+    "submitted_at",
+    "generation",
+    "generation_id",
 )
 
 _STAMP_FORMAT = "%Y%m%dT%H%M%SZ"

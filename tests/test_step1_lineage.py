@@ -1530,6 +1530,10 @@ class LaunchLedgerTests(LineageTestCase):
         with (step1 / LAUNCH_TSV).open(encoding="utf-8", newline="") as handle:
             table = list(csv.DictReader(handle, delimiter="\t"))
         self.assertEqual(list(table[0]), list(LAUNCH_TSV_COLUMNS))
+        # Positional compatibility with the pre-lineage TSV (cut -f2 == job_id, ...).
+        self.assertEqual(
+            LAUNCH_TSV_COLUMNS[:7], ("status", "job_id", "kind", "relative_path", "directory", "launcher", "detail")
+        )
         self.assertEqual([row["job_id"] for row in table], ["111", "222"])
         self.assertEqual(table[1]["generation_id"], generation.generation_id)
 
