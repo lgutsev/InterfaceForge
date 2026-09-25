@@ -431,6 +431,19 @@ def diagnose_step1_run(
         while index >= 0 and departing[index]:
             continues_past_grace[index] = True
             index -= 1
+    # ... unless it is a downhill startup relaxation that merely finishes a few
+    # steps late: departing contiguously from step 1, every row ABOVE F_ref, and
+    # settling into the band inside the reference window.  Those rows are a
+    # (longer) startup excursion, not a departure anchored at step 1.
+    extended_startup = [False] * count
+    if 1 <= grace < count and departing[grace] and reference_energy is not None:
+        end = 0
+        while end < count and departing[end] and float(steps[end]["free_energy_ev"]) > reference_energy:
+            end += 1
+        if grace < end < min(count, grace + window) and in_band[end]:
+            for index in range(end):
+                extended_startup[index] = True
+                continues_past_grace[index] = False
 
     # Per-row findings as (kind, text); kind is "hard" or a warning class.
     findings: list[list[tuple[str, str]]] = [[] for _ in steps]
@@ -467,7 +480,10 @@ def diagnose_step1_run(
             hard_rows["catastrophic"].append(index)
         elif deviation is not None and departing[index]:
             band = f"|F-Fref|={_format_ev(deviation)} eV > {energy_jump_ev:g} eV"
-            if index < grace and continues_past_grace[index]:
+            if extended_startup[index]:
+                findings[index].append((_W_STARTUP, f"{band} (downhill startup relaxation settling late)"))
+                warning_rows[_W_STARTUP].append(index)
+            elif index < grace and continues_past_grace[index]:
                 findings[index].append(("hard", f"{band} (sustained past the grace window)"))
                 hard_rows["sustained"].append(index)
             elif index < grace:
@@ -499,10 +515,27 @@ def diagnose_step1_run(
         else ""
     )
 
+    # A startup excursion is benign only when it settled back into the band and
+    # relaxed downhill into it (every excursion row above F_ref).
+    startup_rows = warning_rows[_W_STARTUP]
+    startup_settled: bool | None = None
+    startup_downhill: bool | None = None
+    if startup_rows and reference_energy is not None:
+        startup_settled = any(in_band[index] for index in range(startup_rows[-1] + 1, count))
+        startup_downhill = all(steps[index]["free_energy_ev"] > reference_energy for index in startup_rows)
+
     classes = {name for name, rows in warning_rows.items() if rows}
     if scf_elevated:
         classes.add(_W_SCF)
-    pairs = [pair for pair in _CORROBORATING_PAIRS if pair[0] in classes and pair[1] in classes]
+    # A settled, downhill startup relaxation is the expected magnetic DFT+U
+    # fresh-start transient: it does not corroborate an unrelated later anomaly
+    # (and so never anchors a rewind to segment step 0 on its own account).
+    corroboration_classes = set(classes)
+    if startup_settled is True and startup_downhill is True:
+        corroboration_classes.discard(_W_STARTUP)
+    pairs = [
+        pair for pair in _CORROBORATING_PAIRS if pair[0] in corroboration_classes and pair[1] in corroboration_classes
+    ]
     corroborating = {name for pair in pairs for name in pair}
     pair_reasons = [(pair, f"corroborated anomalies: {' + '.join(sorted(pair))}") for pair in pairs]
 
@@ -551,21 +584,17 @@ def diagnose_step1_run(
         hard_reasons.append(f"persistent SCF failure: {scf_text} >= {100.0 * SCF_HARD_FRACTION:.0f}%")
     hard_reasons += [text for _, text in pair_reasons]
 
-    # A startup excursion is benign only when it settled back into the band and
-    # relaxed downhill into it (every excursion row above F_ref).
-    startup_rows = warning_rows[_W_STARTUP]
-    startup_settled: bool | None = None
-    startup_downhill: bool | None = None
-    if startup_rows and reference_energy is not None:
-        startup_settled = any(in_band[index] for index in range(startup_rows[-1] + 1, count))
-        startup_downhill = all(steps[index]["free_energy_ev"] > reference_energy for index in startup_rows)
-
     warnings: list[str] = []
     spike_rows = warning_rows[_W_SPIKE]
     warm_rows = warning_rows[_W_TEMPERATURE]
     if startup_rows:
+        where = (
+            f"within the {grace}-step grace window"
+            if startup_rows[-1] < grace
+            else f"settling after the {grace}-step grace window, inside the reference window"
+        )
         text = (
-            f"startup energy excursion within the {grace}-step grace window at "
+            f"startup energy excursion {where} at "
             f"{_steps_text(step_numbers(startup_rows))}: |F-Fref| up to "
             f"{_format_ev(worst_deviation(startup_rows))} eV > {energy_jump_ev:g} eV"
         )

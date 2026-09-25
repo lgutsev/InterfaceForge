@@ -547,14 +547,53 @@ class Step1DiagnosticsTests(unittest.TestCase):
         self.assertIn("corroborated anomalies: isolated_energy_spike + temperature_elevated", row["first_bad_reasons"])
         self.assertTrue(any("isolated spike" in text for text in row["first_bad_reasons"]))
 
-    def test_startup_excursion_with_elevated_temperature_is_corroborated_hard(self) -> None:
-        run = self.run_dir(energies=energies_with({1: 77.0}), temperatures=temperatures_with({200: 700.0}))
+    def test_non_downhill_startup_excursion_with_elevated_temperature_is_corroborated_hard(self) -> None:
+        # Step 1 BELOW F_ref: the energy rose after startup and stayed up -- not the benign relaxation.
+        run = self.run_dir(energies=energies_with({1: -77.0}), temperatures=temperatures_with({200: 700.0}))
         row = self.diagnose(run)
         self.assertTrue(row["unstable"])
         self.assertFalse(row["benign_warnings_only"])
+        self.assertFalse(row["startup_excursion_downhill"])
         self.assertEqual(row["corroborated"], ["startup_energy_excursion+temperature_elevated"])
         self.assertEqual(row["first_bad_step"], 1)
         self.assertEqual(row["warning_classes"], ["startup_energy_excursion", "temperature_elevated"])
+
+    def test_downhill_relaxation_finishing_just_after_the_grace_window_is_a_benign_warning(self) -> None:
+        # Settling at step 11 vs 12-15 is the same physics: never a rewind to step 0.
+        for onset in (11, 12, 15):
+            with self.subTest(onset=onset):
+                high = {step: 80.0 for step in range(1, onset)}
+                row = self.diagnose(self.run_dir(energies=energies_with(high)))
+                self.assertEqual(row["severity"], "warning")
+                self.assertIsNone(row["first_bad_step"])
+                self.assertTrue(row["benign_warnings_only"])
+                self.assertEqual(row["startup_excursion_steps"], list(range(1, onset)))
+                self.assertAlmostEqual(row["reference_free_energy_ev"], REFERENCE_F, delta=0.3)
+        # The mirror (energy rising at step 12 and staying up) stays hard at its onset.
+        rise = {step: 80.0 for step in range(12, 401)}
+        row = self.diagnose(self.run_dir(energies=energies_with(rise)))
+        self.assertTrue(row["unstable"])
+        self.assertEqual(row["first_bad_step"], 12)
+
+    def test_benign_startup_relaxation_does_not_corroborate_a_distant_anomaly(self) -> None:
+        # The NiO_m110 fresh-start signature plus ONE unrelated later anomaly must not
+        # become hard with first_bad_step 1 (a rewind that discards the whole run).
+        startup = {1: 77.0, 2: 40.0, 3: 15.0, 4: 5.0}
+        cases = {
+            "spike": {"energies": energies_with({**startup, 250: 60.0})},
+            "warm row": {"energies": energies_with(startup), "temperatures": temperatures_with({300: 610.0})},
+        }
+        for label, options in cases.items():
+            with self.subTest(label):
+                row = self.diagnose(self.run_dir(**options))
+                self.assertEqual(row["severity"], "warning")
+                self.assertFalse(row["unstable"])
+                self.assertEqual(row["corroborated"], [])
+                self.assertIsNone(row["first_bad_step"])
+                self.assertTrue(row["startup_excursion_settled"])
+                self.assertTrue(row["startup_excursion_downhill"])
+                self.assertFalse(row["benign_warnings_only"])  # two warning classes: still review
+                self.assertEqual(len(row["warnings"]), 2)
 
     def test_isolated_spike_with_elevated_scf_is_corroborated_hard(self) -> None:
         run = self.run_dir(

@@ -216,11 +216,11 @@ Four flags are reported separately in `step1-status --json`:
 | H4 hard | `\|F - F_ref\|` above the catastrophic limit at any step, grace window included | 500 eV | `--catastrophic-energy` |
 | H5 hard | sustained post-grace departure: ≥ 2 consecutive departing rows, or the last recorded row departs | 50 eV band after a 10-step grace window | `--energy-jump`, `--startup-grace-steps` |
 | H6 hard | `NELM` reached on ≥ 50 % of post-grace rows | 50 % (fixed) | — |
-| W1 `startup_energy_excursion` | departure only inside the grace window | first 10 rows, 50 eV | `--startup-grace-steps`, `--energy-jump` |
+| W1 `startup_energy_excursion` | departure only inside the grace window; also a downhill relaxation that departs contiguously from step 1 (every row above `F_ref`) and settles into the band inside the reference window, i.e. finishes a few steps after the grace window | first 10 rows (up to 20 for the late-settling case), 50 eV | `--startup-grace-steps`, `--energy-jump` |
 | W2 `isolated_energy_spike` | one post-grace departing row whose previous and next rows are in band | 50 eV | `--energy-jump` |
 | W3 `scf_elevated` | 20 % ≤ post-grace `NELM`-ceiling fraction < 50 % | 20 % (fixed) | — |
 | W4 `temperature_elevated` | `T_warn < T ≤ T_limit` | `T_warn = max(2·T_target, T_target + 300 K)`, at most `T_limit` | `--max-temperature` (via `T_limit`) |
-| Corroboration → hard | W2 with any of W1/W3/W4, or W4 with W1 or W3 (`corroborated anomalies: A + B`); W1 + W3 alone stays a warning (the magnetic DFT+U fresh-start pattern) | — | — |
+| Corroboration → hard | W2 with any of W1/W3/W4, or W4 with W1 or W3 (`corroborated anomalies: A + B`); W1 + W3 alone stays a warning (the magnetic DFT+U fresh-start pattern). A settled, downhill W1 never corroborates: that startup relaxation plus one unrelated later W2/W4 stays a warning (`review`), so it cannot anchor a rewind to segment step 0 | — | — |
 | Benign startup transient | W1 alone, *settled* (an in-band row follows the excursion) and *downhill* (every excursion row lies above `F_ref`) | — | — |
 | Torn final line | the last `OSZICAR` MD line has no newline and stops before `E0=`: dropped, `torn_final_line: true`, not read as a non-numeric energy | — | — |
 
