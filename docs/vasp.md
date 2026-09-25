@@ -307,8 +307,10 @@ iface vasp step1-repair Step1 --precondition --ramp-from 100 --execute --submit
 ```
 
 Further options: `--potim`, `--algo`, `--langevin` / `--langevin-gamma`,
-`--safety-steps`, `--stale-hours`, `--scheduler` and the four diagnostic
-thresholds. `--execute` refuses the whole tree while any unstable run is
+`--safety-steps`, `--stale-hours`, `--scheduler`, `--launcher` (for
+`--submit`) and the four diagnostic thresholds. For repair and resume,
+`--launcher` with `--precondition` is refused unless it names `runvasp.sh`
+or `run.slurm`, the launchers the preconditioning SCF is wrapped into. `--execute` refuses the whole tree while any unstable run is
 active in Slurm, recently modified or needs review. The warning-vs-hard
 table and the repeated-repair accounting are in
 [NiO AIMD policy](nio-aimd.md#warning-vs-hard-instability).

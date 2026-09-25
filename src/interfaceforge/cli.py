@@ -770,6 +770,14 @@ def _require_execute_for_submit(args: argparse.Namespace, command: str) -> None:
             f"{command} --submit needs --execute: a dry run never prepares or submits anything. "
             f"Review the plan, then re-run with --execute --submit"
         )
+    launcher = getattr(args, "launcher", None)
+    if launcher and getattr(args, "precondition", False) and Path(launcher).name not in ("runvasp.sh", "run.slurm"):
+        # The preconditioning static SCF is wrapped into runvasp.sh (else run.slurm);
+        # submitting another launcher would run the MD without it.
+        raise SafetyError(
+            f"{command} --precondition wraps runvasp.sh (else run.slurm); --launcher {launcher} would bypass the "
+            "preconditioning static SCF. Drop --launcher or --precondition"
+        )
 
 
 def _run_label(root: str | Path, run: str | Path) -> str:
@@ -850,7 +858,7 @@ def cmd_vasp_step1_repair(args: argparse.Namespace) -> int:
     if args.execute:
         _report_prepared_step1(payload, command="step1-repair", root=args.root)
         if args.submit:
-            _submit_prepared_step1(payload, command="step1-repair", root=args.root, guard=guard, launcher=None)
+            _submit_prepared_step1(payload, command="step1-repair", root=args.root, guard=guard, launcher=args.launcher)
     _json(payload)
     return 0
 
@@ -2908,6 +2916,9 @@ def build_parser() -> argparse.ArgumentParser:
             "With --execute: submit exactly the repairs this invocation prepared (step1-launch preflight and "
             "ledger, same scheduler guard). Refused without --execute"
         ),
+    )
+    step1_repair.add_argument(
+        "--launcher", help="Launcher to submit with --submit (default: prefer runvasp.sh, then run.slurm)"
     )
     step1_repair.set_defaults(func=cmd_vasp_step1_repair)
 

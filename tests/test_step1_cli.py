@@ -268,6 +268,29 @@ class Step1ResumeRepairCliTests(Step1CliTestCase):
         self.assertEqual(read_json(runs["repair"] / REPAIR_RECORD)["status"], "SUBMITTED")
         self.assertEqual([row["job_id"] for row in read_json(self.step1 / LAUNCH_LEDGER)["runs"]], ["5301"])
 
+    def test_repair_execute_submit_honours_launcher(self) -> None:
+        runs = self.small_tree()
+        repair = runs["repair"]
+        (repair / "job.sh").write_bytes((repair / "runvasp.sh").read_bytes())
+        (repair / "runvasp.sh").unlink()  # only a non-default launcher
+        argv = ["vasp", "step1-repair", str(self.step1), "--execute", "--submit", "--scheduler", "none"]
+        with mock_sbatch(5401) as calls:
+            code, out, err = _run(cli.main, [*argv, "--launcher", "job.sh"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual([(command[-1], cwd) for command, cwd in calls], [("job.sh", str(repair))])
+        self.assertEqual(read_json(repair / REPAIR_RECORD)["status"], "SUBMITTED")
+
+    def test_launcher_that_bypasses_precondition_is_refused_before_anything_changes(self) -> None:
+        self.small_tree()
+        before = tree_snapshot(self.root)
+        for command in ("step1-repair", "step1-resume"):
+            argv = ["vasp", command, str(self.step1), "--execute", "--submit", "--scheduler", "none"]
+            with self.subTest(command=command), mock_sbatch() as calls:
+                code, out, err = _run(cli.main, [*argv, "--precondition", "--launcher", "job.sh"])
+                self.assertEqual((code, out, calls), (2, "", []))
+                self.assertIn("would bypass the preconditioning", err)
+        self.assertEqual(tree_snapshot(self.root), before)
+
     def test_repair_stale_hours_default_resolves_from_the_scheduler(self) -> None:
         self.small_tree()
         code, out, err = _run(cli.main, ["vasp", "step1-repair", str(self.step1), "--scheduler", "none"])
