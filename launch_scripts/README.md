@@ -35,6 +35,12 @@ environment paths, wall time, job name, executable, and resource counts before r
   and non-destructive `INCAR.dipole_fix` proposals only for non-flat cases,
   creates a root relaunch-review queue, and runs `sumo-dosplot` in each matched
   folder. It never edits `INCAR` or submits VASP.
+- `rescue_step1_conservative.sh`: thin wrapper around
+  `iface vasp step1-recover <root> --only repair --scheduler slurm` that repairs
+  hard-unstable Step1 AIMD runs with the conservative NiO settings; dry-run by
+  default. See [Step1 rescue](#step1-rescue-conservative-repair).
+- `rescue_step1_conservative_single.sbatch`: runs the same wrapper as a one-core
+  `single`-partition job (arguments forwarded verbatim).
 - `restart_daughter_jobs.sh`: one-level campaign helper for immediate VASP daughter
   directories. It can run either `Restart <daughter>` or `TotalRestart <daughter>`,
   copies root `INCAR`, `KPOINTS`, and `runvasp.sh`, verifies the expected restart
@@ -482,3 +488,46 @@ launch_scripts/prepare_periodic_nitride_mlips.sh --execute --collect
 
 See [`examples/mapped-leaf-campaign/README.md`](../examples/mapped-leaf-campaign/README.md)
 for output locations, path overrides, and instructions for copying the generic template.
+
+## Step1 rescue (conservative repair)
+
+`rescue_step1_conservative.sh` repairs hard-unstable Step1 AIMD runs with the
+conservative NiO settings. It no longer implements any logic of its own: it checks
+that `iface` and `squeue` are on `PATH` and that the root exists, then delegates to
+
+```bash
+iface vasp step1-recover <root> --only repair --scheduler slurm \
+    --potim 0.5 --algo Normal --ramp-from 100 [--stale-hours H] [--langevin --langevin-gamma G] [--execute]
+```
+
+so every safety gate lives in `step1-recover`: only runs that `step1-status`
+classifies as `repair` are touched (startup transients and other review-level
+warnings, done, active and interrupted-mutation runs are left alone), `squeue`
+decides activity and is re-queried immediately before each run is changed and before
+each `sbatch`, each run's file fingerprint must be unchanged since planning and its
+state is archived before anything is replaced, and the first failure stops the batch.
+A run that was already repaired is repaired again as the next generation with the
+accepted prefix accumulated; no file has to be renamed by hand.
+
+```bash
+bash launch_scripts/rescue_step1_conservative.sh Step1              # plan only, changes nothing
+bash launch_scripts/rescue_step1_conservative.sh Step1 --execute    # archive, rewind, prepare and submit
+sbatch launch_scripts/rescue_step1_conservative_single.sbatch Step1 --execute   # the same, as a single-partition job
+```
+
+The root defaults to `Step1`. Environment overrides: `STALE_HOURS` (unset by default,
+so the 6 min settle window of a verified Slurm query applies; set e.g. `6` to also
+leave runs written in the last 6 h alone), `RAMP_FROM=100` (K), `POTIM=0.5` (fs),
+`ALGO=Normal`, `USE_LANGEVIN=0` (set `1` for `MDALGO=3` with Langevin friction) and
+`LANGEVIN_GAMMA=10` (ps^-1, used only with `USE_LANGEVIN=1`). Preconditioning of the
+magnetic DFT+U state is on by default in `step1-recover`; the wrapper does not expose
+`--no-precondition`. The `sbatch` launcher inherits these variables through Slurm's
+default `--export=ALL`, activates `/project/lgutsev/env/lgutsev_dev` when `iface` is
+not already available, and resolves a relative root against the submission directory.
+
+With `--execute`, `<root>/step1_recover.json` records which runs were changed, which
+were submitted and which were not attempted; the submitted jobs are also in
+`<root>/step1_launch.json` / `.tsv`. The policy, the warning-vs-hard table and the
+generation/ledger rules are in [NiO AIMD policy](../docs/nio-aimd.md#recovery-policy).
+Resume of healthy interrupted runs is not part of this wrapper; use
+`iface vasp step1-recover <root>` (all categories) or `iface vasp step1-resume`.
