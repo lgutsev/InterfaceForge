@@ -129,6 +129,11 @@ RECOVER_REPAIR_DEFAULTS: dict[str, Any] = {
     "ramp_from": 100.0,
     "precondition": True,
 }
+# A ramp restart needs room: step1-status judges thermal readiness on the last
+# 50 rows of the segment (tail mean >= 5/6 of the target), which a 100 -> 300 K
+# linear ramp only reaches with >= ~98 steps.  Shorter repairs continue at the
+# schedule temperature of the rewind point instead of quenching and reheating.
+RECOVER_MIN_RAMP_STEPS = 100
 RECOVER_RESUME_DEFAULTS: dict[str, Any] = {
     "contcar_tolerance_angstrom": DEFAULT_CONTCAR_TOLERANCE_ANGSTROM,
     "precondition": False,
@@ -322,6 +327,8 @@ def _repair_summary(plan: Mapping[str, Any]) -> str:
         text += f", ramp {_temperature(schedule.get('tebeg_k'))}->{_temperature(schedule.get('teend_k'))} K"
     else:
         text += f", T {_temperature(schedule.get('tebeg_k'))} K"
+    if plan.get("ramp_skipped"):
+        text += f" ({plan['ramp_skipped']})"
     return text
 
 
@@ -481,18 +488,29 @@ def _attach_repair(
     diagnostic: Mapping[str, Any],
     launcher: str | None,
 ) -> None:
-    plan = plan_repair_run(
-        run,
-        snapshot=guard.snapshot,
-        stale_hours=hours,
-        potim_fs=repair["potim_fs"],
-        algo=repair["algo"],
-        safety_steps=repair["safety_steps"],
-        diagnostic_options=diagnostic,
-        langevin_gamma=repair["langevin_gamma"],
-        ramp_from=repair["ramp_from"],
-        precondition=repair["precondition"],
-    )
+    def plan_with(ramp_from: float | None) -> dict[str, Any] | None:
+        return plan_repair_run(
+            run,
+            snapshot=guard.snapshot,
+            stale_hours=hours,
+            potim_fs=repair["potim_fs"],
+            algo=repair["algo"],
+            safety_steps=repair["safety_steps"],
+            diagnostic_options=diagnostic,
+            langevin_gamma=repair["langevin_gamma"],
+            ramp_from=ramp_from,
+            precondition=repair["precondition"],
+        )
+
+    plan = plan_with(repair["ramp_from"])
+    remaining = plan.get("repair_nsw") if plan is not None else None
+    if repair["ramp_from"] is not None and isinstance(remaining, int) and 0 < remaining < RECOVER_MIN_RAMP_STEPS:
+        plan = plan_with(None)
+        if plan is not None:
+            plan["ramp_skipped"] = (
+                f"ramp from {float(repair['ramp_from']):g} K skipped: only {remaining} steps remain "
+                f"(< {RECOVER_MIN_RAMP_STEPS}), too few to reheat to the Step2 thermal threshold"
+            )
     if plan is None:
         entry["action_kind"] = "repair"
         _to_review(entry, "repair planner disagrees: the run is not hard-unstable under the requested thresholds")

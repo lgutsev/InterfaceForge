@@ -37,6 +37,7 @@ from interfaceforge.step1_lineage import (
 from interfaceforge.step1_recover import (
     AUTO_CATEGORIES,
     RECOVER_CATEGORIES,
+    RECOVER_MIN_RAMP_STEPS,
     execute_command,
     execute_step1_recovery,
     plan_step1_recovery,
@@ -972,6 +973,26 @@ class RecoverReviewRoutingTests(RecoverTestCase):
         stream.flush()
         self.assertIn("Dry run: nothing changed.", buffer.getvalue().decode("cp1252"))
         stream.detach()
+
+
+class RecoverRampTests(RecoverTestCase):
+    def test_short_late_repair_skips_the_ramp_and_continues_at_the_schedule_temperature(self) -> None:
+        # A runaway at step 370 of 400 leaves too few steps for a 100 -> 300 K reheat.
+        write_step1_run(self.step1, "late", steps=384, energies=_runaway(370))
+        write_step1_run(self.step1, "early", steps=30, energies=_runaway(25))
+        plan = plan_step1_recovery(self.step1, scheduler=fake_guard())
+        self.assertEqual(_names(plan, "repair"), ["early", "late"])
+
+        late = _entry(plan, "late")["action"]
+        self.assertLess(late["repair_nsw"], RECOVER_MIN_RAMP_STEPS)
+        self.assertIsNone(late["repair_ramp_from_k"])
+        self.assertFalse(late["segment_schedule"]["ramp"])
+        self.assertEqual(float(late["segment_schedule"]["tebeg_k"]), 300.0)
+        self.assertIn("ramp from 100 K skipped", _entry(plan, "late")["action_summary"])
+
+        early = _entry(plan, "early")["action"]  # plenty of steps left: the ramp is kept
+        self.assertEqual(early["repair_ramp_from_k"], 100.0)
+        self.assertNotIn("ramp_skipped", early)
 
 
 if __name__ == "__main__":
