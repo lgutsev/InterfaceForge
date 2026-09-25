@@ -39,6 +39,7 @@ from __future__ import annotations
 import os
 from collections import Counter
 from collections.abc import Callable, Iterable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,7 @@ from .step1_lineage import (
     read_json,
     rows_for_run,
     run_fingerprint,
+    run_lock,
     submission_state,
     utc_now_iso,
     utc_stamp,
@@ -460,6 +462,12 @@ def _submit_planned(
         batch = {"batch_id": batch_id, "started_at": started_at, "planned": planned_per_ledger[_dir_key(tree_root)]}
         emit(f"[{index}/{len(planned)}] sbatch {plan['relative_path']} ({plan['generation_id']}) in {run}")
 
+        # The run's exclusive lock spans the ledger re-check, sbatch and the
+        # ledger/record writes, so a concurrent launch/recover/repair --submit of
+        # the same run either is refused by the lock or, once it gets it, sees
+        # this job's SUBMITTED row.  Taken after the Slurm check, so nothing is
+        # written into a directory that is an active WorkDir.
+        held = ExitStack()  # noqa: SIM115 - closed on every path below
         scheduler_refused = False
         try:
             try:
@@ -467,9 +475,11 @@ def _submit_planned(
             except SafetyError:
                 scheduler_refused = True
                 raise
+            held.enter_context(run_lock(run, "submit"))
             _recheck_before_submit(plan, roots=roots)
             job_id = submit_run(run, plan["launcher"])
         except Exception as exc:  # noqa: BLE001 - recorded as a FAILED row and re-raised as SafetyError
+            held.close()
             emit(f"    FAILED: {exc}")
             ledger_note = ""
             if scheduler_refused and _dir_key(tree_root) == _dir_key(run):
@@ -509,30 +519,49 @@ def _submit_planned(
         }
         # Record the job before anything else can fail, so a crash mid-batch
         # never leaves a submitted job unrecorded.
-        try:
-            _note_report(reports, append_launch_rows(tree_root, [row], batch=batch))
-        except Exception as exc:  # noqa: BLE001 - the job exists; say so loudly
-            record_note = ""
-            try:
-                mark_record_submitted(run, plan["generation_id"], submission)
-                if plan["record"]:
-                    record_note = f" It was recorded on {run / plan['record']}."
-            except Exception as record_exc:  # noqa: BLE001
-                record_note = f" Marking the run record also failed: {record_exc}."
-            raise SafetyError(
-                f"Job {job_id} for {run} WAS submitted (batch {batch_id}) but could not be recorded in "
-                f"{ledger_json}: {exc}.{record_note} Record it by hand before any relaunch; "
-                f"jobs submitted earlier in this batch: {', '.join(r['job_id'] for r in rows[:-1]) or 'none'}"
-            ) from exc
+        with held:
+            _record_submission(run, plan, row, submission, rows=rows, reports=reports, batch=batch, tree_root=tree_root)
+    return rows, reports
+
+
+def _record_submission(
+    run: Path,
+    plan: dict[str, Any],
+    row: dict[str, Any],
+    submission: dict[str, Any],
+    *,
+    rows: list[dict[str, Any]],
+    reports: list[str],
+    batch: dict[str, Any],
+    tree_root: Path,
+) -> None:
+    """Write the SUBMITTED ledger row, then mark the run record; raises ``SafetyError`` loudly."""
+
+    job_id, batch_id = row["job_id"], row["batch_id"]
+    ledger_json = tree_root / LAUNCH_LEDGER
+    try:
+        _note_report(reports, append_launch_rows(tree_root, [row], batch=batch))
+    except Exception as exc:  # noqa: BLE001 - the job exists; say so loudly
+        record_note = ""
         try:
             mark_record_submitted(run, plan["generation_id"], submission)
-        except Exception as exc:  # noqa: BLE001 - the ledger row already guards against a duplicate
-            raise SafetyError(
-                f"Job {job_id} for {run} was submitted and recorded in {ledger_json}, but marking "
-                f"{run / (plan['record'] or '?')} SUBMITTED failed: {exc}. The ledger row still blocks a duplicate "
-                f"launch; review partial launch records: {', '.join(reports)}"
-            ) from exc
-    return rows, reports
+            if plan["record"]:
+                record_note = f" It was recorded on {run / plan['record']}."
+        except Exception as record_exc:  # noqa: BLE001
+            record_note = f" Marking the run record also failed: {record_exc}."
+        raise SafetyError(
+            f"Job {job_id} for {run} WAS submitted (batch {batch_id}) but could not be recorded in "
+            f"{ledger_json}: {exc}.{record_note} Record it by hand before any relaunch; "
+            f"jobs submitted earlier in this batch: {', '.join(r['job_id'] for r in rows[:-1]) or 'none'}"
+        ) from exc
+    try:
+        mark_record_submitted(run, plan["generation_id"], submission)
+    except Exception as exc:  # noqa: BLE001 - the ledger row already guards against a duplicate
+        raise SafetyError(
+            f"Job {job_id} for {run} was submitted and recorded in {ledger_json}, but marking "
+            f"{run / (plan['record'] or '?')} SUBMITTED failed: {exc}. The ledger row still blocks a duplicate "
+            f"launch; review partial launch records: {', '.join(reports)}"
+        ) from exc
 
 
 # --------------------------------------------------------------------------- #

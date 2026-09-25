@@ -44,7 +44,6 @@ import re
 import shutil
 import uuid
 from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +56,7 @@ from .step1_lineage import (
     RESUME_RECORD,
     accepted_ps,
     archive_step1_state,
+    atomic_write_bytes,
     atomic_write_json,
     build_segment_record,
     current_generation,
@@ -66,9 +66,12 @@ from .step1_lineage import (
     interrupted_archive,
     ledger_paths_for,
     new_generation_id,
+    newest_activity,
     read_json,
+    recheck_after_archive,
     retire_current_records,
     run_fingerprint,
+    run_lock,
     schedule_temperature,
     seal_launch_rows,
     utc_now_iso,
@@ -89,7 +92,7 @@ from .step1_repair import (
     precondition_blocker,
 )
 from .step1_scheduler import SchedulerGuard, SchedulerSnapshot, as_guard, resolve_stale_hours
-from .step1_status import _ACTIVITY_FILES, _ERROR_MARKERS, _completed_steps
+from .step1_status import _ERROR_MARKERS, _completed_steps
 from .vasp import _PRECONDITION_MARKER, _poscar_layout_indices, parse_incar, require_files, update_incar
 
 # Plan statuses.  Only READY plans are executed; PREPARED is a READY plan after
@@ -178,18 +181,7 @@ def _size(path: Path) -> int | None:
 def _newest_activity(folder: Path) -> tuple[str | None, float | None]:
     """``(file name, age in hours)`` of the most recently modified activity file (status's set)."""
 
-    newest: tuple[float, str] | None = None
-    for name in _ACTIVITY_FILES:
-        try:
-            mtime = (folder / name).stat().st_mtime
-        except OSError:
-            continue
-        if newest is None or mtime > newest[0]:
-            newest = (mtime, name)
-    if newest is None:
-        return None, None
-    modified = datetime.fromtimestamp(newest[0], tz=timezone.utc)
-    return newest[1], (datetime.now(tz=timezone.utc) - modified).total_seconds() / 3600.0
+    return newest_activity(folder)
 
 
 def _active_label(jobs: list[dict[str, Any]]) -> str:
@@ -910,6 +902,25 @@ def execute_resume_plan(
 ) -> dict[str, Any]:
     """Prepare the resume segment described by a READY ``plan``; returns the updated plan.
 
+    Runs under the run's exclusive ``run_lock`` (a concurrent recovery command
+    on the same run is refused); see ``_execute_resume_plan_locked``.
+    """
+
+    if not plan.get("run"):
+        raise SafetyError("Refusing to execute a resume plan that names no run directory")
+    if plan.get("status") != RESUME_READY:
+        return _execute_resume_plan_locked(plan, guard=guard, ledger_roots=ledger_roots)  # refuses: not READY
+    run = Path(str(plan["run"])).expanduser()
+    guard.assert_inactive(run)  # before the lock file is created: never write into an active WorkDir
+    with run_lock(run, "resume"):
+        return _execute_resume_plan_locked(plan, guard=guard, ledger_roots=ledger_roots)
+
+
+def _execute_resume_plan_locked(
+    plan: Mapping[str, Any], *, guard: SchedulerGuard, ledger_roots: Iterable[str | Path] = ()
+) -> dict[str, Any]:
+    """Prepare the resume segment described by a READY ``plan`` (caller holds ``run_lock``).
+
     Every check that can refuse runs before the first write: plan status, the
     planning fingerprint, required inputs, the lineage the plan was built on,
     an interrupted earlier mutation, the restart frame, the electronic start
@@ -1000,9 +1011,11 @@ def execute_resume_plan(
         raise SafetyError(f"Refusing to mutate {run}: it changed since planning (file fingerprint differs); plan again")
     archive = archive_step1_state(run, str(plan["operation"]))
     added_to_archive = _ensure_archived(run, archive, RESUME_RUNTIME_OUTPUTS)
+    # The archive may have copied GB of outputs: a job that started meanwhile refuses here.
+    recheck_after_archive(run, archive, guard=guard, fingerprint=plan.get("fingerprint"))
     if source == "CONTCAR":
         # Verbatim: the velocity and predictor-corrector blocks continue the dynamics.
-        (run / "POSCAR").write_bytes((archive / "CONTCAR").read_bytes())
+        atomic_write_bytes(run / "POSCAR", (archive / "CONTCAR").read_bytes())
     elif frame is not None:
         _write_rewind_poscar(archive / "POSCAR", frame, run / "POSCAR")
     for name in RESUME_RUNTIME_OUTPUTS:

@@ -113,7 +113,6 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -125,6 +124,7 @@ from .step1_lineage import (
     accepted_ps,
     archive_step1_state,
     atomic_write_json,
+    atomic_write_text,
     build_segment_record,
     current_generation,
     finalize_archive,
@@ -133,8 +133,11 @@ from .step1_lineage import (
     interrupted_archive,
     ledger_paths_for,
     new_generation_id,
+    newest_activity,
+    recheck_after_archive,
     retire_current_records,
     run_fingerprint,
+    run_lock,
     schedule_temperature,
     seal_launch_rows,
     utc_now_iso,
@@ -697,7 +700,7 @@ def _write_rewind_poscar(original: Path, frame: list[str], destination: Path) ->
         xyz = new.split()[:3]
         flags = old.split()[3:6]
         rebuilt.append("  " + "  ".join(xyz + flags))
-    destination.write_text("\n".join(rebuilt) + "\n", encoding="utf-8")
+    atomic_write_text(destination, "\n".join(rebuilt) + "\n")
 
 
 def _precondition_launcher(run: Path) -> str | None:
@@ -755,19 +758,14 @@ def apply_precondition(run: Path) -> None:
     launcher, current, wrapped = _wrapped_precondition_launcher(run)
     system = f"{parse_incar(run / 'INCAR').get('SYSTEM', 'Step1')}_precondition"
     precondition_incar = build_precondition_incar((run / "INCAR").read_text(encoding="utf-8"), system=system)
-    (run / "INCAR.precondition").write_text(precondition_incar, encoding="utf-8")
+    # Temp file + rename throughout: never write through a hard link or symlink
+    # (e.g. a runvasp.sh shared between runs) into a file outside the run.
+    atomic_write_text(run / "INCAR.precondition", precondition_incar)
+    mode = launcher.stat().st_mode
     if wrapped != current:
-        launcher.write_text(wrapped, encoding="utf-8")
-    launcher.chmod(launcher.stat().st_mode | 0o111)
+        atomic_write_text(launcher, wrapped)
+    launcher.chmod(mode | 0o111)
     (run / "WAVECAR").unlink(missing_ok=True)
-
-
-def _mtime_age_hours(path: Path) -> float | None:
-    try:
-        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-    except OSError:
-        return None
-    return (datetime.now(tz=timezone.utc) - modified).total_seconds() / 3600.0
 
 
 # --------------------------------------------------------------------------- #
@@ -880,7 +878,7 @@ def plan_repair_run(
     accepted history.
 
     The plan ``status`` is ``READY``, ``ACTIVE_SLURM`` (``snapshot`` lists a job
-    using the run as its WorkDir), ``ACTIVE_OR_RECENT`` (OSZICAR modified within
+    using the run as its WorkDir), ``ACTIVE_OR_RECENT`` (newest of OSZICAR/OUTCAR/CONTCAR/XDATCAR modified within
     ``stale_hours``; ``None`` resolves via ``resolve_stale_hours``) or
     ``REVIEW`` (``skip_reason``: unreadable/conflicting lineage, an interrupted
     earlier mutation, missing inputs, a launcher that cannot be preconditioned,
@@ -1016,12 +1014,17 @@ def plan_repair_run(
     thermostat = "langevin (MDALGO=3)" if langevin_gamma is not None else schedule["thermostat"]
     repair_teend = segment_teend
     active_jobs = snapshot.active_jobs_for(folder)
-    age_hours = _mtime_age_hours(folder / "OSZICAR")
+    # Same activity rule as step1-status and step1-resume: the newest of
+    # OSZICAR/OUTCAR/CONTCAR/XDATCAR (OUTCAR moves during a long SCF step).
+    newest_name, age_hours = newest_activity(folder)
     if active_jobs:
         status, skip_reason = REPAIR_ACTIVE_SLURM, f"active in Slurm ({_active_label(active_jobs)})"
     elif age_hours is None or age_hours < hours:
         age_text = "unknown" if age_hours is None else f"{age_hours:.2f} h ago"
-        status, skip_reason = REPAIR_ACTIVE_OR_RECENT, f"OSZICAR updated {age_text} (< {hours:g} h)"
+        status, skip_reason = (
+            REPAIR_ACTIVE_OR_RECENT,
+            f"{newest_name or 'OSZICAR'} updated {age_text} (< {hours:g} h)",
+        )
     elif reviews:
         status, skip_reason = REPAIR_REVIEW, "; ".join(reviews)
     else:
@@ -1093,6 +1096,25 @@ def execute_repair_plan(
 ) -> dict[str, Any]:
     """Prepare the repair segment described by a READY ``plan``; returns the updated plan.
 
+    Runs under the run's exclusive ``run_lock`` (a concurrent recovery command
+    on the same run is refused); see ``_execute_repair_plan_locked``.
+    """
+
+    if not plan.get("run"):
+        raise SafetyError("Refusing to execute a repair plan that names no run directory")
+    if plan.get("status") != REPAIR_READY:
+        return _execute_repair_plan_locked(plan, guard=guard, ledger_roots=ledger_roots)  # refuses: not READY
+    run = Path(str(plan["run"])).expanduser()
+    guard.assert_inactive(run)  # before the lock file is created: never write into an active WorkDir
+    with run_lock(run, "repair"):
+        return _execute_repair_plan_locked(plan, guard=guard, ledger_roots=ledger_roots)
+
+
+def _execute_repair_plan_locked(
+    plan: Mapping[str, Any], *, guard: SchedulerGuard, ledger_roots: Iterable[str | Path] = ()
+) -> dict[str, Any]:
+    """Prepare the repair segment described by a READY ``plan`` (caller holds ``run_lock``).
+
     Every check that can refuse runs before the first write: plan status, the
     planning fingerprint, required inputs, the lineage the plan was built on,
     the rewind frame, the launcher (when preconditioning) and, last and
@@ -1159,6 +1181,8 @@ def execute_repair_plan(
         # A file changed while the scheduler was being queried.
         raise SafetyError(f"Refusing to mutate {run}: it changed since planning (file fingerprint differs); plan again")
     archive = archive_step1_state(run, str(plan["operation"]))
+    # The archive may have copied GB of outputs: a job that started meanwhile refuses here.
+    recheck_after_archive(run, archive, guard=guard, fingerprint=plan.get("fingerprint"))
     if frame is not None:
         _write_rewind_poscar(archive / "POSCAR", frame, run / "POSCAR")
     else:

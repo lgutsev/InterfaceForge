@@ -127,7 +127,8 @@ def _run(root: Path, *, scf_ceiling: bool = False) -> Path:
         "#!/bin/bash\n#SBATCH -N 1\nmodule load vasp\nsrun -n4 vasp_std\n", encoding="utf-8"
     )
     old = time.time() - 10 * 3600
-    os.utime(run / "OSZICAR", (old, old))
+    for name in ("OSZICAR", "XDATCAR"):  # all activity files quiet for 10 h
+        os.utime(run / name, (old, old))
     return run
 
 
@@ -245,7 +246,8 @@ class Step1RepairTests(unittest.TestCase):
             (run / "OSZICAR").write_text(_oszicar(), encoding="utf-8")
             (run / "XDATCAR").write_text(_xdatcar(), encoding="utf-8")
             old = time.time() - 10 * 3600
-            os.utime(run / "OSZICAR", (old, old))
+            for name in ("OSZICAR", "XDATCAR"):
+                os.utime(run / name, (old, old))
 
             second = prepare_step1_repair(run, stale_hours=0.0)["runs"][0]
             self.assertEqual(second["previous_safe_prefix_steps"], 12)

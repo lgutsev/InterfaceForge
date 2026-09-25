@@ -27,6 +27,7 @@ import math
 import os
 import re
 import shutil
+import socket
 import time
 import uuid
 from collections.abc import Iterable, Iterator
@@ -282,13 +283,23 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     temporary file.
     """
 
+    atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def atomic_write_bytes(path: str | Path, data: bytes) -> None:
+    """``atomic_write_text`` for raw bytes.
+
+    Replacing the directory entry also means a hard-linked or symlinked target
+    is never written through: the file outside the run keeps its content.
+    """
+
     target = Path(path)
     temporary = target.with_name(f"{target.name}.{os.getpid()}-{uuid.uuid4().hex[:12]}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     descriptor = os.open(temporary, flags, 0o666)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            handle.write(text)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         _replace(temporary, target)
@@ -1178,6 +1189,114 @@ def finalize_archive(archive: Path, *, generation_id: str) -> None:
     manifest["generation_id"] = generation_id
     manifest["finalized_at"] = utc_now_iso()
     atomic_write_json(path, manifest)
+
+
+def abandon_archive(archive: Path, *, reason: str) -> None:
+    """Mark an archive ``ABANDONED``: it was taken but the run was left untouched.
+
+    Used when the re-check after archiving refuses the mutation, so the copy is
+    kept for reference without reporting an interrupted mutation.
+    """
+
+    path = Path(archive) / ARCHIVE_MANIFEST
+    manifest = read_json(path)
+    if not manifest:
+        return
+    manifest["status"] = "ABANDONED"
+    manifest["abandoned_reason"] = reason
+    manifest["finalized_at"] = utc_now_iso()
+    atomic_write_json(path, manifest)
+
+
+def recheck_after_archive(run: Path, archive: Path, *, guard: Any, fingerprint: Any) -> None:
+    """Re-run the scheduler and fingerprint checks after a (possibly slow) archive copy.
+
+    Called after ``archive_step1_state`` and before the first write to the run:
+    a job that started, or a file that changed, while large outputs were being
+    copied refuses the mutation.  On refusal the archive is marked
+    ``ABANDONED`` (the run is untouched) and ``SafetyError`` is raised.
+    """
+
+    try:
+        guard.assert_inactive(run)
+        if run_fingerprint(run) != fingerprint:
+            raise SafetyError(
+                f"Refusing to mutate {run}: it changed while it was being archived (file fingerprint differs); "
+                "plan again"
+            )
+    except SafetyError as exc:
+        abandon_archive(archive, reason=str(exc))
+        raise
+
+
+# --------------------------------------------------------------------------- #
+# Per-run exclusive lock (recovery mutations and submissions)
+# --------------------------------------------------------------------------- #
+
+RUN_LOCK = "step1.lock"
+
+
+def run_lock_path(run: str | Path) -> Path:
+    return Path(run).expanduser() / ".interfaceforge" / RUN_LOCK
+
+
+@contextmanager
+def run_lock(run: str | Path, operation: str) -> Iterator[Path]:
+    """Hold ``<run>/.interfaceforge/step1.lock`` (``O_EXCL``) for one recovery action on ``run``.
+
+    Covers the whole check -> archive -> mutate -> record sequence of
+    step1-repair / step1-resume and the re-check -> sbatch -> ledger sequence
+    of step1-launch, so two concurrent InterfaceForge processes can never both
+    act on one run.  It does not wait: a held lock raises ``SafetyError``
+    naming the holder.  It is never broken automatically (a mutation may copy
+    GB of outputs); a lock left by a killed process must be removed by hand.
+    """
+
+    lock = run_lock_path(run)
+    created_parent = not lock.parent.exists()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(lock, flags, 0o666)
+    except (FileExistsError, PermissionError) as exc:
+        if isinstance(exc, PermissionError) and os.name != "nt":
+            raise
+        try:
+            holder = lock.read_text(encoding="utf-8", errors="replace").strip() or "unknown holder"
+        except OSError:
+            holder = "unknown holder"
+        raise SafetyError(
+            f"Refusing to {operation} {Path(run)}: another InterfaceForge recovery command holds {lock} "
+            f"({holder}). Remove the lock only if no such process is running."
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(f"{operation} pid {os.getpid()} on {socket.gethostname()} at {utc_now_iso()}\n")
+        yield lock
+    finally:
+        try:
+            lock.unlink()
+            if created_parent:
+                lock.parent.rmdir()  # leave no trace in a run that had no .interfaceforge/
+        except OSError:
+            pass
+
+
+# Files whose modification marks a run as recently active (status, resume and repair share it).
+ACTIVITY_FILES = ("OSZICAR", "OUTCAR", "CONTCAR", "XDATCAR")
+
+
+def newest_activity(folder: str | Path) -> tuple[str | None, float | None]:
+    """``(file name, age in hours)`` of the most recently modified ``ACTIVITY_FILES`` entry."""
+
+    newest: tuple[float, str] | None = None
+    for name in ACTIVITY_FILES:
+        moment = _mtime(Path(folder) / name)
+        if moment is not None and (newest is None or moment > newest[0]):
+            newest = (moment, name)
+    if newest is None:
+        return None, None
+    return newest[1], (time.time() - newest[0]) / 3600.0
 
 
 def interrupted_archive(run: str | Path) -> Path | None:

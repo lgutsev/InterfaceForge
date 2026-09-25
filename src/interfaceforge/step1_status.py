@@ -47,6 +47,7 @@ from typing import Any
 from .aimd import _first_float, _first_int, preheat_ps
 from .audit import parse_oszicar, read_tail
 from .step1_lineage import (
+    ACTIVITY_FILES,
     MANIFEST,
     REPAIR_RECORD,
     RESUME_RECORD,
@@ -89,7 +90,7 @@ _STALE_HOURS_DEFAULT = 6.0
 
 # Files whose modification time says a run is still being written; the same
 # set step1-resume uses for its ACTIVE_OR_RECENT guard, so both agree.
-_ACTIVITY_FILES = ("OSZICAR", "OUTCAR", "CONTCAR", "XDATCAR")
+_ACTIVITY_FILES = ACTIVITY_FILES
 # squeue states of a job that has not started running yet.
 _QUEUED_STATES = frozenset({"PENDING", "CONFIGURING"})
 _NOT_STARTED_STATES = frozenset({"not-started", "repair-prepared", "resume-prepared"})
