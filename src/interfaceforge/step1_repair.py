@@ -7,6 +7,25 @@ the first energy/temperature runaway, starts the electronic state afresh,
 and runs only the number of ionic steps still needed to reach the original
 Step1 target.
 
+Repeated repair and generations
+-------------------------------
+Each repair creates generation N+1 of the run (``step1_lineage``).  The rewind
+point is found in the CURRENT segment's own OSZICAR/XDATCAR (frame ``k`` is
+segment ionic step ``k * NBLOCK``), while the accounting is cumulative:
+``safe_prefix_steps = accepted_prefix_steps + safe_segment_steps`` and
+``repair_nsw = original_nsw - safe_prefix_steps``, whether the current segment
+is the original run, an earlier repair (schema-2 or reconstructed schema-1
+record) or a resume.  A run that kept 16 steps at 1.0 fs, was repaired, and
+then kept 52 more steps of the 0.5 fs repair segment is therefore repaired
+again with 68 accepted steps, 332 remaining and the accepted-segment ledger
+``[16 @ 1.0 fs, 52 @ 0.5 fs]`` (0.042 ps).  Without ``ramp_from`` the new
+``TEBEG`` is the rewound segment's schedule temperature at the rewind point, so
+an interrupted TEBEG->TEEND ramp continues instead of restarting.  Execution
+re-checks Slurm and the planning fingerprint immediately before mutating,
+archives first (``archive_step1_state``), retires the previous segment record,
+seals its launch-ledger rows and writes a schema-2 ``step1_repair.json`` that
+keeps every schema-1 key with its original meaning.
+
 Warning vs hard instability
 ---------------------------
 ``diagnose_step1_run`` reads the OSZICAR MD rows of the *current* segment and
@@ -91,10 +110,9 @@ A final OSZICAR MD line that is not newline-terminated and stops before its
 
 from __future__ import annotations
 
-import json
 import math
 import re
-import shutil
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
@@ -102,10 +120,30 @@ from typing import Any
 
 from .aimd import _first_float, _first_int
 from .errors import SafetyError
+from .step1_lineage import (
+    REPAIR_RECORD,
+    accepted_ps,
+    archive_step1_state,
+    atomic_write_json,
+    build_segment_record,
+    current_generation,
+    finalize_archive,
+    format_temperature,
+    incar_schedule,
+    interrupted_archive,
+    ledger_paths_for,
+    new_generation_id,
+    retire_current_records,
+    run_fingerprint,
+    schedule_temperature,
+    seal_launch_rows,
+    utc_now_iso,
+)
+from .step1_scheduler import SchedulerGuard, SchedulerSnapshot, as_guard, resolve_stale_hours
 from .vasp import (
     CONSERVATIVE_ELECTRONIC_OVERRIDES,
     _poscar_elements,
-    archive_run,
+    _write_poscar_without_velocities,
     build_precondition_incar,
     parse_incar,
     require_files,
@@ -732,19 +770,498 @@ def _mtime_age_hours(path: Path) -> float | None:
     return (datetime.now(tz=timezone.utc) - modified).total_seconds() / 3600.0
 
 
+# --------------------------------------------------------------------------- #
+# Repair planning and execution
+# --------------------------------------------------------------------------- #
+
+# Plan statuses.  Only READY plans are executed; PREPARED is a READY plan after
+# execution.  ACTIVE_SLURM / ACTIVE_OR_RECENT / REVIEW are never mutated and make
+# ``prepare_step1_repair(execute=True)`` refuse the whole tree.
+REPAIR_READY = "READY"
+REPAIR_PREPARED = "PREPARED"
+REPAIR_ACTIVE_SLURM = "ACTIVE_SLURM"
+REPAIR_ACTIVE_OR_RECENT = "ACTIVE_OR_RECENT"
+REPAIR_REVIEW = "REVIEW"
+
+# Runtime outputs of the rewound segment that a repair removes once they are
+# archived (unchanged from schema 1).  A current step1_resume.json is retired
+# separately, through ``retire_current_records``.
+REPAIR_RUNTIME_OUTPUTS = (
+    "WAVECAR",
+    "CHG",
+    "CHGCAR",
+    "CONTCAR",
+    "XDATCAR",
+    "XDATCAR_FINAL",
+    "OSZICAR",
+    "OUTCAR",
+    "REPORT",
+    "vasprun.xml",
+    "vasp_md.dat",
+    "vasp_md_FINAL.dat",
+    ".vasp_md.dat",
+    "MD_TempPlot.png",
+)
+
+_DIAGNOSTIC_OPTION_KEYS = (
+    "energy_jump_ev",
+    "max_temperature_k",
+    "startup_grace_steps",
+    "catastrophic_energy_ev",
+    "reference_window_steps",
+)
+# Plan keys that describe the planning pass, not the prepared segment; they are
+# kept out of the written step1_repair.json.
+_PLAN_ONLY_KEYS = ("fingerprint", "skip_reason", "review_reasons", "active_jobs")
+_ARCHIVE_STAMP = re.compile(r"_(\d{8}T\d{6}Z)$")
+_BLOCKED_LINEAGE_STATUSES = ("UNREADABLE", "CONFLICT")
+
+
+def _validate_repair_options(
+    potim_fs: float, safety_steps: int, langevin_gamma: float | None, ramp_from: float | None
+) -> None:
+    if not (math.isfinite(potim_fs) and potim_fs > 0):
+        raise SafetyError("repair POTIM must be positive and finite")
+    if safety_steps < 0:
+        raise SafetyError("safety_steps cannot be negative")
+    if langevin_gamma is not None and not (math.isfinite(langevin_gamma) and langevin_gamma > 0):
+        raise SafetyError("--langevin-gamma must be positive")
+    if ramp_from is not None and not (math.isfinite(ramp_from) and ramp_from > 0):
+        raise SafetyError("--ramp-from must be a positive temperature in K")
+
+
+def _diagnostic_kwargs(options: Mapping[str, Any] | None) -> dict[str, Any]:
+    """``diagnose_step1_run`` keyword options; ``None`` values select the defaults there."""
+
+    kwargs = dict(options or {})
+    unknown = sorted(set(kwargs) - set(_DIAGNOSTIC_OPTION_KEYS))
+    if unknown:
+        raise ValueError(f"unknown Step1 diagnostic option(s): {', '.join(unknown)}")
+    return kwargs
+
+
+def _ledger_steps(ledger: list[dict[str, Any]]) -> int | None:
+    total = 0
+    for row in ledger:
+        steps = _first_int(row.get("steps"))
+        if steps is None:
+            return None
+        total += steps
+    return total
+
+
+def _active_label(jobs: list[dict[str, Any]]) -> str:
+    return ", ".join(f"job {job.get('job_id')} {job.get('state')}" for job in jobs)
+
+
+def plan_repair_run(
+    run: str | Path,
+    *,
+    snapshot: SchedulerSnapshot,
+    stale_hours: float | None,
+    potim_fs: float = 0.5,
+    algo: str = "Normal",
+    safety_steps: int = 8,
+    diagnostic_options: Mapping[str, Any] | None = None,
+    langevin_gamma: float | None = None,
+    ramp_from: float | None = None,
+    precondition: bool = False,
+) -> dict[str, Any] | None:
+    """Plan the repair of one Step1 run, or ``None`` when it is not hard-unstable.
+
+    Read-only: nothing in ``run`` is created, modified or removed.  The rewind
+    point comes from the CURRENT segment's own OSZICAR/XDATCAR (XDATCAR frame
+    ``k`` is segment ionic step ``k * NBLOCK``), ``safety_steps`` before the
+    diagnostic's ``first_bad_step`` (segment step 0 when only the SCF statistic
+    is hard).  The accounting is cumulative over generations
+    (``step1_lineage.current_generation``): ``safe_prefix_steps =
+    accepted_prefix_steps + safe_segment_steps`` and ``repair_nsw = original_nsw
+    - safe_prefix_steps``, so a repair of a repair or of a resume never loses the
+    accepted history.
+
+    The plan ``status`` is ``READY``, ``ACTIVE_SLURM`` (``snapshot`` lists a job
+    using the run as its WorkDir), ``ACTIVE_OR_RECENT`` (OSZICAR modified within
+    ``stale_hours``; ``None`` resolves via ``resolve_stale_hours``) or
+    ``REVIEW`` (``skip_reason``: unreadable/conflicting lineage, an interrupted
+    earlier mutation, missing inputs, a launcher that cannot be preconditioned,
+    or nothing left to run).  Only READY plans may be executed.
+    """
+
+    _validate_repair_options(potim_fs, safety_steps, langevin_gamma, ramp_from)
+    folder = Path(run).expanduser().resolve()
+    hours, _ = resolve_stale_hours(stale_hours, snapshot)
+    # Fingerprint first: any change after this point invalidates the plan at execution.
+    fingerprint = run_fingerprint(folder)
+    diagnostic = diagnose_step1_run(folder, **_diagnostic_kwargs(diagnostic_options))
+    if not diagnostic["unstable"]:
+        return None
+
+    incar = parse_incar(folder / "INCAR")
+    schedule = incar_schedule(incar)
+    nblock = int(schedule["nblock"])
+    generation = current_generation(folder, incar)
+    reviews: list[str] = []
+    if generation.status in _BLOCKED_LINEAGE_STATUSES:
+        detail = generation.conflict or f"{generation.record_path} cannot be read"
+        reviews.append(f"current generation is {generation.status}: {detail}")
+    interrupted = interrupted_archive(folder)
+    if interrupted is not None:
+        reviews.append(f"interrupted recovery mutation; inspect {interrupted}")
+    missing = [
+        name
+        for name in ("INCAR", "POSCAR", "KPOINTS", "POTCAR", "OSZICAR")
+        if not (folder / name).is_file() or not (folder / name).stat().st_size
+    ]
+    if missing:
+        reviews.append(f"missing required files: {', '.join(missing)}")
+
+    ion_count = 0
+    if (folder / "POSCAR").is_file():
+        try:
+            _, ion_count, _ = _poscar_layout(folder / "POSCAR")
+        except (SafetyError, IndexError, ValueError) as exc:
+            # A malformed POSCAR sends this run to review; it must not abort the whole tree's plan.
+            reviews.append(f"POSCAR cannot be parsed: {exc}")
+    xdatcar = next(
+        (
+            candidate
+            for candidate in (folder / "XDATCAR", folder / "XDATCAR_FINAL")
+            if candidate.is_file() and candidate.stat().st_size
+        ),
+        None,
+    )
+    frames = _xdatcar_frames(xdatcar, ion_count) if xdatcar is not None and ion_count else []
+
+    # Rewind point inside the current segment (segment step numbers).
+    first_bad = diagnostic["first_bad_step"] or 1
+    safe_step = max(0, first_bad - 1 - safety_steps)
+    safe_step = (safe_step // nblock) * nblock
+    safe_step = min(safe_step, len(frames) * nblock)
+    rewind_frame = safe_step // nblock if safe_step else None
+    source = xdatcar.name if safe_step and xdatcar is not None else "POSCAR"
+
+    # Cumulative accounting over generations.
+    prefix = int(generation.accepted_prefix_steps)
+    original_nsw = generation.original_nsw
+    if original_nsw is None or original_nsw <= 0:
+        reviews.append(f"no positive whole-run target NSW ({generation.generation_id}; INCAR NSW={incar.get('NSW')})")
+        cumulative = prefix + safe_step
+        remaining: int | None = None
+    else:
+        cumulative = min(original_nsw, prefix + safe_step)
+        remaining = original_nsw - cumulative
+        if remaining <= 0:
+            reviews.append(f"no ionic steps remain after the rewind (accepted {cumulative}/{original_nsw})")
+
+    # Temperature schedule: continue the rewound segment's ramp from the rewind
+    # point unless --ramp-from asks for a gentler restart.
+    segment_tebeg = float(schedule["tebeg_k"])
+    segment_teend = float(schedule["teend_k"])
+    at_rewind = schedule_temperature(segment_tebeg, segment_teend, schedule["nsw"], safe_step)
+    if ramp_from is not None:
+        tebeg_text: str | None = f"{ramp_from:g}"
+        repair_tebeg = float(ramp_from)
+    else:
+        repair_tebeg = float(format_temperature(at_rewind))
+        tebeg_text = format_temperature(at_rewind) if abs(repair_tebeg - segment_tebeg) > 1e-9 else None
+    # An absent TEEND defaults to TEBEG in VASP: write the endpoint whenever the
+    # new segment ramps, so the original target temperature is kept.
+    teend_text = None
+    if not schedule["teend_explicit"] and abs(repair_tebeg - segment_teend) > 1e-9:
+        teend_text = format_temperature(segment_teend)
+
+    incar_changes: dict[str, Any] = {
+        "ISTART": 1 if precondition else 0,
+        "ALGO": algo,
+        "POTIM": f"{potim_fs:g}",
+        "NSW": remaining,
+        **CONSERVATIVE_ELECTRONIC_OVERRIDES,
+    }
+    incar_delete = ["ICHARG"]
+    if tebeg_text is not None:
+        incar_changes["TEBEG"] = tebeg_text
+    if teend_text is not None:
+        incar_changes["TEEND"] = teend_text
+    if langevin_gamma is not None:
+        try:
+            n_species = len(_poscar_elements(folder / "POSCAR"))
+        except (OSError, SafetyError) as exc:
+            reviews.append(f"--langevin needs the POSCAR species: {exc}")
+            n_species = 0
+        incar_changes["MDALGO"] = 3
+        incar_changes["LANGEVIN_GAMMA"] = " ".join(f"{langevin_gamma:g}" for _ in range(n_species))
+        incar_delete.append("SMASS")
+    if precondition:
+        blocker = precondition_blocker(folder)
+        if blocker is not None:
+            reviews.append(f"cannot precondition: {blocker}")
+
+    # Accepted-segment ledger once this repair closes the current segment.
+    segment_potim = schedule["potim_fs"]
+    closed_segment = {
+        "generation": generation.generation,
+        "generation_id": generation.generation_id,
+        "kind": generation.kind,
+        "steps": safe_step,
+        "potim_fs": segment_potim,
+        "ps": round(safe_step * segment_potim / 1000.0, 9) if segment_potim is not None else None,
+        "tebeg_k": segment_tebeg,
+        "teend_k": round(at_rewind, 2),
+        "restart_source": f"{source} frame {rewind_frame}" if rewind_frame else "POSCAR",
+    }
+    ledger = [dict(row) for row in generation.ledger] + [closed_segment]
+    ledger_exact = bool(generation.ledger_exact) and segment_potim is not None and _ledger_steps(ledger) == cumulative
+
+    new_generation = generation.generation + 1
+    thermostat = "langevin (MDALGO=3)" if langevin_gamma is not None else schedule["thermostat"]
+    repair_teend = segment_teend
+    active_jobs = snapshot.active_jobs_for(folder)
+    age_hours = _mtime_age_hours(folder / "OSZICAR")
+    if active_jobs:
+        status, skip_reason = REPAIR_ACTIVE_SLURM, f"active in Slurm ({_active_label(active_jobs)})"
+    elif age_hours is None or age_hours < hours:
+        age_text = "unknown" if age_hours is None else f"{age_hours:.2f} h ago"
+        status, skip_reason = REPAIR_ACTIVE_OR_RECENT, f"OSZICAR updated {age_text} (< {hours:g} h)"
+    elif reviews:
+        status, skip_reason = REPAIR_REVIEW, "; ".join(reviews)
+    else:
+        status, skip_reason = REPAIR_READY, None
+
+    return {
+        "run": str(folder),
+        "status": status,
+        "skip_reason": skip_reason,
+        "review_reasons": reviews,
+        "active_jobs": active_jobs,
+        "age_hours": age_hours,
+        "diagnostic": diagnostic,
+        # Schema-1 keys (identical meaning in step1_repair.json schema 2).
+        "source": source,
+        "safe_prefix_steps": cumulative,
+        "safe_segment_steps": safe_step,
+        "previous_safe_prefix_steps": prefix,
+        "rewind_frame": rewind_frame,
+        "original_nsw": original_nsw,
+        "repair_nsw": remaining,
+        "original_potim_fs": _first_float(incar.get("POTIM"), 1.0),
+        "repair_potim_fs": float(potim_fs),
+        "repair_algo": algo,
+        "repair_electronic": dict(CONSERVATIVE_ELECTRONIC_OVERRIDES),
+        "repair_langevin_gamma": langevin_gamma,
+        "repair_ramp_from_k": ramp_from,
+        "repair_precondition": bool(precondition),
+        "archive": None,
+        # Generation lineage.
+        "generation": new_generation,
+        "generation_id": None,
+        "parent_generation": generation.generation,
+        "parent_generation_id": generation.generation_id,
+        "parent_segment_kind": generation.kind,
+        "parent_legacy_record": bool(generation.legacy and generation.record_path is not None),
+        "accepted_segments": ledger,
+        "accepted_ps": accepted_ps(ledger),
+        "ledger_exact": ledger_exact,
+        "operation": f"step1_repair_g{new_generation}",
+        # The segment being rewound and the one this repair prepares.
+        "rewound_segment": {
+            "tebeg_k": segment_tebeg,
+            "teend_k": segment_teend,
+            "nsw": schedule["nsw"],
+            "potim_fs": segment_potim,
+            "nblock": nblock,
+            "thermostat": schedule["thermostat"],
+            "ramp": bool(schedule["ramp"]),
+            "temperature_at_rewind_k": round(at_rewind, 2),
+        },
+        "repair_tebeg_k": repair_tebeg,
+        "repair_teend_k": repair_teend,
+        "segment_schedule": {
+            "tebeg_k": repair_tebeg,
+            "teend_k": repair_teend,
+            "nsw": remaining,
+            "thermostat": thermostat,
+            "ramp": abs(repair_tebeg - repair_teend) > 1e-9,
+        },
+        "incar_changes": incar_changes,
+        "incar_delete": incar_delete,
+        "fingerprint": fingerprint,
+    }
+
+
+def execute_repair_plan(
+    plan: Mapping[str, Any], *, guard: SchedulerGuard, ledger_roots: Iterable[str | Path] = ()
+) -> dict[str, Any]:
+    """Prepare the repair segment described by a READY ``plan``; returns the updated plan.
+
+    Every check that can refuse runs before the first write: plan status, the
+    planning fingerprint, required inputs, the lineage the plan was built on,
+    the rewind frame, the launcher (when preconditioning) and, last and
+    immediately before mutating, ``guard.assert_inactive(run)`` followed by a
+    second fingerprint comparison (a squeue call can take seconds).  Then:
+    ``archive_step1_state(run, "step1_repair_g<N>")``; POSCAR <- the XDATCAR
+    rewind frame, or the segment-start POSCAR WITHOUT its velocity block when
+    rewinding to segment step 0; runtime outputs removed; INCAR updated (and
+    the launcher preconditioned after it); the previous segment record retired
+    and its launch rows sealed; a schema-2 ``step1_repair.json`` written; the
+    archive finalized.  An exception after archiving leaves the archive
+    manifest ``IN_PROGRESS`` so the interrupted mutation stays discoverable.
+    """
+
+    if not plan.get("run"):
+        raise SafetyError("Refusing to execute a repair plan that names no run directory")
+    run = Path(str(plan["run"])).expanduser()
+    if plan.get("status") != REPAIR_READY:
+        raise SafetyError(
+            f"Refusing to execute the repair plan for {run}: status is {plan.get('status')!r}, not READY"
+            + (f" ({plan.get('skip_reason')})" if plan.get("skip_reason") else "")
+        )
+    if run_fingerprint(run) != plan.get("fingerprint"):
+        raise SafetyError(f"Refusing to mutate {run}: it changed since planning (file fingerprint differs); plan again")
+    require_files(run, ("INCAR", "POSCAR", "KPOINTS", "POTCAR", "OSZICAR"))
+    parent = current_generation(run)
+    if parent.generation_id != plan.get("parent_generation_id") or parent.status in _BLOCKED_LINEAGE_STATUSES:
+        raise SafetyError(
+            f"Refusing to mutate {run}: its current generation changed since planning "
+            f"({plan.get('parent_generation_id')} -> {parent.generation_id}, status {parent.status})"
+        )
+    interrupted = interrupted_archive(run)
+    if interrupted is not None:
+        raise SafetyError(
+            f"Refusing to mutate {run}: an earlier recovery mutation was interrupted; inspect {interrupted}"
+        )
+
+    safe_step = int(plan["safe_segment_steps"])
+    frame: list[str] | None = None
+    if safe_step:
+        nblock = int(incar_schedule(parse_incar(run / "INCAR"))["nblock"])
+        _, ion_count, _ = _poscar_layout(run / "POSCAR")
+        xdatcar = run / str(plan["source"])
+        frames = _xdatcar_frames(xdatcar, ion_count) if xdatcar.is_file() else []
+        index = safe_step // nblock
+        if safe_step % nblock or not 1 <= index <= len(frames):
+            raise SafetyError(
+                f"Refusing to mutate {run}: {xdatcar.name} has {len(frames)} frame(s) at NBLOCK={nblock}, "
+                f"so segment step {safe_step} cannot be restored"
+            )
+        frame = frames[index - 1]
+    precondition = bool(plan.get("repair_precondition"))
+    if precondition:
+        blocker = precondition_blocker(run)
+        if blocker is not None:
+            raise SafetyError(f"Refusing to mutate {run}: cannot precondition: {blocker}")
+    incar_changes = dict(plan["incar_changes"])
+    if incar_changes.get("NSW") is None or int(incar_changes["NSW"]) <= 0:
+        raise SafetyError(f"Refusing to mutate {run}: the repair segment would have NSW={incar_changes.get('NSW')}")
+
+    # ---- mutation starts here (Slurm and the fingerprint re-checked immediately before) ----
+    guard.assert_inactive(run)
+    if run_fingerprint(run) != plan.get("fingerprint"):
+        # A file changed while the scheduler was being queried.
+        raise SafetyError(f"Refusing to mutate {run}: it changed since planning (file fingerprint differs); plan again")
+    archive = archive_step1_state(run, str(plan["operation"]))
+    if frame is not None:
+        _write_rewind_poscar(archive / "POSCAR", frame, run / "POSCAR")
+    else:
+        # Segment step 0: its POSCAR may carry a CONTCAR's velocity and
+        # predictor-corrector blocks, which belong to the discarded dynamics.
+        _write_poscar_without_velocities(archive / "POSCAR", run / "POSCAR")
+    for name in REPAIR_RUNTIME_OUTPUTS:
+        (run / name).unlink(missing_ok=True)
+    update_incar(run / "INCAR", incar_changes, delete=list(plan.get("incar_delete") or ()))
+    if precondition:
+        apply_precondition(run)  # after update_incar: INCAR.precondition derives from the final MD INCAR
+
+    retired = retire_current_records(run, archive)
+    stamp_match = _ARCHIVE_STAMP.search(archive.name)
+    generation = int(plan["generation"])
+    generation_id = new_generation_id("repair", generation, stamp_match.group(1) if stamp_match else None)
+    sealed = seal_launch_rows(
+        run,
+        ledger_paths_for(run, [Path(root) for root in ledger_roots]),
+        retired_generation_id=parent.generation_id,
+        new_generation_id=generation_id,
+    )
+    prepared_at = utc_now_iso()
+    extra = {key: value for key, value in plan.items() if key not in _PLAN_ONLY_KEYS}
+    extra.update({"retired_records": retired, "sealed_ledgers": sealed})
+    record = build_segment_record(
+        "repair",
+        run=run.resolve(),
+        generation=generation,
+        generation_id=generation_id,
+        parent=parent,
+        prepared_at=prepared_at,
+        original_nsw=int(plan["original_nsw"]),
+        accepted_prefix_steps=int(plan["safe_prefix_steps"]),
+        accepted_segments=list(plan["accepted_segments"]),
+        ledger_exact=bool(plan["ledger_exact"]),
+        segment_nsw=int(plan["repair_nsw"]),
+        segment_potim_fs=float(plan["repair_potim_fs"]),
+        segment_schedule=dict(plan["segment_schedule"]),
+        archive=str(archive),
+        extra=extra,
+    )
+    atomic_write_json(run / REPAIR_RECORD, record)
+    finalize_archive(archive, generation_id=generation_id)
+
+    updated = dict(plan)
+    updated.update(
+        {
+            "status": REPAIR_PREPARED,
+            "archive": str(archive),
+            "generation_id": generation_id,
+            "prepared_at": prepared_at,
+            "retired_records": retired,
+            "sealed_ledgers": sealed,
+        }
+    )
+    return updated
+
+
+def _run_label(root: Path, run: str | Path) -> str:
+    try:
+        relative = Path(run).relative_to(root).as_posix()
+    except ValueError:
+        return str(run)
+    return relative if relative != "." else Path(run).name
+
+
+def _refuse_blocked_tree(root: Path, plans: list[dict[str, Any]], stale_hours: float) -> None:
+    """Tree-level rule: never partially mutate while any unstable run is not READY."""
+
+    recent = [plan for plan in plans if plan["status"] == REPAIR_ACTIVE_OR_RECENT]
+    active = [plan for plan in plans if plan["status"] == REPAIR_ACTIVE_SLURM]
+    review = [plan for plan in plans if plan["status"] == REPAIR_REVIEW]
+    reasons: list[str] = []
+    if active:
+        labels = ", ".join(f"{_run_label(root, plan['run'])} ({_active_label(plan['active_jobs'])})" for plan in active)
+        reasons.append(f"unstable runs are active in Slurm: {labels}")
+    if recent:
+        labels = ", ".join(_run_label(root, plan["run"]) for plan in recent)
+        reasons.append(f"unstable runs are still active/recent (<{stale_hours:g} h): {labels}")
+    if review:
+        labels = "; ".join(f"{_run_label(root, plan['run'])}: {plan['skip_reason']}" for plan in review)
+        reasons.append(f"unstable runs need review before repair: {labels}")
+    if reasons:
+        raise SafetyError("Refusing to partially mutate the tree because " + "; ".join(reasons))
+
+
 def prepare_step1_repair(
     root: str | Path,
     *,
     execute: bool = False,
-    stale_hours: float = 6.0,
+    stale_hours: float | None = None,
+    scheduler: str | SchedulerGuard = "auto",
     potim_fs: float = 0.5,
     algo: str = "Normal",
     safety_steps: int = 8,
-    energy_jump_ev: float = 50.0,
+    energy_jump_ev: float = DEFAULT_ENERGY_JUMP_EV,
     max_temperature_k: float | None = None,
     langevin_gamma: float | None = None,
     ramp_from: float | None = None,
     precondition: bool = False,
+    startup_grace_steps: int = DEFAULT_STARTUP_GRACE_STEPS,
+    catastrophic_energy_ev: float = DEFAULT_CATASTROPHIC_ENERGY_EV,
 ) -> dict[str, Any]:
     """Plan or prepare bounded recovery segments for unstable, inactive runs.
 
@@ -753,175 +1270,89 @@ def prepare_step1_repair(
     ``POTIM=potim_fs`` -- the crashes are driven by forces read off a
     sloshing SCF, not the timestep alone. ``langevin_gamma`` swaps
     ``SMASS=-1`` for a Langevin thermostat (``MDALGO=3``); ``ramp_from`` sets
-    a lower initial ``TEBEG`` so the rewound geometry re-thermalises gently.
+    a lower initial ``TEBEG`` so the rewound geometry re-thermalises gently
+    (without it, ``TEBEG`` continues the rewound segment's schedule from the
+    rewind point, which leaves a constant-temperature segment unchanged).
     ``precondition`` writes an ``INCAR.precondition`` (NSW=0 static) and
     rewraps the launcher so the recovery MD restarts from a converged
     ``WAVECAR`` instead of the atomic-density guess.
+
+    Dry run (the default) reads files and asks the scheduler, nothing else.
+    ``scheduler`` is a ``--scheduler`` mode or a shared ``SchedulerGuard``;
+    ``stale_hours=None`` resolves to 0.1 h when Slurm is verified and 6 h
+    otherwise.  With ``execute=True`` the whole tree is refused while any
+    unstable run is active in Slurm, recently modified or needs review;
+    otherwise each READY run is prepared by ``execute_repair_plan``, stopping
+    at the first failure with a ``SafetyError`` that names the runs already
+    prepared.
     """
 
     root_path = Path(root).expanduser().resolve()
     if not root_path.is_dir():
         raise FileNotFoundError(root_path)
-    if potim_fs <= 0 or not math.isfinite(potim_fs):
-        raise SafetyError("repair POTIM must be positive and finite")
-    if safety_steps < 0:
-        raise SafetyError("safety_steps cannot be negative")
-    if langevin_gamma is not None and langevin_gamma <= 0:
-        raise SafetyError("--langevin-gamma must be positive")
-    if ramp_from is not None and ramp_from <= 0:
-        raise SafetyError("--ramp-from must be a positive temperature in K")
+    _validate_repair_options(potim_fs, safety_steps, langevin_gamma, ramp_from)
+    # Validate the diagnostic options before touching the scheduler or any run.
+    energy_jump, _, grace, catastrophic, _ = _diagnostic_settings(
+        energy_jump_ev, max_temperature_k, startup_grace_steps, catastrophic_energy_ev, None
+    )
+    diagnostic_options = {
+        "energy_jump_ev": energy_jump_ev,
+        "max_temperature_k": max_temperature_k,
+        "startup_grace_steps": startup_grace_steps,
+        "catastrophic_energy_ev": catastrophic_energy_ev,
+    }
+    guard = as_guard(scheduler)
+    snapshot = guard.snapshot
+    hours, hours_reason = resolve_stale_hours(stale_hours, snapshot)
 
     plans: list[dict[str, Any]] = []
     for run in _discover_runs(root_path):
-        require_files(run, ("INCAR", "POSCAR", "OSZICAR"))
-        incar = parse_incar(run / "INCAR")
-        target_nsw = _first_int(incar.get("NSW"))
-        nblock = _first_int(incar.get("NBLOCK"), 1) or 1
-        if target_nsw is None or target_nsw <= 0:
-            raise SafetyError(f"{run}/INCAR has no positive NSW")
-
-        previous_repair: dict[str, Any] = {}
-        previous_repair_path = run / "step1_repair.json"
-        if previous_repair_path.is_file():
-            try:
-                previous_repair = json.loads(previous_repair_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                previous_repair = {}
-        previous_prefix_steps = _first_int(previous_repair.get("safe_prefix_steps"), 0) or 0
-        original_target_nsw = (
-            _first_int(previous_repair.get("original_nsw"), target_nsw) or target_nsw
-        )
-        diagnostic = diagnose_step1_run(
+        plan = plan_repair_run(
             run,
-            energy_jump_ev=energy_jump_ev,
-            max_temperature_k=max_temperature_k,
+            snapshot=snapshot,
+            stale_hours=hours,
+            potim_fs=potim_fs,
+            algo=algo,
+            safety_steps=safety_steps,
+            diagnostic_options=diagnostic_options,
+            langevin_gamma=langevin_gamma,
+            ramp_from=ramp_from,
+            precondition=precondition,
         )
-        if not diagnostic["unstable"]:
-            continue
-        age_hours = _mtime_age_hours(run / "OSZICAR")
-        inactive = age_hours is not None and age_hours >= stale_hours
-        first_bad = diagnostic["first_bad_step"] or 1
-        safe_step = max(0, first_bad - 1 - safety_steps)
-        safe_step = (safe_step // nblock) * nblock
+        if plan is not None:
+            plans.append(plan)
 
-        xdatcar = next(
-            (
-                candidate
-                for candidate in (run / "XDATCAR", run / "XDATCAR_FINAL")
-                if candidate.is_file() and candidate.stat().st_size
-            ),
-            None,
-        )
-        _, ion_count, _ = _poscar_layout(run / "POSCAR")
-        frames = _xdatcar_frames(xdatcar, ion_count) if xdatcar is not None else []
-        safe_step = min(safe_step, len(frames) * nblock)
-        safe_step = (safe_step // nblock) * nblock
-        cumulative_safe_step = min(original_target_nsw, previous_prefix_steps + safe_step)
-        remaining = original_target_nsw - cumulative_safe_step
-        plan = {
-            "run": str(run),
-            "status": "READY" if inactive else "ACTIVE_OR_RECENT",
-            "age_hours": age_hours,
-            "diagnostic": diagnostic,
-            "source": "POSCAR" if safe_step == 0 else xdatcar.name,
-            "safe_prefix_steps": cumulative_safe_step,
-            "safe_segment_steps": safe_step,
-            "previous_safe_prefix_steps": previous_prefix_steps,
-            "rewind_frame": safe_step // nblock if safe_step else None,
-            "original_nsw": original_target_nsw,
-            "repair_nsw": remaining,
-            "original_potim_fs": _first_float(incar.get("POTIM"), 1.0),
-            "repair_potim_fs": float(potim_fs),
-            "repair_algo": algo,
-            "repair_electronic": dict(CONSERVATIVE_ELECTRONIC_OVERRIDES),
-            "repair_langevin_gamma": langevin_gamma,
-            "repair_ramp_from_k": ramp_from,
-            "repair_precondition": bool(precondition),
-            "archive": None,
-        }
-        plans.append(plan)
     if execute:
-        recent = [row for row in plans if row["status"] == "ACTIVE_OR_RECENT"]
-        if recent:
-            labels = ", ".join(Path(row["run"]).name for row in recent)
-            raise SafetyError(
-                "Refusing to partially mutate the tree because unstable runs are still "
-                f"active/recent (<{stale_hours:g} h): {labels}"
-            )
-
-    for plan in (plans if execute else []):
-        run = Path(plan["run"])
-        require_files(run, ("INCAR", "POSCAR", "KPOINTS", "POTCAR", "OSZICAR"))
-        safe_segment_step = int(plan.get("safe_segment_steps", plan["safe_prefix_steps"]))
-        nblock = _first_int(parse_incar(run / "INCAR").get("NBLOCK"), 1) or 1
-        xdatcar = run / str(plan["source"])
-        _, ion_count, _ = _poscar_layout(run / "POSCAR")
-        frames = _xdatcar_frames(xdatcar, ion_count) if safe_segment_step else []
-        archive = archive_run(run, "step1_repair")
-        if safe_segment_step:
-            frame = frames[safe_segment_step // nblock - 1]
-            _write_rewind_poscar(archive / "POSCAR", frame, run / "POSCAR")
-        else:
-            shutil.copy2(archive / "POSCAR", run / "POSCAR")
-        for name in (
-            "WAVECAR",
-            "CHG",
-            "CHGCAR",
-            "CONTCAR",
-            "XDATCAR",
-            "XDATCAR_FINAL",
-            "OSZICAR",
-            "OUTCAR",
-            "REPORT",
-            "vasprun.xml",
-            "vasp_md.dat",
-            "vasp_md_FINAL.dat",
-            ".vasp_md.dat",
-            "MD_TempPlot.png",
-        ):
-            (run / name).unlink(missing_ok=True)
-        incar_changes: dict[str, Any] = {
-            "ISTART": 1 if precondition else 0,
-            "ALGO": algo,
-            "POTIM": f"{potim_fs:g}",
-            "NSW": plan["repair_nsw"],
-            **CONSERVATIVE_ELECTRONIC_OVERRIDES,
-        }
-        incar_delete = {"ICHARG"}
-        if ramp_from is not None:
-            incar_changes["TEBEG"] = f"{ramp_from:g}"
-        if langevin_gamma is not None:
-            n_species = len(_poscar_elements(run / "POSCAR"))
-            incar_changes["MDALGO"] = 3
-            incar_changes["LANGEVIN_GAMMA"] = " ".join(
-                f"{langevin_gamma:g}" for _ in range(n_species)
-            )
-            incar_delete.add("SMASS")
-        update_incar(run / "INCAR", incar_changes, delete=incar_delete)
-        if precondition:
-            apply_precondition(run)
-        plan["repair_precondition"] = bool(precondition)
-        repair_record = {
-            "format": "interfaceforge-step1-repair",
-            "schema_version": 1,
-            **plan,
-            "archive": str(archive),
-            "status": "PREPARED",
-        }
-        (run / "step1_repair.json").write_text(
-            json.dumps(repair_record, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        plan["archive"] = str(archive)
-        plan["status"] = "PREPARED"
+        _refuse_blocked_tree(root_path, plans, hours)
+        prepared: list[str] = []
+        for index, plan in enumerate(plans):
+            try:
+                plans[index] = execute_repair_plan(plan, guard=guard, ledger_roots=(root_path,))
+            except Exception as exc:
+                interrupted = interrupted_archive(plan["run"])
+                state = (
+                    f"its interrupted mutation is archived at {interrupted} (ARCHIVE_MANIFEST status IN_PROGRESS)"
+                    if interrupted is not None
+                    else "it was not modified"
+                )
+                done = ", ".join(_run_label(root_path, run) for run in prepared) or "none"
+                untouched = ", ".join(_run_label(root_path, row["run"]) for row in plans[index + 1 :]) or "none"
+                raise SafetyError(
+                    f"step1-repair stopped at {_run_label(root_path, plan['run'])}: {exc}; {state}. "
+                    f"Already prepared: {done}. Not attempted: {untouched}."
+                ) from exc
+            prepared.append(plan["run"])
 
     return {
         "format": "interfaceforge-step1-repair-plan",
         "schema_version": 1,
         "mode": "prepared" if execute else "dry-run",
         "root": str(root_path),
+        "scheduler": snapshot.to_dict(),
         "settings": {
-            "stale_hours": stale_hours,
+            "stale_hours": hours,
+            "stale_hours_requested": stale_hours,
+            "stale_hours_reason": hours_reason,
             "potim_fs": potim_fs,
             "algo": algo,
             "electronic_overrides": dict(CONSERVATIVE_ELECTRONIC_OVERRIDES),
@@ -929,10 +1360,15 @@ def prepare_step1_repair(
             "ramp_from_k": ramp_from,
             "precondition": bool(precondition),
             "safety_steps": safety_steps,
-            "energy_jump_ev": energy_jump_ev,
+            "energy_jump_ev": energy_jump,
             "max_temperature_k": max_temperature_k,
+            "startup_grace_steps": grace,
+            "catastrophic_energy_ev": catastrophic,
         },
         "runs": plans,
-        "repairable": sum(row["status"] in {"READY", "PREPARED"} for row in plans),
-        "skipped_active_or_recent": sum(row["status"] == "ACTIVE_OR_RECENT" for row in plans),
+        "repairable": sum(row["status"] in {REPAIR_READY, REPAIR_PREPARED} for row in plans),
+        "skipped_active_or_recent": sum(
+            row["status"] in {REPAIR_ACTIVE_OR_RECENT, REPAIR_ACTIVE_SLURM} for row in plans
+        ),
+        "skipped_review": sum(row["status"] == REPAIR_REVIEW for row in plans),
     }
