@@ -703,20 +703,28 @@ def _legacy_prepared_epoch(record: dict[str, Any], record_path: Path) -> float |
 def _is_first_repair(link: _ChainLink) -> bool:
     """True when the legacy record ``link`` is R_1 (no earlier repair to follow).
 
-    A record without ``previous_safe_prefix_steps`` predates the cumulative
-    fix and is generation 1.  A positive previous prefix always has a
-    predecessor.  A previous prefix of 0 is ambiguous: the first repair, or a
-    repair of a repair that had rewound to step 0 (early first bad step,
-    SCF-only failure).  archive_run copies the top-level ``step1_repair.json``,
+    A positive ``previous_safe_prefix_steps`` always has a predecessor.  A
+    previous prefix of 0 is ambiguous (the first repair, or a repair of a
+    repair that had rewound to step 0), and so is a record without the key:
+    it predates the cumulative fix, and a repair-of-repair written then
+    lacks it too.  archive_run copies the top-level ``step1_repair.json``,
     so the predecessor exists exactly when the record's archive holds one.
     """
 
     record = link.record
-    if "previous_safe_prefix_steps" not in record:
-        return True
     if (_int(record.get("previous_safe_prefix_steps"), 0) or 0) > 0:
         return False
     return link.archive is None or not (link.archive / REPAIR_RECORD).is_file()
+
+
+def _pre_cumulative(record: dict[str, Any]) -> bool:
+    """True for a record written before the cumulative-prefix fix.
+
+    Such a record's ``safe_prefix_steps`` counts only its own segment and its
+    ``original_nsw`` is the NSW of the segment it rewound (not the target).
+    """
+
+    return "previous_safe_prefix_steps" not in record and "safe_segment_steps" not in record
 
 
 def _walk_legacy_chain(
@@ -831,6 +839,8 @@ def _legacy_repair_generation(run: Path, path: Path, record: dict[str, Any], inc
             current = link.record
             if index == 0 and base is None:
                 steps = _int(current.get("safe_prefix_steps"), 0) or 0
+            elif _pre_cumulative(current):
+                steps = _int(current.get("safe_prefix_steps"), 0) or 0  # segment-only before the fix
             else:
                 steps = _segment_steps(current, previous_prefix)
                 stated = _int(current.get("previous_safe_prefix_steps"))
@@ -845,7 +855,14 @@ def _legacy_repair_generation(run: Path, path: Path, record: dict[str, Any], inc
             previous_gid = _legacy_generation_id(this_generation, current, link.record_path)
             previous_kind = "repair"
             previous_generation = this_generation
-            previous_prefix = _int(current.get("safe_prefix_steps"), previous_prefix + steps) or 0
+            if _pre_cumulative(current):
+                previous_prefix += steps
+            else:
+                previous_prefix = _int(current.get("safe_prefix_steps"), previous_prefix + steps) or 0
+        pre_cumulative_repair_of_repair = _pre_cumulative(record) and len(ledger) > 1
+        if pre_cumulative_repair_of_repair:
+            # Rebuilt from the chain: the record itself holds segment-only values.
+            prefix = previous_prefix
         if sum(_int(row.get("steps"), 0) or 0 for row in ledger) != prefix:
             exact = False
     else:
@@ -891,7 +908,11 @@ def _legacy_repair_generation(run: Path, path: Path, record: dict[str, Any], inc
     if segment_potim is None:
         segment_potim = schedule["potim_fs"]
     original_nsw = _int(record.get("original_nsw"))
-    if original_nsw is None and segment_nsw is not None:
+    if segment_nsw is not None and (
+        original_nsw is None or (complete and _pre_cumulative(record) and len(ledger) > 1)
+    ):
+        # A pre-fix repair-of-repair recorded the rewound segment's NSW as
+        # original_nsw; remaining + accepted is the true target.
         original_nsw = prefix + segment_nsw
     status = record.get("status")
     return Generation(
@@ -1525,6 +1546,10 @@ def _row_current(row: dict[str, Any], generation: Generation) -> tuple[bool, str
         return False, f"legacy row cannot belong to generation-aware {generation.generation_id}"
     if generation.generation == 0:
         return True, "legacy row counts for generation 0"
+    if str(row.get("kind") or "") == "prepared":
+        # The pre-lineage launcher wrote kind "prepared" only for generation-0
+        # submissions ("repair-prepared" for repairs), whatever the ledger mtime.
+        return False, "legacy gen-0 launch row (kind prepared) cannot submit a repair generation"
     row_time = _row_time(row)
     if row_time is None or generation.prepared_epoch is None:
         # Unknown ordering: count it, so a duplicate submission is never risked.

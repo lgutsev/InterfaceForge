@@ -885,9 +885,7 @@ class LegacyGenerationTests(LineageTestCase):
     def test_pre_cumulative_fix_record_is_generation_one(self) -> None:
         run = write_step1_run(self.root, "run", nsw=388, potim=0.5)
         archive = run / ".interfaceforge" / "archive" / "step1_repair_20260801T000000Z"
-        archive.mkdir(parents=True)
-        # A record in the archive must NOT be followed for a pre-fix record.
-        (archive / REPAIR_RECORD).write_text(json.dumps({"safe_prefix_steps": 99}), encoding="utf-8")
+        archive.mkdir(parents=True)  # no step1_repair.json inside: nothing earlier to follow
         record = _legacy_record(run, archive=str(archive))
         del record["previous_safe_prefix_steps"]
         del record["safe_segment_steps"]
@@ -900,6 +898,39 @@ class LegacyGenerationTests(LineageTestCase):
         self.assertEqual(generation.ledger[0]["steps"], 12)
         self.assertEqual(generation.ledger[0]["kind"], "original")
         self.assertEqual(generation.generation_id, "legacy-repair-g1-20260801T000000Z")
+
+    def test_pre_cumulative_fix_repair_of_repair_is_rebuilt_from_the_chain(self) -> None:
+        # Both repairs written before the cumulative-prefix fix: R2's safe_prefix_steps is
+        # segment-only and its original_nsw is R1's repair NSW; R2's archive holds R1.
+        run = write_step1_run(self.root, "run", nsw=316, potim=0.5)
+        archives = run / ".interfaceforge" / "archive"
+        first, second = archives / "step1_repair_20260801T000000Z", archives / "step1_repair_20260802T000000Z"
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        (first / "INCAR").write_text("NSW = 400\nPOTIM = 1.0\nTEBEG = 300\n", encoding="utf-8")
+        (second / "INCAR").write_text("NSW = 368\nPOTIM = 0.5\nTEBEG = 300\n", encoding="utf-8")
+        pre_fix = ("previous_safe_prefix_steps", "safe_segment_steps")
+        r1 = _legacy_record(run, archive=str(first), safe_prefix_steps=32, original_nsw=400, repair_nsw=368,
+                            original_potim_fs=1.0)
+        r2 = _legacy_record(run, archive=str(second), safe_prefix_steps=52, original_nsw=368, repair_nsw=316,
+                            original_potim_fs=0.5)
+        for record in (r1, r2):
+            for key in pre_fix:
+                del record[key]
+        (second / REPAIR_RECORD).write_text(json.dumps(r1), encoding="utf-8")
+        (run / REPAIR_RECORD).write_text(json.dumps(r2), encoding="utf-8")
+
+        generation = current_generation(run)
+        self.assertEqual(generation.generation, 2)
+        self.assertEqual(generation.accepted_prefix_steps, 84)
+        self.assertEqual(generation.original_nsw, 400)
+        self.assertEqual(generation.segment_nsw, 316)
+        self.assertTrue(generation.ledger_exact)
+        self.assertEqual(
+            [(row["generation"], row["kind"], row["steps"]) for row in generation.ledger],
+            [(0, "original", 32), (1, "repair", 52)],
+        )
+        self.assertEqual(generation.generation_id, "legacy-repair-g2-20260802T000000Z")
 
 
 class RecordMutationTests(LineageTestCase):
@@ -1202,6 +1233,15 @@ class SubmissionStateTests(LineageTestCase):
         self.assertEqual(state["current_submission"]["job_id"], "222")
         self.assertEqual(state["historical_submissions"], [])
         self.assertIn(">=", state["match_rule"])
+
+    def test_legacy_gen0_row_with_bumped_ledger_mtime_is_not_a_repair_submission(self) -> None:
+        # The old launcher wrote kind "prepared" only for generation 0; a copy or edit that
+        # refreshes the ledger mtime must not turn that row into the repair's submission.
+        run = self._legacy_repaired_run(prepared_hours_ago=1.0)
+        write_legacy_launch_ledger(run, [_launch_row(run, run, job_id="444", kind="prepared")])  # mtime: now
+        state = self._state(run)
+        self.assertFalse(state["current_submitted"])
+        self.assertEqual([row["job_id"] for row in state["historical_submissions"]], ["444"])
 
     def test_legacy_row_counts_for_generation_zero(self) -> None:
         run = write_step1_run(self.root, "run")

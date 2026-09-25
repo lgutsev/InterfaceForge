@@ -148,13 +148,17 @@ def _write_segment_record(run: Path, kind: str, *, accepted: int = 40, stamp: st
     return generation_id
 
 
-def _legacy_leaf_row(leaf: Path, job_id: str = "111") -> dict[str, str]:
-    """The schema-1 row an old ``step1-launch <leaf>`` wrote (leaf launched as its own root)."""
+def _legacy_leaf_row(leaf: Path, job_id: str = "111", kind: str = "prepared") -> dict[str, str]:
+    """The schema-1 row an old ``step1-launch <leaf>`` wrote (leaf launched as its own root).
+
+    The old launcher wrote kind ``prepared`` for generation 0 and ``repair-prepared``
+    for a run carrying a PREPARED step1_repair.json.
+    """
 
     return {
         "status": "SUBMITTED",
         "job_id": job_id,
-        "kind": "prepared",
+        "kind": kind,
         "root": str(leaf),
         "relative_path": ".",
         "directory": str(leaf),
@@ -407,7 +411,7 @@ class GenerationAwareLaunchTests(_HermeticSchedulerMixin):
         leaf = _idle_run(self.step1, "leaf")
         stamp = _stamp_hours_ago(72.0)
         write_legacy_repair_record(leaf, archive=str(leaf / ".interfaceforge" / "archive" / f"step1_repair_{stamp}"))
-        write_legacy_launch_ledger(leaf, [_legacy_leaf_row(leaf)], age_hours=1.0)
+        write_legacy_launch_ledger(leaf, [_legacy_leaf_row(leaf, kind="repair-prepared")], age_hours=1.0)
         before = tree_snapshot(self.root)
         pattern = rf"current generation legacy-repair-g1-{stamp} already submitted \(job 111\)"
         with self.assertRaisesRegex(SafetyError, pattern):
