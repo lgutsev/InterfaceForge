@@ -487,7 +487,10 @@ class Step1StatusReadinessTests(_HermeticSchedulerMixin):
             self.assertIn("confirm before Step2", row["recovery"]["reason"])
             self.assertIn("benign startup transient", row["recovery"]["reason"])
             text = render(payload)
-            self.assertIn("thermal-ok; ready for Step2 (review: startup energy excursion", text)
+            self.assertIn("thermal-ok; ready for Step2 (review)", text)
+            self.assertIn("benign startup transient (step 1) — confirm before Step2", row["recovery"]["reason"])
+            # The full warning sentence is printed once (stability line), not on every line.
+            self.assertEqual(text.count("startup energy excursion within the"), 1)
             self.assertIn("stability: WARNING", text)
             self.assertIn("(benign startup transient)", text)
             self.assertNotIn("UNSTABLE", text)

@@ -704,6 +704,35 @@ def _first_warning(stability: dict[str, Any]) -> str:
     return str(warnings[0]) if warnings else "review-level warning"
 
 
+# Short labels for review reasons and the frames line; the full warning text is
+# printed once, on the stability line (and kept in --json).
+_WARNING_LABELS: dict[str, tuple[str, str | None]] = {
+    "startup_energy_excursion": ("startup excursion", "startup_excursion_steps"),
+    "isolated_energy_spike": ("isolated energy spike", "isolated_spike_steps"),
+    "scf_elevated": ("elevated SCF ceiling use", None),
+    "temperature_elevated": ("elevated temperature", None),
+}
+
+
+def _warning_label(stability: dict[str, Any]) -> str:
+    """``benign startup transient (step 1)`` / ``startup excursion (step 1) + isolated energy spike (step 250)``."""
+
+    classes = stability.get("warning_classes") or []
+    if not classes:
+        return _first_warning(stability)
+    parts: list[str] = []
+    for name in classes:
+        label, steps_key = _WARNING_LABELS.get(str(name), (str(name).replace("_", " "), None))
+        steps = stability.get(steps_key) if steps_key else None
+        if steps:
+            label += f" (step {steps[0]})" if len(steps) == 1 else f" (steps {steps[0]}-{steps[-1]})"
+        parts.append(label)
+    text = " + ".join(parts)
+    if stability.get("benign_warnings_only"):
+        text = text.replace("startup excursion", "benign startup transient", 1)
+    return text
+
+
 def recovery_category(row: dict[str, Any]) -> dict[str, str]:
     """``{"category", "reason"}`` for one status row; the first matching rule wins.
 
@@ -800,10 +829,9 @@ def recovery_category(row: dict[str, Any]) -> dict[str, str]:
                 )
             if row.get("severity") == "ok":
                 return verdict("done", "complete, stable and thermally ready for Step2")
-            warning = _first_warning(stability)
-            if stability.get("benign_warnings_only"):
-                warning += " (benign startup transient)"
-            return verdict("review", f"complete and Step2-ready by hard criteria; {warning} — confirm before Step2")
+            return verdict(
+                "review", f"complete and Step2-ready by hard criteria; {_warning_label(stability)} — confirm before Step2"
+            )
         tail = row.get("thermal_tail_mean_k")
         threshold = row.get("thermal_ready_threshold_k")
         if row.get("thermal_tail_ok") is False and tail is not None and threshold is not None:
@@ -817,7 +845,7 @@ def recovery_category(row: dict[str, Any]) -> dict[str, str]:
     if state == "error":
         return verdict("review", "VASP error marker in OUTCAR; inspect before resuming")
     if row.get("severity") == "warning" and not stability.get("benign_warnings_only"):
-        return verdict("review", f"{_first_warning(stability)}; review before resuming")
+        return verdict("review", f"{_warning_label(stability)}; review before resuming")
     if not (lineage.get("current_segment_steps") or 0):
         return verdict("review", "no completed ionic step in the current segment; inspect the Slurm log")
     target = lineage.get("original_nsw")
@@ -914,7 +942,7 @@ def _readiness_text(row: dict[str, Any]) -> str:
     if row.get("ready_for_step2"):
         text = "ready for Step2"
         if row.get("review_required"):
-            text += f" (review: {_first_warning(row.get('stability') or {})})"
+            text += " (review)"  # the reason is on the action and stability lines
         return text
     return "complete; not ready"
 
