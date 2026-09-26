@@ -21,6 +21,7 @@ from typing import Any
 from unittest.mock import Mock, patch
 
 from interfaceforge.errors import SafetyError
+from interfaceforge.step1_launch import launch_step1_runs
 from interfaceforge.step1_lineage import (
     GEN0_ID,
     LAUNCH_LEDGER,
@@ -44,6 +45,7 @@ from interfaceforge.step1_recover import (
     render_recovery_execution,
     render_recovery_plan,
 )
+from interfaceforge.step1_status import step1_status
 from interfaceforge.vasp import _PRECONDITION_MARKER, parse_incar
 
 _TESTS = str(Path(__file__).resolve().parent)
@@ -943,8 +945,19 @@ class RecoverReviewRoutingTests(RecoverTestCase):
         self.assertEqual(_names(plan, "review"), ["Step1/fresh"])
         reason = _entry(plan, "Step1/fresh")["reason"]
         self.assertIn("launch preflight refused", reason)
-        self.assertIn(f"run step1-recover (or step1-launch) on {self.step1} to launch it", reason)
+        self.assertIn(f"generation 0 is listed in {self.step1 / 'step1_manifest.json'}", reason)
+        self.assertEqual(reason.count("launch it from"), 1)
+        self.assertTrue(reason.endswith(f"launch it from {self.step1}"))
         self.assertEqual(_names(plan_step1_recovery(self.step1, scheduler=fake_guard()), "launch"), ["fresh"])
+
+        # step1-status and step1-launch invoked above the manifest name the same root.
+        status = step1_status(self.root, scheduler=fake_guard())["runs"][0]
+        self.assertEqual(status["recovery"]["category"], "launch")
+        self.assertIn(f"launch it from {self.step1}", status["recovery"]["reason"])
+        messages: list[str] = []
+        with self.assertRaisesRegex(SafetyError, "No launchable Step1 runs"):
+            launch_step1_runs([self.root], scheduler=fake_guard(), progress=messages.append)
+        self.assertTrue(any(f"launch it from {self.step1}" in message for message in messages), messages)
 
     def test_interrupted_mutation_is_reviewed(self) -> None:
         from interfaceforge.step1_lineage import archive_step1_state

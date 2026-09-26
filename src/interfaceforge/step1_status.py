@@ -454,7 +454,7 @@ def _default_launcher(run: Path) -> str | None:
     return None
 
 
-def _launch_info(run: Path, generation: Generation) -> dict[str, Any]:
+def _launch_info(run: Path, generation: Generation, root: Path | None = None) -> dict[str, Any]:
     """Whether the (not yet started) current generation is launchable, mirroring step1-launch's preflight.
 
     Gen 0 must be listed in the nearest ``step1_manifest.json`` with matching
@@ -502,6 +502,9 @@ def _launch_info(run: Path, generation: Generation) -> dict[str, Any]:
                     "launcher": launcher,
                 }
         basis = f"listed in {manifest.name} with matching INCAR/POSCAR hashes"
+        if root is not None and manifest.parent.resolve() != root.resolve():
+            # step1-launch reads generation-0 hashes from the invoked root's manifest only.
+            basis += f"; launch it from {manifest.parent}"
 
     started = [name for name in _LAUNCH_STARTED_EXTRA if _nonempty(run / name)]
     if started:
@@ -688,7 +691,7 @@ def _run_status(
         "repair": repair or None,
         "scheduler": scheduler,
         "lineage": lineage,
-        "launch": None if started else _launch_info(run, generation),
+        "launch": None if started else _launch_info(run, generation, root),
     }
     row["recovery"] = recovery_category(row)
     return row

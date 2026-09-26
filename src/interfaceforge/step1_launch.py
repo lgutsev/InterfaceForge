@@ -65,6 +65,7 @@ from .step1_lineage import (
 )
 from .step1_repair import _discover_runs
 from .step1_scheduler import SchedulerGuard, SchedulerSnapshot, as_guard
+from .step1_status import _manifest_entry
 from .vasp import _sha256_file, resolve_launcher, submit_run
 
 _STARTED_MARKERS = ("OUTCAR", "OSZICAR", "vasprun.xml")
@@ -269,6 +270,10 @@ def _preflight_run(
                     "'iface vasp step1-prepare --audit-only' and inspect before launching"
                 )
     else:
+        manifest, listed = _manifest_entry(run)
+        if manifest is not None and listed is not None and _dir_key(manifest.parent) != _dir_key(tree_root):
+            # Generation-0 hashes are read from the manifest of the invoked root only.
+            return None, f"generation 0 is listed in {manifest}; launch it from {manifest.parent}"
         return None, "not written by step1-prepare, step1-repair or step1-resume"
 
     for name in _REQUIRED_INPUTS:

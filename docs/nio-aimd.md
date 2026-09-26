@@ -254,7 +254,7 @@ The duplicate guard reads every ledger that may mention the run: the run's own, 
 
 *Sealing.* When `--execute` creates a new generation, every ledger found for the run gets `superseded_by_generation_id` / `superseded_at` added to the run's rows of the retired generation (and its legacy rows). This is informational provenance only; matching never depends on it. Ancestor ledgers are annotated in place (atomic rewrite, keys only added, schema version unchanged) without an archived copy; a ledger inside the run directory is archived with the run first.
 
-Generation 0 is launchable only from the root whose `step1_manifest.json` lists it with matching `INCAR`/`POSCAR` hashes; the recover plan says which root to use when it is another one.
+Generation 0 is launchable only from the root whose `step1_manifest.json` lists it with matching `INCAR`/`POSCAR` hashes; when invoked on another directory, `step1-status`, `step1-launch` and `step1-recover` all name that root (`generation 0 is listed in <root>/step1_manifest.json; launch it from <root>`).
 
 Historical launches are inspected in `<root>/step1_launch.json` (`runs`, `batches`) and `step1_launch.tsv`, in leaf-level ledgers, in the `submissions` list of the current record and of archived records (`<run>/.interfaceforge/archive/*/step1_repair.json` / `step1_resume.json`), and in `step1-status --json` under `lineage.submission`, `lineage.historical_submissions` and `lineage.submission_rule`.
 

@@ -543,7 +543,8 @@ def _attach_launch(
     entry["action_kind"] = "launch"
     planned, refusal = preflight if preflight is not None else (None, "not preflighted")
     if planned is None:
-        hint = _manifest_hint(run, root) if entry["generation_id"] == GEN0_ID else ""
+        gen0_hint_needed = entry["generation_id"] == GEN0_ID and "launch it from" not in refusal
+        hint = _manifest_hint(run, root) if gen0_hint_needed else ""
         _to_review(entry, f"launch preflight refused: {refusal}{hint}")
         return
     entry.update({"action": planned, "action_summary": _launch_summary(planned)})
