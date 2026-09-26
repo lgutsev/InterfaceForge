@@ -18,6 +18,7 @@ quick start, and maturity boundaries.
 | Guide | Use it for |
 |---|---|
 | [VASP workflows](vasp.md) | Input utilities, OPT/Step1/Step2, launch/status/repair, VASP-MLFF audit/recovery, vacuum analysis, plotting and archives |
+| [NiO AIMD policy](nio-aimd.md) | The `nio` Step1 profile and the Step1 recovery lifecycle: status, resume, repair generations, launch ledger, recover |
 | [MLFF interface grid](mlff-interfaces.md) | Bulk/interface VASP-MLFF training grids and heat-flux recovery |
 | [Reference profiles](reference-profiles.md) | Bundled literature/reference configurations |
 
