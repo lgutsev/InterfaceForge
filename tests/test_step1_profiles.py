@@ -8,7 +8,6 @@ from pathlib import Path
 from interfaceforge.profile_cli import main
 from interfaceforge.vasp import parse_incar
 
-
 _OPT_INCAR = (
     "ENCUT = 520\nPREC = Accurate\nEDIFF = 1E-6\nGGA = PE\n"
     "ISPIN = 2\nLASPH = .TRUE.\nMAGMOM = 2*2.0 3*-2.0\n"
