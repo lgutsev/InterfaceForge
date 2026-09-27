@@ -17,6 +17,10 @@ Behaviour of MatCalc 0.5.1 that shapes this adapter:
   are obtained from the same Birch-Murnaghan fit through pymatgen's public
   EOS API. The strained-point relaxations inside the scan are not
   convergence-checked by MatCalc.
+* ``EOSCalc`` scans *linear* strain on an evenly spaced grid, so the default
+  ``max_abs_strain=0.1`` spans V/V0 = 0.729-1.331. That is far into the
+  anharmonic regime of stiff covalent solids and biases B' low; the adapter
+  records the realized window and refits the near-equilibrium points.
 * ``PhononCalc`` writes ``phonon.yaml`` into the current directory by
   default; the adapter always points it at the member directory.
 * Every downstream calc is run with ``relax_structure=False`` on the
@@ -154,11 +158,78 @@ def relax(
     return {"record": record_out, "atoms": relaxed}
 
 
-def eos(atoms: Any, calculator: Any, *, fmax: float, max_steps: int, optimizer: str) -> dict[str, Any]:
-    from matcalc import EOSCalc
+EOS_REFIT_MIN_POINTS = 5
+
+
+def _birch_murnaghan(volumes: np.ndarray, energies: np.ndarray, n_atoms: int) -> dict[str, Any]:
     from pymatgen.analysis.eos import BirchMurnaghan
 
-    calc = EOSCalc(calculator, optimizer=optimizer, fmax=fmax, max_steps=max_steps, relax_structure=False)
+    fit = BirchMurnaghan(volumes=volumes, energies=energies)
+    fit.fit()
+    residual = energies - np.asarray(fit.func(volumes), dtype=float)
+    spread = float(np.sum((energies - energies.mean()) ** 2))
+    return {
+        "equilibrium_energy": float(fit.e0),
+        "equilibrium_energy_per_atom": float(fit.e0) / n_atoms,
+        "equilibrium_volume": float(fit.v0),
+        "equilibrium_volume_per_atom": float(fit.v0) / n_atoms,
+        "bulk_modulus": float(fit.b0_GPa),
+        "bulk_modulus_derivative": float(fit.b1),
+        "r2": 1.0 - float(np.sum(residual**2)) / spread if spread > 0 else float("nan"),
+    }
+
+
+def _near_equilibrium_refit(
+    volumes: np.ndarray, energies: np.ndarray, reference_volume: float, window: float, n_atoms: int
+) -> dict[str, Any]:
+    """Birch-Murnaghan refit of the scan points with |V/V_ref - 1| <= window."""
+
+    inside = np.abs(volumes / reference_volume - 1.0) <= window + 1e-12
+    base = {
+        "volume_window": float(window),
+        "window_reference": "relaxed input volume (scan centre)",
+        "n_points": int(inside.sum()),
+        "min_points": EOS_REFIT_MIN_POINTS,
+    }
+    if inside.sum() < EOS_REFIT_MIN_POINTS:
+        return {
+            **base,
+            "status": "skipped",
+            "reason": (
+                f"only {int(inside.sum())} scan point(s) within +/-{window:.0%} of the reference volume; "
+                f"need {EOS_REFIT_MIN_POINTS} (use a smaller --eos-max-strain or more --eos-points)"
+            ),
+        }
+    try:
+        fit = _birch_murnaghan(volumes[inside], energies[inside], n_atoms)
+    except Exception as exc:  # noqa: BLE001 - a failed refit must not fail the full-scan result
+        return {**base, "status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+    return {**base, "status": "ok", **fit}
+
+
+def eos(
+    atoms: Any,
+    calculator: Any,
+    *,
+    fmax: float,
+    max_steps: int,
+    optimizer: str,
+    max_abs_strain: float = 0.1,
+    n_points: int = 11,
+    refit_volume_window: float = 0.05,
+) -> dict[str, Any]:
+    from matcalc import EOSCalc
+
+    calc = EOSCalc(
+        calculator,
+        optimizer=optimizer,
+        fmax=fmax,
+        max_steps=max_steps,
+        max_abs_strain=max_abs_strain,
+        n_points=n_points,
+        relax_structure=False,
+    )
+    reference_volume = float(atoms.get_volume())
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("always")
         result = calc.calc(atoms.copy())
@@ -166,21 +237,30 @@ def eos(atoms: Any, calculator: Any, *, fmax: float, max_steps: int, optimizer: 
     energies = np.asarray(result["eos"]["energies"], dtype=float)
     order = np.argsort(volumes)
     volumes, energies = volumes[order], energies[order]
-    fit = BirchMurnaghan(volumes=volumes, energies=energies)
-    fit.fit()
     n_atoms = len(atoms)
+    fit = _birch_murnaghan(volumes, energies, n_atoms)
+    ratios = volumes / reference_volume
     return {
         "fit": "birch_murnaghan",
-        "equilibrium_energy": float(fit.e0),
-        "equilibrium_energy_per_atom": float(fit.e0) / n_atoms,
-        "equilibrium_volume": float(fit.v0),
-        "equilibrium_volume_per_atom": float(fit.v0) / n_atoms,
+        **fit,
+        # MatCalc's own B and R^2 for the same scan; kept as the headline values for parity.
         "bulk_modulus": float(result["bulk_modulus_bm"]),
-        "bulk_modulus_derivative": float(fit.b1),
         "r2": float(result["r2_score_bm"]),
         "volumes": volumes,
         "energies": energies,
         "n_points": int(len(volumes)),
+        "scan_window": {
+            "max_abs_linear_strain": float(max_abs_strain),
+            "n_points_requested": int(n_points),
+            "reference_volume": reference_volume,
+            "min_volume_ratio": float(ratios.min()),
+            "max_volume_ratio": float(ratios.max()),
+            "nominal_min_volume_ratio": (1.0 - max_abs_strain) ** 3,
+            "nominal_max_volume_ratio": (1.0 + max_abs_strain) ** 3,
+        },
+        "near_equilibrium_refit": _near_equilibrium_refit(
+            volumes, energies, reference_volume, refit_volume_window, n_atoms
+        ),
         "strained_relaxations_convergence_checked": False,
         "warnings": _caught(record),
         "units": {
@@ -193,6 +273,11 @@ def eos(atoms: Any, calculator: Any, *, fmax: float, max_steps: int, optimizer: 
             "r2": "dimensionless",
             "volumes": "A^3",
             "energies": "eV",
+            "scan_window.max_abs_linear_strain": "dimensionless (linear strain)",
+            "scan_window.reference_volume": "A^3",
+            "scan_window.*_volume_ratio": "V / reference_volume",
+            "near_equilibrium_refit.volume_window": "fraction of reference_volume",
+            "near_equilibrium_refit.*": "as the full-scan fields of the same name",
         },
     }
 

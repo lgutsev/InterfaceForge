@@ -40,6 +40,9 @@ PROPERTIES = ("relax", "eos", "elasticity", "phonon")
 # Every property here relaxes (or strains) the cell, so all of them need stress.
 STRESS_PROPERTIES = frozenset(PROPERTIES)
 MAX_BULK_GAP_A = 6.0
+EOS_MAX_STRAIN_LIMIT = 0.2
+# Pressure derivative of the bulk modulus for ordinary solids is ~3-6; outside this band the fit is suspect.
+BPRIME_PLAUSIBLE = (2.0, 8.0)
 
 _SCALARS = {
     "relax": ("energy_per_atom", "volume_per_atom", "a", "b", "c", "alpha", "beta", "gamma", "max_abs_final_stress"),
@@ -64,6 +67,11 @@ class PropertyConfig:
     max_steps: int = 500
     optimizer: str = "FIRE"
     phonon_min_length: float = 20.0
+    # MatCalc EOSCalc defaults (linear strain, evenly spaced points), kept for parity with MatCalc benchmarks.
+    eos_max_strain: float = 0.1
+    eos_points: int = 11
+    # Fractional volume window around the scan centre for the near-equilibrium Birch-Murnaghan refit.
+    eos_refit_window: float = 0.05
 
     def __post_init__(self) -> None:
         if not self.properties:
@@ -79,6 +87,15 @@ class PropertyConfig:
             raise ConfigurationError("--max-steps must be positive")
         if self.phonon_min_length <= 0:
             raise ConfigurationError("--phonon-min-length must be positive")
+        if not (0 < self.eos_max_strain <= EOS_MAX_STRAIN_LIMIT):
+            raise ConfigurationError(
+                f"--eos-max-strain must be in (0, {EOS_MAX_STRAIN_LIMIT}] (linear strain; 0.1 = V/V0 0.73-1.33)"
+            )
+        if isinstance(self.eos_points, bool) or not isinstance(self.eos_points, int) or self.eos_points < 5 \
+                or self.eos_points % 2 == 0:
+            raise ConfigurationError("--eos-points must be an odd integer >= 5 (the scan is centred on V0)")
+        if not (0 < self.eos_refit_window <= EOS_MAX_STRAIN_LIMIT):
+            raise ConfigurationError(f"--eos-refit-window must be in (0, {EOS_MAX_STRAIN_LIMIT}] (volume fraction)")
 
     @property
     def ordered(self) -> tuple[str, ...]:
@@ -209,9 +226,42 @@ def require_stress(atoms: Any, calculator: Any) -> None:
 # --------------------------------------------------------------- execution
 
 
+def check_eos(result: dict[str, Any]) -> list[str]:
+    """Flag an implausible B' in the full-scan and near-equilibrium fits; also tags ``result`` in place."""
+
+    low, high = BPRIME_PLAUSIBLE
+    messages = []
+    fits = [("full scan", result)]
+    refit = result.get("near_equilibrium_refit")
+    if isinstance(refit, dict) and refit.get("status") == "ok":
+        fits.append(("near-equilibrium refit", refit))
+    for what, fit in fits:
+        value = fit.get("bulk_modulus_derivative")
+        plausible = value is not None and math.isfinite(value) and low <= value <= high
+        fit["bulk_modulus_derivative_plausible"] = plausible
+        if plausible:
+            continue
+        if value is None:
+            messages.append(f"eos: {what} B' is missing")
+            continue
+        window = result.get("scan_window", {})
+        span = (
+            f" over V/V_ref {window['min_volume_ratio']:.3f}-{window['max_volume_ratio']:.3f}"
+            if what == "full scan" and "min_volume_ratio" in window
+            else ""
+        )
+        messages.append(
+            f"eos: {what} B'={value:.3g} is outside [{low:g}, {high:g}]{span}; "
+            "the Birch-Murnaghan fit (and its B) is unreliable - narrow --eos-max-strain"
+        )
+    result.setdefault("warnings", []).extend(messages)
+    return messages
+
+
 def _run_member(atoms: Any, member: Member, config: PropertyConfig, member_dir: Path, backend: Any) -> dict[str, Any]:
     record = dict(member.record)
-    record.update({"label": member.label, "status": "failed", "error": None, "failed_property": None, "results": {}})
+    record.update({"label": member.label, "status": "failed", "error": None, "failed_property": None, "results": {},
+                   "warnings": []})
     member_dir.mkdir(parents=True, exist_ok=True)
     stage = "load"
     try:
@@ -245,7 +295,9 @@ def _run_member(atoms: Any, member: Member, config: PropertyConfig, member_dir: 
             stage = name
             if name == "eos":
                 result = backend.eos(equilibrium, calculator, fmax=config.fmax, max_steps=config.max_steps,
-                                     optimizer=config.optimizer)
+                                     optimizer=config.optimizer, max_abs_strain=config.eos_max_strain,
+                                     n_points=config.eos_points, refit_volume_window=config.eos_refit_window)
+                record["warnings"].extend(check_eos(result))
             elif name == "elasticity":
                 result = backend.elasticity(equilibrium, calculator, fmax=config.fmax)
             else:
@@ -312,6 +364,19 @@ def summarize(models: Sequence[dict[str, Any]], properties: Sequence[str]) -> di
         if results:
             entry["units"] = results[0].get("units", {})
             entry["scalars"] = {key: _stats([item[key] for item in results]) for key in _SCALARS[name]}
+        if name == "eos" and results:
+            entry["implausible_bulk_modulus_derivative_members"] = sum(
+                item.get("bulk_modulus_derivative_plausible") is False for item in results
+            )
+            refits = [item["near_equilibrium_refit"] for item in results
+                      if item.get("near_equilibrium_refit", {}).get("status") == "ok"]
+            entry["near_equilibrium_refit"] = {
+                "n_members": len(refits),
+                "scalars": {key: _stats([item[key] for item in refits]) for key in _SCALARS["eos"]} if refits else {},
+                "implausible_bulk_modulus_derivative_members": sum(
+                    item.get("bulk_modulus_derivative_plausible") is False for item in refits
+                ),
+            }
         if name == "elasticity" and results:
             conventions = {item["tensor_convention"] for item in results}
             entry["elastic_tensor"] = (
@@ -460,6 +525,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         max_steps=args.max_steps,
         optimizer=args.optimizer,
         phonon_min_length=args.phonon_min_length,
+        eos_max_strain=args.eos_max_strain,
+        eos_points=args.eos_points,
+        eos_refit_window=args.eos_refit_window,
     )
     if bool(args.model) == bool(args.committee):
         raise ConfigurationError("Pass either --model (repeatable) or --committee, not both / neither")
@@ -516,6 +584,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                 unit = entry["units"].get(key, "")
                 spread = f" +/- {stats['std']:.4g}" if stats["std"] is not None else ""
                 print(f"  {name}.{key}: {stats['mean']:.4g}{spread} {unit} (n={stats['n']})")
+        refit = entry.get("near_equilibrium_refit", {}).get("scalars", {}).get("bulk_modulus")
+        if refit:
+            spread = f" +/- {refit['std']:.4g}" if refit["std"] is not None else ""
+            print(f"  {name}.near_equilibrium_refit.bulk_modulus: {refit['mean']:.4g}{spread} GPa (n={refit['n']})")
+    for model in payload["models"]:
+        for message in model.get("warnings", []):
+            print(f"  WARNING {model['label']}: {message}")
     return 0 if summary["n_failed"] == 0 else 1
 
 
@@ -538,5 +613,13 @@ def register_commands(commands: Any) -> None:
     run.add_argument("--optimizer", default="FIRE", choices=("FIRE", "BFGS", "LBFGS"))
     run.add_argument("--phonon-min-length", type=float, default=20.0,
                      help="Minimum phonon supercell edge, A (MatCalc default 20)")
+    run.add_argument("--eos-max-strain", type=float, default=0.1,
+                     help="EOS scan half-width as LINEAR strain, 0 < x <= 0.2 (MatCalc default 0.1 = V/V0 "
+                          "0.73-1.33; ~0.05 is advisable for stiff covalent solids)")
+    run.add_argument("--eos-points", type=int, default=11,
+                     help="Number of EOS scan points, odd >= 5 (MatCalc default 11)")
+    run.add_argument("--eos-refit-window", type=float, default=0.05,
+                     help="Volume fraction around the relaxed volume for the near-equilibrium EOS refit "
+                          "(default 0.05 = +/-5%%; needs >= 5 scan points inside it)")
     run.add_argument("--force", action="store_true", help="Replace a prior property result in --output")
     run.set_defaults(func=cmd_run)

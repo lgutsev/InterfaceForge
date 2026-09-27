@@ -38,7 +38,8 @@ class NoStressCalculator(Calculator):
         self.results = {"energy": 0.0, "forces": np.zeros((len(self.atoms), 3))}
 
 
-def _fake_backend(bulk_modulus: float = 140.0, *, tensor_shape: tuple[int, int] = (6, 6), converged: bool = True):
+def _fake_backend(bulk_modulus: float = 140.0, *, tensor_shape: tuple[int, int] = (6, 6), converged: bool = True,
+                  bprime: float = 4.5, refit_bprime: float | None = None, eos_calls: list | None = None):
     """MatCalc-shaped results without MatCalc, so the runner is testable anywhere."""
 
     def relax(atoms, calculator, *, fmax, max_steps, optimizer, member_dir):
@@ -51,12 +52,20 @@ def _fake_backend(bulk_modulus: float = 140.0, *, tensor_shape: tuple[int, int] 
             "atoms": atoms.copy(),
         }
 
-    def eos(atoms, calculator, **_):
+    def eos(atoms, calculator, **kwargs):
+        if eos_calls is not None:
+            eos_calls.append(kwargs)
         scale = getattr(calculator, "scale", 1.0)
-        return {"equilibrium_energy": -3.0, "equilibrium_energy_per_atom": -3.0, "equilibrium_volume": 11.6,
-                "equilibrium_volume_per_atom": 11.6, "bulk_modulus": bulk_modulus * scale,
-                "bulk_modulus_derivative": 4.5, "r2": 0.9999, "volumes": np.linspace(10, 13, 5),
-                "units": {"bulk_modulus": "GPa"}}
+        fit = {"equilibrium_energy": -3.0, "equilibrium_energy_per_atom": -3.0, "equilibrium_volume": 11.6,
+               "equilibrium_volume_per_atom": 11.6, "bulk_modulus": bulk_modulus * scale,
+               "bulk_modulus_derivative": bprime, "r2": 0.9999}
+        refit = ({"status": "skipped", "reason": "too few points"} if refit_bprime is None
+                 else {"status": "ok", **fit, "bulk_modulus": 1.1 * bulk_modulus * scale,
+                       "bulk_modulus_derivative": refit_bprime})
+        return {**fit, "volumes": np.linspace(10, 13, 5), "near_equilibrium_refit": refit,
+                "scan_window": {"max_abs_linear_strain": kwargs.get("max_abs_strain"), "min_volume_ratio": 0.729,
+                                "max_volume_ratio": 1.331},
+                "warnings": [], "units": {"bulk_modulus": "GPa"}}
 
     def elasticity(atoms, calculator, **_):
         return {"elastic_tensor": np.eye(*tensor_shape) * getattr(calculator, "scale", 1.0),
@@ -137,6 +146,40 @@ def test_invalid_property_name_is_rejected():
         PropertyConfig(("eos", "bandgap"))
     with pytest.raises(ConfigurationError, match="at least one"):
         PropertyConfig(())
+
+
+def test_eos_window_config_validation():
+    config = PropertyConfig(("eos",))
+    assert (config.eos_max_strain, config.eos_points, config.eos_refit_window) == (0.1, 11, 0.05)
+    PropertyConfig(("eos",), eos_max_strain=0.2, eos_points=5, eos_refit_window=0.2)
+    for strain in (0.0, -0.05, 0.21, float("nan")):
+        with pytest.raises(ConfigurationError, match="--eos-max-strain"):
+            PropertyConfig(("eos",), eos_max_strain=strain)
+    for points in (3, 4, 10, 11.0, True):
+        with pytest.raises(ConfigurationError, match="--eos-points"):
+            PropertyConfig(("eos",), eos_points=points)
+    for window in (0.0, 0.3):
+        with pytest.raises(ConfigurationError, match="--eos-refit-window"):
+            PropertyConfig(("eos",), eos_refit_window=window)
+
+
+def test_cli_parses_eos_window_options():
+    base = ["properties", "run", "Si3N4.vasp", "--engine", "mace", "--model", "m.model", "--property", "eos",
+            "--output", "out"]
+    args = build_parser().parse_args(base)
+    assert (args.eos_max_strain, args.eos_points, args.eos_refit_window) == (0.1, 11, 0.05)
+    args = build_parser().parse_args([*base, "--eos-max-strain", "0.05", "--eos-points", "21",
+                                      "--eos-refit-window", "0.04"])
+    assert (args.eos_max_strain, args.eos_points, args.eos_refit_window) == (0.05, 21, 0.04)
+
+
+def test_cli_invalid_eos_points_exits_with_error(tmp_path, capsys):
+    model = tmp_path / "m.model"
+    model.write_bytes(b"x")
+    code = cli_main(["properties", "run", "x.vasp", "--engine", "mace", "--model", str(model), "--property", "eos",
+                     "--eos-points", "10", "--output", str(tmp_path / "o")])
+    assert code == 2
+    assert "--eos-points" in capsys.readouterr().err
 
 
 def test_cli_invalid_property_exits_with_error(tmp_path, capsys):
@@ -340,6 +383,67 @@ def test_one_failing_member_is_reported_not_hidden(tmp_path):
     assert summary["properties"]["eos"]["scalars"]["bulk_modulus"]["n"] == 3
 
 
+def test_eos_window_is_plumbed_to_backend_and_recorded(tmp_path):
+    calls: list = []
+    config = PropertyConfig(("eos",), eos_max_strain=0.05, eos_points=21, eos_refit_window=0.04)
+    payload = run_properties(_cu(), [Member("m0", EMT)], config, tmp_path / "o", engine="emt",
+                             backend=_fake_backend(eos_calls=calls, refit_bprime=4.0))
+    assert calls == [{"fmax": 0.01, "max_steps": 500, "optimizer": "FIRE", "max_abs_strain": 0.05, "n_points": 21,
+                      "refit_volume_window": 0.04}]
+    on_disk = json.loads((tmp_path / "o" / RESULT_FILE).read_text())
+    assert (on_disk["settings"]["eos_max_strain"], on_disk["settings"]["eos_points"]) == (0.05, 21)
+    model = on_disk["models"][0]
+    assert model["status"] == "ok" and model["warnings"] == []
+    eos = model["results"]["eos"]
+    assert eos["bulk_modulus_derivative_plausible"] is True
+    assert eos["near_equilibrium_refit"]["bulk_modulus_derivative_plausible"] is True
+    refit = payload["summary"]["properties"]["eos"]["near_equilibrium_refit"]
+    assert refit["n_members"] == 1 and refit["scalars"]["bulk_modulus"]["mean"] == pytest.approx(154.0)
+
+
+def test_implausible_bprime_is_flagged_not_failed(tmp_path):
+    members = [Member("m0", EMT), Member("m1", EMT)]
+    payload = run_properties(_cu(), members, PropertyConfig(("eos",)), tmp_path / "o", engine="emt",
+                             backend=_fake_backend(bprime=1.3, refit_bprime=8.5))
+    model = payload["models"][0]
+    assert model["status"] == "ok"
+    assert len(model["warnings"]) == 2
+    assert "full scan B'=1.3" in model["warnings"][0] and "0.729-1.331" in model["warnings"][0]
+    assert "near-equilibrium refit B'=8.5" in model["warnings"][1]
+    eos = model["results"]["eos"]
+    assert eos["bulk_modulus_derivative_plausible"] is False and eos["warnings"] == model["warnings"]
+    summary = payload["summary"]["properties"]["eos"]
+    assert summary["implausible_bulk_modulus_derivative_members"] == 2
+    assert summary["near_equilibrium_refit"]["implausible_bulk_modulus_derivative_members"] == 2
+
+
+def test_skipped_refit_is_not_summarized(tmp_path):
+    payload = run_properties(_cu(), [Member("m0", EMT)], PropertyConfig(("eos",)), tmp_path / "o", engine="emt",
+                             backend=_fake_backend())
+    assert payload["models"][0]["warnings"] == []
+    refit = payload["summary"]["properties"]["eos"]["near_equilibrium_refit"]
+    assert refit == {"n_members": 0, "scalars": {}, "implausible_bulk_modulus_derivative_members": 0}
+
+
+def test_near_equilibrium_refit_selects_points_inside_window():
+    pytest.importorskip("pymatgen")
+    v0, b0, b1 = 100.0, 1.3, 4.0  # b0 in eV/A^3 (~208 GPa)
+
+    def birch_murnaghan(volume):
+        x = (v0 / volume) ** (2 / 3) - 1
+        return -10.0 + 9 * v0 * b0 / 16 * (x**3 * b1 + x**2 * (6 - 4 * (v0 / volume) ** (2 / 3)))
+
+    volumes = v0 * (1 + np.linspace(-0.05, 0.05, 21)) ** 3
+    energies = birch_murnaghan(volumes)
+    refit = matcalc_adapter._near_equilibrium_refit(volumes, energies, v0, 0.05, n_atoms=10)
+    assert refit["status"] == "ok" and refit["n_points"] == 7
+    assert refit["bulk_modulus"] == pytest.approx(b0 * matcalc_adapter.EV_PER_A3_TO_GPA, rel=1e-3)
+    assert refit["bulk_modulus_derivative"] == pytest.approx(b1, rel=1e-2)
+    coarse = v0 * (1 + np.linspace(-0.1, 0.1, 11)) ** 3
+    skipped = matcalc_adapter._near_equilibrium_refit(coarse, birch_murnaghan(coarse), v0, 0.05, n_atoms=10)
+    assert skipped["status"] == "skipped" and skipped["n_points"] == 1 and "need 5" in skipped["reason"]
+
+
 def test_unconverged_relaxation_blocks_downstream_properties(tmp_path):
     payload = run_properties(_cu(), [Member("m0", EMT)], PropertyConfig(("relax", "eos", "elasticity")),
                              tmp_path / "o", engine="emt", backend=_fake_backend(converged=False))
@@ -385,6 +489,11 @@ def test_matcalc_emt_end_to_end(tmp_path, monkeypatch):
     assert relax["converged"] and relax["n_steps"] is not None and relax["max_force"] <= 0.005
     eos = models[0]["results"]["eos"]
     assert 100 < eos["bulk_modulus"] < 170 and eos["units"]["bulk_modulus"] == "GPa"
+    window = eos["scan_window"]
+    assert window["max_abs_linear_strain"] == 0.1 and window["n_points_requested"] == 11 == eos["n_points"]
+    assert window["min_volume_ratio"] == pytest.approx(0.9**3, rel=1e-3)
+    assert window["max_volume_ratio"] == pytest.approx(1.1**3, rel=1e-3)
+    assert eos["near_equilibrium_refit"]["status"] == "skipped"  # the default grid has 1 point within +/-5 %
     elastic = models[0]["results"]["elasticity"]
     assert np.asarray(elastic["elastic_tensor"]).shape == (6, 6)
     assert models[0]["results"]["phonon"]["dynamically_stable"]
@@ -393,3 +502,23 @@ def test_matcalc_emt_end_to_end(tmp_path, monkeypatch):
     for name in ("relax.traj", "relaxed.vasp", "phonon.yaml"):
         assert (out / "members" / "m0" / name).is_file()
     assert list(cwd.iterdir()) == []  # MatCalc's default phonon.yaml-in-CWD is redirected
+
+
+def test_matcalc_emt_narrow_eos_window(tmp_path):
+    pytest.importorskip("matcalc")
+    config = PropertyConfig(("eos",), fmax=0.005, eos_max_strain=0.05, eos_points=21)
+    try:
+        payload = run_properties(_cu(), [Member("m0", EMT)], config, tmp_path / "o", engine="emt")
+    except DependencyError:
+        pytest.skip("matcalc import failed")
+    model = payload["models"][0]
+    assert model["status"] == "ok", model.get("error")
+    eos = model["results"]["eos"]
+    assert eos["n_points"] == 21
+    assert eos["scan_window"]["min_volume_ratio"] == pytest.approx(0.95**3, rel=1e-3)
+    assert eos["scan_window"]["max_volume_ratio"] == pytest.approx(1.05**3, rel=1e-3)
+    refit = eos["near_equilibrium_refit"]
+    assert refit["status"] == "ok" and refit["n_points"] == 7
+    assert refit["bulk_modulus"] == pytest.approx(eos["bulk_modulus"], rel=0.05)
+    assert eos["bulk_modulus_derivative_plausible"] and refit["bulk_modulus_derivative_plausible"]
+    assert model["warnings"] == []

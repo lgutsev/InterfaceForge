@@ -109,6 +109,9 @@ iface properties run TiN.vasp \
 | `--max-steps` | Relaxation step cap (default 500) |
 | `--optimizer {FIRE,BFGS,LBFGS}` | ASE optimizer (default FIRE) |
 | `--phonon-min-length` | Minimum phonon supercell edge in Å (MatCalc default 20) |
+| `--eos-max-strain` | EOS scan half-width as **linear** strain, 0 < x ≤ 0.2 (MatCalc default 0.1, i.e. V/V₀ 0.729–1.331) |
+| `--eos-points` | Number of EOS scan points, odd and ≥ 5 (MatCalc default 11) |
+| `--eos-refit-window` | Volume fraction around the relaxed volume for the near-equilibrium refit, 0 < x ≤ 0.2 (default 0.05 = ±5 %) |
 
 Exit status is 0 when every member succeeded, 1 when at least one member
 failed (the JSON is still written), and 2 for usage/safety errors.
@@ -153,12 +156,53 @@ phonon numbers are produced. EOS, elasticity, and phonons then run with
 `relax_structure=False` on that relaxed structure, which is written to
 `members/<label>/relaxed.vasp` with its SHA-256.
 
-**EOS.** MatCalc's Birch–Murnaghan scan (11 points, ±10 % linear strain,
-shape relaxed at fixed volume). MatCalc reports `bulk_modulus_bm`. E₀, V₀,
-and B′ come from the same fit via pymatgen. E₀ is a fit value, not the
-relaxed energy (compare `relax.energy`). The strained-point relaxations
+**EOS.** MatCalc's Birch–Murnaghan scan (default 11 points, ±10 % linear
+strain, shape relaxed at fixed volume). MatCalc reports `bulk_modulus_bm`.
+E₀, V₀, and B′ come from the same fit via pymatgen. E₀ is a fit value, not
+the relaxed energy (compare `relax.energy`). The strained-point relaxations
 inside the scan are not convergence-checked by MatCalc, and the record says
 so (`strained_relaxations_convergence_checked: false`).
+
+*Scan window.* `--eos-max-strain` is a linear strain, so the volume range is
+asymmetric and much wider than the number suggests: the default 0.1 spans
+V/V_ref = (0.9)³ to (1.1)³ = 0.729 to 1.331, i.e. about −27 % to +33 % in
+volume. The default stays at 0.1 so that results match MatCalc's published
+benchmarks and earlier runs. That width is fine for soft metals, but it runs
+deep into the anharmonic regime of stiff covalent solids. A single
+Birch–Murnaghan form then cannot fit both ends, and B′ gets pushed to
+unphysical values while B is biased low. On a 112-atom β-Si₃N₄ cell with a
+trained MACE committee, the default scan gave B = 185–197 GPa with B′ =
+1.3–2.7 (R² 0.977–0.997; a high R² does not rule this out). Refitting only
+the points from −12 % to +6 % in volume gave B = 208–218 GPa and B′ =
+3.7–4.4, within 3 % of the elastic-tensor B_VRH. For stiff covalent solids
+(nitrides, carbides, oxides) use e.g.
+`--eos-max-strain 0.05 --eos-points 21`. That scan spans V/V_ref 0.857–1.158
+and puts 7 points inside ±5 %.
+
+Every EOS result records the window it used, in `scan_window`:
+`max_abs_linear_strain`, `n_points_requested`, `reference_volume` (the
+relaxed input volume at the centre of the scan), the realized
+`min_volume_ratio` / `max_volume_ratio` from the returned volumes, and the
+nominal `(1 ∓ ε)³` ratios.
+
+*Near-equilibrium refit.* Next to the full-scan fit,
+`near_equilibrium_refit` refits Birch–Murnaghan to only the scan points with
+|V/V_ref − 1| ≤ `--eos-refit-window`. It needs at least 5 such points.
+Otherwise it has `status: "skipped"` and a reason. The default 11-point,
+0.1-strain grid has only its centre point within ±5 %, so at defaults the
+refit is always skipped; use a denser or narrower scan to get it. When it
+runs (`status: "ok"`) it carries the same E₀/V₀/B/B′/R² fields, and the
+summary gives committee statistics for it under
+`summary.properties.eos.near_equilibrium_refit`. The full-scan values remain
+the headline `eos.*` numbers.
+
+*B′ plausibility.* B′ outside [2, 8] (ordinary solids sit around 3–6) marks
+the fit, and its B, as unreliable. Each fit gets
+`bulk_modulus_derivative_plausible`, and an implausible value adds a warning
+to both `results.eos.warnings` and the member's top-level `warnings` list.
+The CLI prints these warnings. A flagged member still counts as succeeded;
+the summary counts flagged members in
+`implausible_bulk_modulus_derivative_members`.
 
 **Elasticity.** Full 6×6 Voigt tensor in GPa (pymatgen order xx, yy, zz,
 yz, xz, xy), plus VRH bulk and shear moduli and Young's modulus.
@@ -193,8 +237,9 @@ interfaceforge_property_validation`) contains:
 - `models[]`, one per member: model path and SHA-256, source (`--model` or
   `committee:<dir>`), seed when recoverable (from `seed_N` in the path, or
   from the committee manifest), device, dtype, native dtype, calculator
-  class, `status`, `error`, `failed_property`, per-property `results` with an
-  explicit `units` map, and package versions;
+  class, `status`, `error`, `failed_property`, `warnings` (e.g. an
+  implausible EOS B′), per-property `results` with an explicit `units` map,
+  and package versions;
 - `summary`: `success_fraction` (e.g. `3/4`), `failed_members` with their
   errors, and per-property statistics over successful members only;
 - `inputs_unchanged`: the structure and model files are re-hashed after the
