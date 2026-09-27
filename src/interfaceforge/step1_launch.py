@@ -56,6 +56,28 @@ def _manifest_rows(root: Path) -> dict[str, dict[str, Any]]:
     return {str(row.get("relative_path")): row for row in payload.get("runs", [])}
 
 
+def _density_init_transition(run: Path, expected: str, actual: str) -> bool:
+    """True when ``density_init.json`` proves the INCAR moved ``expected`` -> ``actual``.
+
+    ``iface vasp initialize-density`` changes only ``ICHARG`` and records the
+    INCAR hash before and after; a promoted, active report whose before-hash is
+    the prepared INCAR is therefore an accounted-for change, not drift.
+    """
+
+    report = _json_or_empty(run / "density_init.json")
+    inputs = report.get("inputs") or {}
+    before = (inputs.get("sha256_before") or {}).get("INCAR")
+    after = (inputs.get("sha256_after") or {}).get("INCAR")
+    changes = report.get("incar_changes") or []
+    return (
+        report.get("format") == "interfaceforge-density-init"
+        and report.get("status") == "PROMOTED"
+        and before == expected
+        and after == actual
+        and all(change.get("tag") == "ICHARG" for change in changes)
+    )
+
+
 def _preflight_run(
     run: Path,
     tree_root: Path,
@@ -85,15 +107,23 @@ def _preflight_run(
         return None, "not a repaired run (--only-repaired)"
     elif relative in manifest_rows:
         row = manifest_rows[relative]
+        density_init = False
         for name, key in (("INCAR", "step1_incar_sha256"), ("POSCAR", "step1_poscar_sha256")):
             path = run / name
             expected = row.get(key)
-            if not path.is_file() or not expected or _sha256_file(path) != expected:
-                raise SafetyError(
-                    f"{path} changed since step1-prepare; re-run "
-                    "'iface vasp step1-prepare --audit-only' and inspect before launching"
-                )
-        kind = "prepared"
+            if not path.is_file() or not expected:
+                raise SafetyError(f"{path} missing or unrecorded in step1_manifest.json")
+            actual = _sha256_file(path)
+            if actual == expected:
+                continue
+            if name == "INCAR" and _density_init_transition(run, expected, actual):
+                density_init = True
+                continue
+            raise SafetyError(
+                f"{path} changed since step1-prepare; re-run "
+                "'iface vasp step1-prepare --audit-only' and inspect before launching"
+            )
+        kind = "prepared+density-init" if density_init else "prepared"
     else:
         return None, "not written by step1-prepare or step1-repair"
 

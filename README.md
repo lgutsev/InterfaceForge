@@ -72,6 +72,7 @@ run for each engine, version, chemistry, and cluster environment.
 |---|---|
 | Install, configure, or choose a workflow | [Getting started](docs/getting-started.md) |
 | Prepare, audit, launch, monitor, or repair VASP runs | [VASP workflows](docs/vasp.md) |
+| Seed fresh VASP SCFs with an opt-in neural initial density (and benchmark it) | [Neural density initialization](docs/density-init.md) |
 | Configure and evaluate DeePMD/DPA committees | [DeePMD campaigns](docs/deepmd.md) |
 | Compare MACE and DeePMD on identical frames | [MLIP comparison](docs/mlip-comparison.md) |
 | Archive committees/datasets or package for Hugging Face | [Packaging](docs/packaging.md) |

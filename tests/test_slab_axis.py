@@ -4,10 +4,17 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
 import numpy as np
+
+from interfaceforge.errors import SafetyError
 from interfaceforge.slab_alignment import (
-    read_locpot, analyze_profile, ionic_center_fraction, write_dipole_preview,
-    load_alignment_config, analyze_slab_alignment,
+    analyze_profile,
+    analyze_slab_alignment,
+    ionic_center_fraction,
+    load_alignment_config,
+    read_locpot,
+    write_dipole_preview,
 )
 
 
@@ -59,7 +66,7 @@ class AxisTests(unittest.TestCase):
                 values['xyz'.index(axis)] = .45
                 self.assertIn('DIPOL  = ' + ' '.join(f'{x:.6f}' for x in values), output)
                 config.write_text(json.dumps({'axis': axis, 'side': 'invalid'}))
-                with self.assertRaises(Exception):
+                with self.assertRaises(SafetyError):
                     load_alignment_config(config)
 
     def test_tilt_warning_is_analyzed_and_tilt_failure_is_review(self):
@@ -111,8 +118,13 @@ class AxisTests(unittest.TestCase):
             (calc/'INCAR').write_text('IDIPOL = 1\nLDIPOL = .TRUE.\n')
             (calc/'OUTCAR').write_text('IDIPOL = 3\n E-fermi : 1.0\n')
             config = root/'config.json'
-            config.write_text(json.dumps({'axis':'x', 'side':'high-x', 'references':[{'prefix':'slab','reference':'slab'}]}))
-            with patch('interfaceforge.slab_alignment._plot_profile'), patch('interfaceforge.slab_alignment._plot_workfunction_profile'):
+            config.write_text(
+                json.dumps({'axis': 'x', 'side': 'high-x', 'references': [{'prefix': 'slab', 'reference': 'slab'}]})
+            )
+            with (
+                patch('interfaceforge.slab_alignment._plot_profile'),
+                patch('interfaceforge.slab_alignment._plot_workfunction_profile'),
+            ):
                 result = analyze_slab_alignment(root, config='config.json')
             row = result['rows'][0]
             self.assertEqual(row['flatness_status'], 'FAILED_DIPOLE_AXIS')
