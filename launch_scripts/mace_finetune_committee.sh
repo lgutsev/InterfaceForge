@@ -62,6 +62,21 @@ E0S="${MACE_E0S:-foundation}"
 # keep a replay head against the pretraining data.
 MULTIHEADS="${MACE_MULTIHEADS:-False}"
 PT_TRAIN_FILE="${MACE_PT_TRAIN_FILE:-}"
+PT_VALID_FILE="${MACE_PT_VALID_FILE:-}"
+# Stress training is opt-in; the default "weighted" loss is energy + forces only
+# and silently ignores REF_virial even when every frame carries it. Set
+# MACE_LOSS=virials (key REF_virial, the InterfaceForge collector's virial
+# -V*sigma in eV) or MACE_LOSS=stress with MACE_STRESS_KEY for stress labels.
+LOSS="${MACE_LOSS:-weighted}"
+VIRIALS_KEY="${MACE_VIRIALS_KEY:-}"
+STRESS_KEY="${MACE_STRESS_KEY:-}"
+VIRIALS_WEIGHT="${MACE_VIRIALS_WEIGHT:-1.0}"
+STAGE_TWO_VIRIALS_WEIGHT="${MACE_STAGE_TWO_VIRIALS_WEIGHT:-$VIRIALS_WEIGHT}"
+STRESS_WEIGHT="${MACE_STRESS_WEIGHT:-1.0}"
+STAGE_TWO_STRESS_WEIGHT="${MACE_STAGE_TWO_STRESS_WEIGHT:-$STRESS_WEIGHT}"
+if [[ "$LOSS" == "virials" && -z "$VIRIALS_KEY" ]]; then
+    VIRIALS_KEY="REF_virial"
+fi
 # The MP/MPA/OMAT foundation checkpoints are float64. Fine-tuning at float32
 # leaves the loaded weights in float64 while the compiled e3nn layers run
 # float32 -> "both inputs should have same dtype". Match the checkpoint.
@@ -205,6 +220,8 @@ echo "  foundation model: $FOUNDATION_MODEL"
 echo "  default dtype:    $DEFAULT_DTYPE"
 echo "  E0s:              $E0S"
 echo "  multiheads:       $MULTIHEADS"
+echo "  loss:             $LOSS${VIRIALS_KEY:+ (virials key $VIRIALS_KEY, weight $VIRIALS_WEIGHT/$STAGE_TWO_VIRIALS_WEIGHT)}${STRESS_KEY:+ (stress key $STRESS_KEY, weight $STRESS_WEIGHT/$STAGE_TWO_STRESS_WEIGHT)}"
+echo "  learning rate:    ${LR:-MACE default}"
 echo "  dataset dir:      $DATASET_DIR"
 echo "  output root:      $OUTPUT_ROOT"
 echo "  run dir:          $RUN_DIR"
@@ -230,6 +247,46 @@ fi
 if [[ -n "$PT_TRAIN_FILE" ]] && grep -q -- "--pt_train_file" <<< "$HELP_TXT"; then
     FT_ARGS+=(--pt_train_file "$PT_TRAIN_FILE")
 fi
+if [[ -n "$PT_VALID_FILE" ]]; then
+    grep -q -- "--pt_valid_file" <<< "$HELP_TXT" || { echo "ERROR: MACE_PT_VALID_FILE set, but this MACE has no --pt_valid_file"; exit 1; }
+    FT_ARGS+=(--pt_valid_file "$PT_VALID_FILE")
+fi
+
+# Stress/virial training: every requested flag must exist in this MACE, and the
+# requested key must be in the training data; never fall back silently.
+# (Read the first extxyz comment line into a variable: head|grep -q under
+# pipefail can fail spuriously on SIGPIPE.)
+TRAIN_HEADER="$(sed -n '2{p;q}' "$TRAIN_FILE")"
+STRESS_ARGS=()
+case "$LOSS" in
+    virials)
+        grep -q -- "--virials_key" <<< "$HELP_TXT" || { echo "ERROR: MACE_LOSS=virials, but this MACE has no --virials_key"; exit 1; }
+        grep -q -- "$VIRIALS_KEY=" <<< "$TRAIN_HEADER" || { echo "ERROR: $VIRIALS_KEY not found in the first frame of $TRAIN_FILE"; exit 1; }
+        STRESS_ARGS+=(--virials_key "$VIRIALS_KEY" --virials_weight "$VIRIALS_WEIGHT")
+        if grep -q -- "--stage_two_virials_weight" <<< "$HELP_TXT"; then
+            STRESS_ARGS+=(--stage_two_virials_weight "$STAGE_TWO_VIRIALS_WEIGHT")
+        elif grep -q -- "--swa_virials_weight" <<< "$HELP_TXT"; then
+            STRESS_ARGS+=(--swa_virials_weight "$STAGE_TWO_VIRIALS_WEIGHT")
+        fi
+        ;;
+    stress)
+        [[ -n "$STRESS_KEY" ]] || { echo "ERROR: MACE_LOSS=stress needs MACE_STRESS_KEY (InterfaceForge collects virials; use MACE_LOSS=virials)"; exit 1; }
+        grep -q -- "--stress_key" <<< "$HELP_TXT" || { echo "ERROR: MACE_LOSS=stress, but this MACE has no --stress_key"; exit 1; }
+        grep -q -- "$STRESS_KEY=" <<< "$TRAIN_HEADER" || { echo "ERROR: $STRESS_KEY not found in the first frame of $TRAIN_FILE"; exit 1; }
+        STRESS_ARGS+=(--stress_key "$STRESS_KEY" --stress_weight "$STRESS_WEIGHT")
+        if grep -q -- "--stage_two_stress_weight" <<< "$HELP_TXT"; then
+            STRESS_ARGS+=(--stage_two_stress_weight "$STAGE_TWO_STRESS_WEIGHT")
+        elif grep -q -- "--swa_stress_weight" <<< "$HELP_TXT"; then
+            STRESS_ARGS+=(--swa_stress_weight "$STAGE_TWO_STRESS_WEIGHT")
+        fi
+        ;;
+    *)
+        if grep -q -- "REF_virial=" <<< "$TRAIN_HEADER"; then
+            echo "WARNING: $TRAIN_FILE carries REF_virial, but MACE_LOSS=$LOSS does not train on it."
+            echo "         Elastic response and stress will be unconstrained. Set MACE_LOSS=virials to use it."
+        fi
+        ;;
+esac
 
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
 echo
@@ -261,7 +318,7 @@ echo
     --valid_batch_size "$VALID_BATCH_SIZE" \
     --max_num_epochs "$MAX_EPOCHS" \
     --patience "$PATIENCE" \
-    --loss "weighted" \
+    --loss "$LOSS" \
     --error_table "PerAtomRMSE" \
     --default_dtype "$DEFAULT_DTYPE" \
     --ema --ema_decay 0.99 \
@@ -269,6 +326,7 @@ echo
     --device cuda \
     --restart_latest \
     "${FT_ARGS[@]}" \
+    "${STRESS_ARGS[@]}" \
     "${STAGE_TWO_ARGS[@]}" \
     "${EXTRA_ARGS[@]}"
 
