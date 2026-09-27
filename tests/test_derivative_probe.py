@@ -28,12 +28,14 @@ from interfaceforge.derivative_probe import (
     CURVATURE_DEFINITIONS,
     FORCE_EXPORT_SCHEMA,
     PAPER,
+    VOIGT_COMPONENTS,
     _calculators,
     _prediction,
     _sha256,
     _static_incar,
     evaluate_derivative_probe,
     prepare_derivative_probe,
+    voigt_strain_matrix,
 )
 from interfaceforge.errors import DependencyError, SafetyError
 
@@ -479,6 +481,113 @@ class DerivativeProbeTests(unittest.TestCase):
         with patch.dict(sys.modules, {"mace": types.ModuleType("mace"), "mace.calculators": module}):
             _calculators([model], [], "cpu")
         self.assertEqual(factory.call_args.kwargs["default_dtype"], "float64")
+
+
+class VoigtStrainTests(unittest.TestCase):
+    """``strain_mode="voigt"``: one normal or shear component per center."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _hexagonal(self) -> Path:
+        # Non-orthogonal cell: catches row/column mistakes in cell @ (I + eps).T.
+        atoms = Atoms(
+            "Si2N2",
+            scaled_positions=[[0.1, 0.2, 0.3], [0.6, 0.7, 0.8], [0.3, 0.1, 0.5], [0.8, 0.4, 0.2]],
+            cell=[[7.6, 0.0, 0.0], [-3.8, 6.58179, 0.0], [0.0, 0.0, 2.9]],
+            pbc=True,
+        )
+        path = self.root / "hex.vasp"
+        write(path, atoms, format="vasp", direct=True, vasp5=True)
+        return path
+
+    def test_matrix_convention_normal_and_engineering_shear(self) -> None:
+        np.testing.assert_allclose(voigt_strain_matrix("yy", 0.02), np.diag([0.0, 0.02, 0.0]))
+        shear = voigt_strain_matrix("xz", 0.02)
+        self.assertAlmostEqual(shear[0, 2], 0.01)
+        self.assertAlmostEqual(shear[2, 0], 0.01)
+        self.assertEqual(np.count_nonzero(shear), 2)
+        with self.assertRaises(ValueError):
+            voigt_strain_matrix("xyz", 0.01)
+
+    def test_cells_carry_exactly_the_requested_cartesian_strain(self) -> None:
+        source = self._hexagonal()
+        root = self.root / "probe"
+        strains = [-0.02, -0.005, 0.0, 0.005, 0.02]
+        result = prepare_derivative_probe(
+            [f"hex={source}"], root, strain_mode="voigt", strains=strains, rattle_strains=[]
+        )
+        self.assertEqual(result["structures"], 6 * 4 + 1)  # one shared unstrained center
+        base = read(source).cell.array
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        ids = [row["structure_id"] for row in manifest["structures"]]
+        self.assertEqual(len(ids), len(set(ids)))
+        for row in manifest["structures"]:
+            cell = read(root / row["relative_directory"] / "POSCAR").cell.array
+            # Lattice vectors are rows: new_row = (I + eps) @ old_row, i.e. cell @ (I + eps).T.
+            realized = np.linalg.solve(base, cell).T - np.eye(3)
+            np.testing.assert_allclose(realized, np.asarray(row["strain_matrix"]), atol=1e-9)
+            if row["strain_component"] == "iso":
+                self.assertEqual(row["strain_fraction"], 0.0)
+                self.assertEqual(row["linear_scale"], 1.0)
+                self.assertTrue(row["structure_id"].endswith("strain_p0p000000_center"))
+            else:
+                expected = voigt_strain_matrix(row["strain_component"], row["strain_fraction"])
+                np.testing.assert_allclose(realized, expected, atol=1e-9)
+                self.assertIsNone(row["linear_scale"])
+                self.assertIn(f"strain_{row['strain_component']}_", row["structure_id"])
+        self.assertEqual(manifest["protocol"]["voigt_components"], list(VOIGT_COMPONENTS))
+        self.assertIn("gamma / 2", manifest["protocol"]["shear_convention"])
+
+    def test_rattles_only_at_selected_strains(self) -> None:
+        source = _structure(self.root / "cell.vasp")
+        root = self.root / "probe"
+        prepare_derivative_probe(
+            [str(source)],
+            root,
+            strain_mode="voigt",
+            voigt_components=["xx", "xy"],
+            strains=[-0.01, 0.0, 0.01, 0.02],
+            rattle_strains=[0.01],
+        )
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        rattles = [row for row in manifest["structures"] if row["kind"] == "rattle"]
+        self.assertEqual(len(rattles), 2 * 2)  # xx and xy at +1 %, one +/- pair each
+        self.assertEqual({row["strain_fraction"] for row in rattles}, {0.01})
+        self.assertEqual({row["strain_component"] for row in rattles}, {"xx", "xy"})
+        self.assertEqual(manifest["protocol"]["rattle_strains"], [0.01])
+        with self.assertRaises(ValueError):
+            prepare_derivative_probe(
+                [str(source)], self.root / "bad", strain_mode="voigt", strains=[0.01], rattle_strains=[0.02]
+            )
+
+    def test_isotropic_modes_keep_their_ids_and_record_iso(self) -> None:
+        source = _structure(self.root / "cell.vasp")
+        root = self.root / "probe"
+        prepare_derivative_probe([str(source)], root, strain_mode="linear", strains=[0.01])
+        row = _case(root, "strain_p0p010000_center")
+        self.assertEqual(row["strain_component"], "iso")
+        self.assertAlmostEqual(row["linear_scale"], 1.01)
+        np.testing.assert_allclose(row["strain_matrix"], np.eye(3) * 0.01, atol=1e-12)
+
+    def test_evaluate_pairs_rattles_within_each_component(self) -> None:
+        source = _structure(self.root / "cell.vasp")
+        root = self.root / "probe"
+        prepare_derivative_probe(
+            [f"bulk={source}"], root, strain_mode="voigt", voigt_components=["xx", "yz"], strains=[0.0, 0.01]
+        )
+        result = evaluate_derivative_probe(root, _test_calculators={"harmonic": HarmonicCalculator(2.0)})
+        with Path(result["outputs"]["responses"]).open(encoding="utf-8") as handle:
+            responses = list(csv.DictReader(handle))
+        # iso zero-strain pair + one pair for each (component, +1 %): no key collisions.
+        self.assertEqual(sorted((row["strain_component"], row["strain_fraction"]) for row in responses),
+                         [("iso", "0.0"), ("xx", "0.01"), ("yz", "0.01")])
+        for row in responses:
+            self.assertAlmostEqual(float(row["energy_curvature_ev_a2"]), 2.0)
 
 
 class DerivativeProbeMetricTests(unittest.TestCase):

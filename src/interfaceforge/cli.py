@@ -440,6 +440,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 seed=args.seed,
                 paired=args.paired,
                 strain_mode=args.strain_mode,
+                voigt_components=args.voigt_components,
+                rattle_strains=args.rattle_strains,
                 vasp_template=args.vasp_template,
                 force=args.force,
             )
@@ -2101,9 +2103,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     derivative_prepare.add_argument(
         "--strain-mode",
-        choices=("volume", "linear"),
+        choices=("volume", "linear", "voigt"),
         default="volume",
-        help="Interpret --strain as volume or lattice-vector strain (default: volume)",
+        help=(
+            "Interpret --strain as isotropic volume or lattice-vector strain, or apply it to each "
+            "--voigt-component in turn (shear as engineering strain) (default: volume)"
+        ),
+    )
+    derivative_prepare.add_argument(
+        "--voigt-components",
+        nargs="+",
+        choices=("xx", "yy", "zz", "yz", "xz", "xy"),
+        default=["xx", "yy", "zz", "yz", "xz", "xy"],
+        help="Voigt components for --strain-mode voigt (default: all six)",
+    )
+    derivative_prepare.add_argument(
+        "--rattle-strains",
+        type=float,
+        nargs="+",
+        help="Only write rattle pairs at these --strain values (default: every center)",
     )
     derivative_prepare.add_argument(
         "--rattles",

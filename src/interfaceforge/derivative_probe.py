@@ -243,12 +243,57 @@ def _write_case_inputs(directory: Path, atoms: Any, write: Any, template: dict[s
     }
 
 
-def _case_id(strain: float, sample: int | None, sign: int) -> str:
+VOIGT_COMPONENTS = ("xx", "yy", "zz", "yz", "xz", "xy")
+_VOIGT_INDEX = {"xx": (0, 0), "yy": (1, 1), "zz": (2, 2), "yz": (1, 2), "xz": (0, 2), "xy": (0, 1)}
+ISOTROPIC = "iso"
+
+
+def _case_id(strain: float, sample: int | None, sign: int, component: str = ISOTROPIC) -> str:
     strain_tag = f"{strain:+.6f}".replace("+", "p").replace("-", "m").replace(".", "p")
+    # Isotropic ids are unchanged from earlier releases; Voigt ids carry the component.
+    prefix = "strain" if component == ISOTROPIC else f"strain_{component}"
     if sample is None:
-        return f"strain_{strain_tag}_center"
+        return f"{prefix}_{strain_tag}_center"
     side = "plus" if sign > 0 else "minus"
-    return f"strain_{strain_tag}_rattle_{sample:03d}_{side}"
+    return f"{prefix}_{strain_tag}_rattle_{sample:03d}_{side}"
+
+
+def voigt_strain_matrix(component: str, strain: float) -> np.ndarray:
+    """Symmetric small-strain tensor for one Voigt component.
+
+    Normal components put ``strain`` on the diagonal. Shear components use the
+    engineering convention (gamma = ``strain``), so each off-diagonal entry is
+    gamma / 2, the convention of the MatCalc/pymatgen elastic-constant fit.
+    """
+
+    if component not in _VOIGT_INDEX:
+        raise ValueError(f"Unknown Voigt component {component!r}; choose from {VOIGT_COMPONENTS}")
+    i, j = _VOIGT_INDEX[component]
+    epsilon = np.zeros((3, 3))
+    if i == j:
+        epsilon[i, i] = strain
+    else:
+        epsilon[i, j] = epsilon[j, i] = strain / 2.0
+    return epsilon
+
+
+def _strain_cases(
+    strains: Sequence[float], strain_mode: str, components: Sequence[str]
+) -> list[tuple[str, float, np.ndarray]]:
+    """``(component, strain, deformation gradient F)`` for every requested center."""
+
+    cases: list[tuple[str, float, np.ndarray]] = []
+    for strain in strains:
+        if strain_mode != "voigt":
+            scale = (1.0 + strain) ** (1.0 / 3.0) if strain_mode == "volume" else 1.0 + strain
+            cases.append((ISOTROPIC, strain, np.eye(3) * scale))
+        elif strain == 0.0:
+            # The unstrained center is component-independent: write it once.
+            cases.append((ISOTROPIC, strain, np.eye(3)))
+        else:
+            for component in components:
+                cases.append((component, strain, np.eye(3) + voigt_strain_matrix(component, strain)))
+    return cases
 
 
 def prepare_derivative_probe(
@@ -261,6 +306,8 @@ def prepare_derivative_probe(
     seed: int = DEFAULT_SEED,
     paired: bool = True,
     strain_mode: str = "volume",
+    voigt_components: Sequence[str] = VOIGT_COMPONENTS,
+    rattle_strains: Sequence[float] | None = None,
     vasp_template: str | Path | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -270,19 +317,36 @@ def prepare_derivative_probe(
     adds paired +/- displacement vectors so directional curvature can be estimated
     by central differences; that paired construction is not claimed to be the
     paper's exact training-set protocol.
+
+    ``strain_mode="voigt"`` applies one Voigt component at a time: the normal
+    and shear deformations an elastic-constant fit needs. The cell transforms
+    as ``cell @ (I + epsilon).T``. ``rattle_strains`` limits rattle pairs to the
+    centers at those strain values; ``None`` rattles every center.
     """
 
     if displacement_a <= 0:
         raise ValueError("--displacement must be positive")
     if rattles < 1:
         raise ValueError("--rattles must be at least 1")
-    if strain_mode not in {"volume", "linear"}:
-        raise ValueError("--strain-mode must be 'volume' or 'linear'")
+    if strain_mode not in {"volume", "linear", "voigt"}:
+        raise ValueError("--strain-mode must be 'volume', 'linear' or 'voigt'")
+    components = tuple(dict.fromkeys(str(value) for value in voigt_components))
+    if strain_mode == "voigt":
+        if not components:
+            raise ValueError("Provide at least one Voigt component")
+        for component in components:
+            voigt_strain_matrix(component, 0.0)
     unique_strains = tuple(dict.fromkeys(float(value) for value in strains))
     if not unique_strains:
         raise ValueError("Provide at least one strain")
     if any(value <= -1.0 for value in unique_strains):
         raise ValueError("Every strain must be greater than -1")
+    rattle_set = None if rattle_strains is None else {float(value) for value in rattle_strains}
+    if rattle_set is not None and not rattle_set <= set(unique_strains):
+        raise ValueError(
+            f"--rattle-strains {sorted(rattle_set)} must be a subset of --strain {list(unique_strains)}"
+        )
+    cases = _strain_cases(unique_strains, strain_mode, components)
 
     parsed = [parse_probe_entry(value) for value in entries]
     labels = [label for label, _ in parsed]
@@ -316,11 +380,12 @@ def prepare_derivative_probe(
                 )
         source_hash = _sha256(source)
 
-        for strain in unique_strains:
-            scale = (1.0 + strain) ** (1.0 / 3.0) if strain_mode == "volume" else 1.0 + strain
+        for component, strain, gradient in cases:
+            scale = float(gradient[0, 0]) if component == ISOTROPIC else None
+            strain_matrix = (gradient - np.eye(3)).round(12).tolist()
             center = base.copy()
-            center.set_cell(cell * scale, scale_atoms=True)
-            center_id = _case_id(strain, None, 0)
+            center.set_cell(cell @ gradient.T, scale_atoms=True)
+            center_id = _case_id(strain, None, 0, component)
             center_dir = root / label / center_id
             hashes = _write_case_inputs(center_dir, center, write, template)
             row = {
@@ -332,6 +397,8 @@ def prepare_derivative_probe(
                 "kind": "center",
                 "strain_fraction": strain,
                 "strain_mode": strain_mode,
+                "strain_component": component,
+                "strain_matrix": strain_matrix,
                 "linear_scale": scale,
                 "sample": None,
                 "sign": 0,
@@ -347,11 +414,14 @@ def prepare_derivative_probe(
                     "IF_probe_id": row["structure_id"],
                     "IF_probe_kind": "center",
                     "IF_probe_strain": strain,
+                    "IF_probe_strain_component": component,
                     "IF_probe_sign": 0,
                 }
             )
             extxyz_frames.append(frame)
 
+            if rattle_set is not None and strain not in rattle_set:
+                continue
             for sample in range(1, rattles + 1):
                 rng = np.random.default_rng(seed + source_index * 1_000_003 + sample)
                 displacement = rng.normal(0.0, displacement_a, size=(len(center), 3))
@@ -359,7 +429,7 @@ def prepare_derivative_probe(
                 for sign in signs:
                     atoms = center.copy()
                     atoms.positions = np.asarray(center.positions) + sign * displacement
-                    case_id = _case_id(strain, sample, sign)
+                    case_id = _case_id(strain, sample, sign, component)
                     directory = root / label / case_id
                     hashes = _write_case_inputs(directory, atoms, write, template)
                     row = {
@@ -371,6 +441,8 @@ def prepare_derivative_probe(
                         "kind": "rattle",
                         "strain_fraction": strain,
                         "strain_mode": strain_mode,
+                        "strain_component": component,
+                        "strain_matrix": strain_matrix,
                         "linear_scale": scale,
                         "sample": sample,
                         "sign": sign,
@@ -387,6 +459,7 @@ def prepare_derivative_probe(
                             "IF_probe_id": row["structure_id"],
                             "IF_probe_kind": "rattle",
                             "IF_probe_strain": strain,
+                            "IF_probe_strain_component": component,
                             "IF_probe_sample": sample,
                             "IF_probe_sign": sign,
                         }
@@ -404,6 +477,11 @@ def prepare_derivative_probe(
             "displacement_component_stdev_a": displacement_a,
             "strains": list(unique_strains),
             "strain_mode": strain_mode,
+            "voigt_components": list(components) if strain_mode == "voigt" else None,
+            "shear_convention": (
+                "engineering: gamma = strain, epsilon_ij = gamma / 2" if strain_mode == "voigt" else None
+            ),
+            "rattle_strains": sorted(rattle_set) if rattle_set is not None else "all",
             "rattles_per_strain": rattles,
             "paired_displacements": paired,
             "constraint_policy": "full-coordinate displacements and raw forces",
@@ -441,6 +519,7 @@ def prepare_derivative_probe(
             "kind",
             "strain_fraction",
             "strain_mode",
+            "strain_component",
             "linear_scale",
             "sample",
             "sign",
@@ -620,15 +699,20 @@ def _export_predictions(
     }
 
 
-def _response_key(row: Mapping[str, Any]) -> tuple[str, float, int]:
-    return (str(row["label"]), float(row["strain_fraction"]), int(row["sample"]))
+def _component(row: Mapping[str, Any]) -> str:
+    # Manifests written before Voigt support carry no component: they are isotropic.
+    return str(row.get("strain_component") or ISOTROPIC)
+
+
+def _response_key(row: Mapping[str, Any]) -> tuple[str, str, float, int]:
+    return (str(row["label"]), _component(row), float(row["strain_fraction"]), int(row["sample"]))
 
 
 def _summarize_model(
     model: str,
     rows: Sequence[Mapping[str, Any]],
     values: Mapping[tuple[str, str], Mapping[str, Any]],
-    row_by_key: Mapping[tuple[str, float, Any, int], Mapping[str, Any]],
+    row_by_key: Mapping[tuple[str, str, float, Any, int], Mapping[str, Any]],
     response_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any] | None:
     """Compare one model with DFT, metric by metric.
@@ -702,7 +786,7 @@ def _summarize_model(
     dropped_sources: dict[str, str] = {}
     for row in matched:
         label = str(row["label"])
-        center = row_by_key.get((label, 0.0, None, 0))
+        center = row_by_key.get((label, ISOTROPIC, 0.0, None, 0))
         if center is None:
             dropped_sources[label] = "no zero-strain center was prepared for this source"
             continue
@@ -978,6 +1062,7 @@ def evaluate_derivative_probe(
                 "structure_id": structure_id,
                 "label": row["label"],
                 "kind": row["kind"],
+                "strain_component": _component(row),
                 "strain_fraction": row["strain_fraction"],
                 "sample": row["sample"],
                 "sign": row["sign"],
@@ -995,6 +1080,7 @@ def evaluate_derivative_probe(
     row_by_key = {
         (
             str(row["label"]),
+            _component(row),
             float(row["strain_fraction"]),
             row.get("sample"),
             int(row["sign"]),
@@ -1005,8 +1091,8 @@ def evaluate_derivative_probe(
         for row in rows:
             if row["kind"] != "rattle" or int(row["sign"]) != 1:
                 continue
-            key = (str(row["label"]), float(row["strain_fraction"]), row["sample"])
-            center = row_by_key.get((*key[:2], None, 0))
+            key = (str(row["label"]), _component(row), float(row["strain_fraction"]), row["sample"])
+            center = row_by_key.get((*key[:3], None, 0))
             minus = row_by_key.get((*key, -1))
             if center is None or minus is None:
                 continue
@@ -1044,6 +1130,7 @@ def evaluate_derivative_probe(
                 {
                     "model": model,
                     "label": row["label"],
+                    "strain_component": _component(row),
                     "strain_fraction": row["strain_fraction"],
                     "sample": row["sample"],
                     "displacement_vector_norm_a": q,
