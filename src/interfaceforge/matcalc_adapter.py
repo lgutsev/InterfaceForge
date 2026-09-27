@@ -21,6 +21,12 @@ Behaviour of MatCalc 0.5.1 that shapes this adapter:
   ``max_abs_strain=0.1`` spans V/V0 = 0.729-1.331. That is far into the
   anharmonic regime of stiff covalent solids and biases B' low; the adapter
   records the realized window and refits the near-equilibrium points.
+* ``ElasticityCalc`` defaults to normal strains of +/-0.5/1 % but shear
+  strains of +/-3/6 % (pymatgen deformation-gradient components, so the
+  engineering shear strain equals the value). A shear window that wide picks
+  up the nonlinear stress response of soft-shear solids (on a MACE rocksalt
+  TiN it put C44 ~15 GPa above the finite-difference elastic limit), so the
+  adapter always passes the strain windows explicitly and records them.
 * ``PhononCalc`` writes ``phonon.yaml`` into the current directory by
   default; the adapter always points it at the member directory.
 * Every downstream calc is run with ``relax_structure=False`` on the
@@ -282,10 +288,24 @@ def eos(
     }
 
 
-def elasticity(atoms: Any, calculator: Any, *, fmax: float) -> dict[str, Any]:
+def elasticity(
+    atoms: Any,
+    calculator: Any,
+    *,
+    fmax: float,
+    norm_strains: tuple[float, ...] = (-0.01, -0.005, 0.005, 0.01),
+    shear_strains: tuple[float, ...] = (-0.06, -0.03, 0.03, 0.06),
+) -> dict[str, Any]:
     from matcalc import ElasticityCalc
 
-    calc = ElasticityCalc(calculator, fmax=fmax, relax_structure=False, units_GPa=True)
+    calc = ElasticityCalc(
+        calculator,
+        norm_strains=tuple(float(value) for value in norm_strains),
+        shear_strains=tuple(float(value) for value in shear_strains),
+        fmax=fmax,
+        relax_structure=False,
+        units_GPa=True,
+    )
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("always")
         result = calc.calc(atoms.copy())
@@ -298,8 +318,15 @@ def elasticity(atoms: Any, calculator: Any, *, fmax: float) -> dict[str, Any]:
         "shear_modulus_vrh": float(result["shear_modulus_vrh"]),
         "youngs_modulus": float(result["youngs_modulus"]),
         "residuals_sum": float(result["residuals_sum"]),
+        "strains": {
+            "norm_strains": [float(value) for value in calc.norm_strains],
+            "shear_strains": [float(value) for value in calc.shear_strains],
+            "convention": "pymatgen DeformedStructureSet deformation-gradient components "
+                          "(shear value = engineering shear strain)",
+        },
         "warnings": _caught(record),
         "units": {
+            "strains": "dimensionless",
             "elastic_tensor": "GPa",
             "bulk_modulus_vrh": "GPa",
             "shear_modulus_vrh": "GPa",

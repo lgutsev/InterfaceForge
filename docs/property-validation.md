@@ -112,6 +112,9 @@ iface properties run TiN.vasp \
 | `--eos-max-strain` | EOS scan half-width as **linear** strain, 0 < x ≤ 0.2 (MatCalc default 0.1, i.e. V/V₀ 0.729–1.331) |
 | `--eos-points` | Number of EOS scan points, odd and ≥ 5 (MatCalc default 11) |
 | `--eos-refit-window` | Volume fraction around the relaxed volume for the near-equilibrium refit, 0 < x ≤ 0.2 (default 0.05 = ±5 %) |
+| `--elastic-norm-strains X [X ...]` | Normal strains for the elastic fit: ≥ 2 values, each nonzero with \|x\| ≤ 0.1 (default `-0.01 -0.005 0.005 0.01`, same as MatCalc) |
+| `--elastic-shear-strains X [X ...]` | Engineering shear strains, same rules (default `-0.01 -0.005 0.005 0.01`; **MatCalc's default is `-0.06 -0.03 0.03 0.06`**) |
+| `--elastic-strain-check` | Also fit with a second strain window and warn when any diagonal C_ii changes by > 10 % (doubles the elasticity cost) |
 
 Exit status is 0 when every member succeeded, 1 when at least one member
 failed (the JSON is still written), and 2 for usage/safety errors.
@@ -205,7 +208,58 @@ the summary counts flagged members in
 `implausible_bulk_modulus_derivative_members`.
 
 **Elasticity.** Full 6×6 Voigt tensor in GPa (pymatgen order xx, yy, zz,
-yz, xz, xy), plus VRH bulk and shear moduli and Young's modulus.
+yz, xz, xy), plus VRH bulk and shear moduli and Young's modulus. MatCalc
+applies each strain value to one component of the deformation gradient
+(pymatgen `DeformedStructureSet`), fits stress against strain linearly per
+component, and does not relax the deformed cells' internal coordinates
+(`relax_deformed_structures=False`, MatCalc's default). A shear value is the
+engineering shear strain γ, so `0.06` means γ = 6 % (it also induces a
+second-order normal strain of γ²/2 = 0.18 %).
+
+*Strain window, and why the shear default differs from MatCalc.* MatCalc
+0.5.1 uses ±0.5/±1 % normal strains but ±3/±6 % shear strains. A linear fit
+over ±6 % picks up the nonlinear shear response, and for some materials that
+biases C44 (and so G_VRH and Young's modulus) well away from the elastic
+limit. On rocksalt TiN with the trained MACE committee (2026-09-27), C44 per
+seed was 121/151/157/141 GPa (mean 142) with MatCalc's window and
+96/148/138/124 GPa (mean 127) with ±0.5/±1 % shear. A direct central finite
+difference of the model stress at |γ| ≤ 1 % gave 95–96 GPa for seed 11 in
+both the 2-atom and 8-atom cells. That matches the small-window value, not
+the MatCalc one. EMT copper shows the same effect: C44 is 90.2 GPa with
+±1 % shear and 98.5 GPa with ±6 % (+9 %). For β-Si₃N₄ the two windows agree
+within about 2 GPa.
+
+InterfaceForge therefore **defaults to the same ±0.5/±1 % window for shear
+as for normal strain**. Elastic constants are defined as the small-strain
+limit, and that limit is what a DFT finite-difference reference measures.
+The cost of the change is parity with MatCalc benchmarks and with runs made
+before this option existed. The Materials Project/atomate elastic workflow
+also used several-percent shear deformations. When you compare against such
+a reference, reproduce its window explicitly:
+`--elastic-shear-strains -0.06 -0.03 0.03 0.06`. Either way, compare against
+DFT computed with the same window. Much smaller windows (< 0.1 %) are also
+allowed, but they trade nonlinearity for sensitivity to stress noise; a
+float32 model or a loose `--fmax` makes that worse. Every elasticity result
+records the window it used in `results.elasticity.strains`
+(`norm_strains`, `shear_strains`, `convention`), and the run-level
+`settings` record `elastic_norm_strains` / `elastic_shear_strains`.
+
+*Strain-window check.* `--elastic-strain-check` refits each member with a
+second window: MatCalc's defaults, or the small default window if MatCalc's
+window is already the primary one. The diagonal constants are then compared.
+The result gets a `strain_check` block with `reference_strains`,
+`reference_elastic_tensor`, the reference VRH moduli,
+`diagonal_relative_change` = |C_ii(reference) − C_ii(primary)| / |C_ii(primary)|
+for C11…C66, `max_diagonal_relative_change`, the `tolerance` (0.10), and
+`flagged_components`. A change above 10 % in any diagonal constant adds a
+warning to `results.elasticity.warnings` and to the member's `warnings`. The
+CLI prints it. The member still counts as succeeded, and the headline
+numbers stay those of the primary window. The committee summary counts
+flagged members under `summary.properties.elasticity.strain_check`. A flag
+means the wide-window fit is not in the linear regime, so trust the smaller
+window. It does not by itself mean the model is wrong. The 10 % threshold is
+a coarse screen: EMT Cu (+9 %) stays just under it, so read the recorded
+changes, not only the flag.
 
 **Phonons.** phonopy finite displacements through MatCalc. The record keeps
 mesh frequencies (THz), the minimum frequency, the number of modes below
@@ -238,7 +292,8 @@ interfaceforge_property_validation`) contains:
   `committee:<dir>`), seed when recoverable (from `seed_N` in the path, or
   from the committee manifest), device, dtype, native dtype, calculator
   class, `status`, `error`, `failed_property`, `warnings` (e.g. an
-  implausible EOS B′), per-property `results` with an explicit `units` map,
+  implausible EOS B′ or an elastic strain-window flag), per-property
+  `results` with an explicit `units` map,
   and package versions;
 - `summary`: `success_fraction` (e.g. `3/4`), `failed_members` with their
   errors, and per-property statistics over successful members only;

@@ -43,6 +43,18 @@ MAX_BULK_GAP_A = 6.0
 EOS_MAX_STRAIN_LIMIT = 0.2
 # Pressure derivative of the bulk modulus for ordinary solids is ~3-6; outside this band the fit is suspect.
 BPRIME_PLAUSIBLE = (2.0, 8.0)
+ELASTIC_STRAIN_LIMIT = 0.1
+# MatCalc 0.5.1 ElasticityCalc defaults (pymatgen deformation amounts; shear value = engineering shear strain).
+MATCALC_ELASTIC_NORM_STRAINS = (-0.01, -0.005, 0.005, 0.01)
+MATCALC_ELASTIC_SHEAR_STRAINS = (-0.06, -0.03, 0.03, 0.06)
+# InterfaceForge default: the same small window for shear as for normal strain. The +/-6 % MatCalc shear window
+# picks up the nonlinear shear response (MACE TiN: C44 142 vs 127 GPa committee mean; FD elastic limit 95 GPa
+# vs 121 GPa for seed 11) while beta-Si3N4 agrees within ~2 GPa either way.
+DEFAULT_ELASTIC_NORM_STRAINS = MATCALC_ELASTIC_NORM_STRAINS
+DEFAULT_ELASTIC_SHEAR_STRAINS = (-0.01, -0.005, 0.005, 0.01)
+# --elastic-strain-check flags a diagonal C_ii that moves by more than this fraction between the two windows.
+ELASTIC_STRAIN_CHECK_TOL = 0.10
+VOIGT_DIAGONAL = ("C11", "C22", "C33", "C44", "C55", "C66")
 
 _SCALARS = {
     "relax": ("energy_per_atom", "volume_per_atom", "a", "b", "c", "alpha", "beta", "gamma", "max_abs_final_stress"),
@@ -72,6 +84,10 @@ class PropertyConfig:
     eos_points: int = 11
     # Fractional volume window around the scan centre for the near-equilibrium Birch-Murnaghan refit.
     eos_refit_window: float = 0.05
+    elastic_norm_strains: tuple[float, ...] = DEFAULT_ELASTIC_NORM_STRAINS
+    elastic_shear_strains: tuple[float, ...] = DEFAULT_ELASTIC_SHEAR_STRAINS
+    # Re-run elasticity with a second strain window and flag diagonal C_ii changes > ELASTIC_STRAIN_CHECK_TOL.
+    elastic_strain_check: bool = False
 
     def __post_init__(self) -> None:
         if not self.properties:
@@ -96,10 +112,41 @@ class PropertyConfig:
             raise ConfigurationError("--eos-points must be an odd integer >= 5 (the scan is centred on V0)")
         if not (0 < self.eos_refit_window <= EOS_MAX_STRAIN_LIMIT):
             raise ConfigurationError(f"--eos-refit-window must be in (0, {EOS_MAX_STRAIN_LIMIT}] (volume fraction)")
+        for option, attribute in (("--elastic-norm-strains", "elastic_norm_strains"),
+                                  ("--elastic-shear-strains", "elastic_shear_strains")):
+            object.__setattr__(self, attribute, _elastic_strains(option, getattr(self, attribute)))
+        if self.elastic_strain_check and "elasticity" not in self.properties:
+            raise ConfigurationError("--elastic-strain-check needs --property elasticity")
 
     @property
     def ordered(self) -> tuple[str, ...]:
         return tuple(name for name in PROPERTIES if name in self.properties)
+
+    @property
+    def elastic_check_strains(self) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        """The second window for --elastic-strain-check: MatCalc's defaults, or the small default if already used."""
+
+        primary = (self.elastic_norm_strains, self.elastic_shear_strains)
+        matcalc = (MATCALC_ELASTIC_NORM_STRAINS, MATCALC_ELASTIC_SHEAR_STRAINS)
+        return (DEFAULT_ELASTIC_NORM_STRAINS, DEFAULT_ELASTIC_SHEAR_STRAINS) if primary == matcalc else matcalc
+
+
+def _elastic_strains(option: str, values: Any) -> tuple[float, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, (Sequence, np.ndarray)) \
+            or any(isinstance(value, (bool, str, bytes)) for value in values):
+        raise ConfigurationError(f"{option} must be a list of numbers")
+    try:
+        strains = tuple(float(value) for value in values)
+    except (TypeError, ValueError):
+        raise ConfigurationError(f"{option} must be a list of numbers") from None
+    if len(strains) < 2:
+        raise ConfigurationError(f"{option} needs at least two strain values (a linear stress-strain fit)")
+    if not all(math.isfinite(value) and value != 0 and abs(value) <= ELASTIC_STRAIN_LIMIT for value in strains):
+        raise ConfigurationError(
+            f"{option} values must be nonzero with |value| <= {ELASTIC_STRAIN_LIMIT} "
+            "(fractional strain; 0.01 = 1 %)"
+        )
+    return strains
 
 
 @dataclass
@@ -258,6 +305,42 @@ def check_eos(result: dict[str, Any]) -> list[str]:
     return messages
 
 
+def check_elastic_strains(result: dict[str, Any], reference: dict[str, Any]) -> list[str]:
+    """Compare the diagonal C_ii of two strain windows; stores ``result["strain_check"]`` and returns warnings."""
+
+    primary = np.diagonal(np.asarray(result["elastic_tensor"], dtype=float))
+    other = np.diagonal(np.asarray(reference["elastic_tensor"], dtype=float))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        change = np.abs(other - primary) / np.abs(primary)
+    flagged = [VOIGT_DIAGONAL[i] for i, value in enumerate(change) if not (value <= ELASTIC_STRAIN_CHECK_TOL)]
+    result["strain_check"] = {
+        "reference_strains": reference.get("strains"),
+        "reference_elastic_tensor": reference["elastic_tensor"],
+        "reference_bulk_modulus_vrh": reference["bulk_modulus_vrh"],
+        "reference_shear_modulus_vrh": reference["shear_modulus_vrh"],
+        "diagonal_components": list(VOIGT_DIAGONAL[: len(primary)]),
+        "diagonal_relative_change": change,
+        "max_diagonal_relative_change": float(np.nanmax(change)) if np.isfinite(change).any() else None,
+        "definition": "|C_ii(reference window) - C_ii(primary window)| / |C_ii(primary window)|",
+        "tolerance": ELASTIC_STRAIN_CHECK_TOL,
+        "flagged_components": flagged,
+        "flagged": bool(flagged),
+        "warnings": reference.get("warnings", []),
+    }
+    if not flagged:
+        return []
+    details = ", ".join(
+        f"{name} {primary[VOIGT_DIAGONAL.index(name)]:.4g} -> {other[VOIGT_DIAGONAL.index(name)]:.4g} GPa"
+        for name in flagged
+    )
+    message = (
+        f"elasticity: diagonal constants change by more than {ELASTIC_STRAIN_CHECK_TOL:.0%} between strain windows "
+        f"({details}); the stress response is nonlinear over the wider window - trust the smaller one"
+    )
+    result.setdefault("warnings", []).append(message)
+    return [message]
+
+
 def _run_member(atoms: Any, member: Member, config: PropertyConfig, member_dir: Path, backend: Any) -> dict[str, Any]:
     record = dict(member.record)
     record.update({"label": member.label, "status": "failed", "error": None, "failed_property": None, "results": {},
@@ -299,7 +382,14 @@ def _run_member(atoms: Any, member: Member, config: PropertyConfig, member_dir: 
                                      n_points=config.eos_points, refit_volume_window=config.eos_refit_window)
                 record["warnings"].extend(check_eos(result))
             elif name == "elasticity":
-                result = backend.elasticity(equilibrium, calculator, fmax=config.fmax)
+                result = backend.elasticity(equilibrium, calculator, fmax=config.fmax,
+                                            norm_strains=config.elastic_norm_strains,
+                                            shear_strains=config.elastic_shear_strains)
+                if config.elastic_strain_check:
+                    check_norm, check_shear = config.elastic_check_strains
+                    reference = backend.elasticity(equilibrium, calculator, fmax=config.fmax,
+                                                   norm_strains=check_norm, shear_strains=check_shear)
+                    record["warnings"].extend(check_elastic_strains(result, reference))
             else:
                 result = backend.phonon(equilibrium, calculator, min_length=config.phonon_min_length,
                                         member_dir=member_dir)
@@ -384,6 +474,14 @@ def summarize(models: Sequence[dict[str, Any]], properties: Sequence[str]) -> di
                 if len(conventions) == 1
                 else {"aggregated": False, "reason": f"tensor conventions differ: {sorted(conventions)}"}
             )
+            checked = [item["strain_check"] for item in results if "strain_check" in item]
+            if checked:
+                entry["strain_check"] = {
+                    "n_members": len(checked),
+                    "flagged_members": sum(bool(item["flagged"]) for item in checked),
+                    "tolerance": ELASTIC_STRAIN_CHECK_TOL,
+                    "reference_shear_modulus_vrh": _stats([item["reference_shear_modulus_vrh"] for item in checked]),
+                }
         if name == "phonon" and results:
             entry["dynamically_stable_members"] = sum(bool(item["dynamically_stable"]) for item in results)
             entry["frequencies"] = _array_stats([item["frequencies"] for item in results], "phonon frequency")
@@ -528,6 +626,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         eos_max_strain=args.eos_max_strain,
         eos_points=args.eos_points,
         eos_refit_window=args.eos_refit_window,
+        elastic_norm_strains=tuple(args.elastic_norm_strains),
+        elastic_shear_strains=tuple(args.elastic_shear_strains),
+        elastic_strain_check=args.elastic_strain_check,
     )
     if bool(args.model) == bool(args.committee):
         raise ConfigurationError("Pass either --model (repeatable) or --committee, not both / neither")
@@ -621,5 +722,16 @@ def register_commands(commands: Any) -> None:
     run.add_argument("--eos-refit-window", type=float, default=0.05,
                      help="Volume fraction around the relaxed volume for the near-equilibrium EOS refit "
                           "(default 0.05 = +/-5%%; needs >= 5 scan points inside it)")
+    run.add_argument("--elastic-norm-strains", type=float, nargs="+", default=list(DEFAULT_ELASTIC_NORM_STRAINS),
+                     metavar="STRAIN",
+                     help="Normal strains for the elastic fit, >= 2 nonzero values with |x| <= 0.1 "
+                          "(default and MatCalc default: -0.01 -0.005 0.005 0.01)")
+    run.add_argument("--elastic-shear-strains", type=float, nargs="+", default=list(DEFAULT_ELASTIC_SHEAR_STRAINS),
+                     metavar="STRAIN",
+                     help="Shear strains (engineering) for the elastic fit, same rules (default -0.01 -0.005 0.005 "
+                          "0.01; MatCalc's default -0.06 -0.03 0.03 0.06 biases C44 for nonlinear-shear solids)")
+    run.add_argument("--elastic-strain-check", action="store_true",
+                     help="Also fit elasticity with MatCalc's default strain window (or the small default window if "
+                          "that is already the primary) and warn when any diagonal C_ii changes by > 10%%")
     run.add_argument("--force", action="store_true", help="Replace a prior property result in --output")
     run.set_defaults(func=cmd_run)

@@ -39,7 +39,8 @@ class NoStressCalculator(Calculator):
 
 
 def _fake_backend(bulk_modulus: float = 140.0, *, tensor_shape: tuple[int, int] = (6, 6), converged: bool = True,
-                  bprime: float = 4.5, refit_bprime: float | None = None, eos_calls: list | None = None):
+                  bprime: float = 4.5, refit_bprime: float | None = None, eos_calls: list | None = None,
+                  elastic_calls: list | None = None, shear_softening: float = 0.0):
     """MatCalc-shaped results without MatCalc, so the runner is testable anywhere."""
 
     def relax(atoms, calculator, *, fmax, max_steps, optimizer, member_dir):
@@ -67,10 +68,20 @@ def _fake_backend(bulk_modulus: float = 140.0, *, tensor_shape: tuple[int, int] 
                                 "max_volume_ratio": 1.331},
                 "warnings": [], "units": {"bulk_modulus": "GPa"}}
 
-    def elasticity(atoms, calculator, **_):
-        return {"elastic_tensor": np.eye(*tensor_shape) * getattr(calculator, "scale", 1.0),
-                "tensor_convention": "voigt", "bulk_modulus_vrh": 140.0, "shear_modulus_vrh": 60.0,
-                "youngs_modulus": 157.0, "units": {}}
+    def elasticity(atoms, calculator, **kwargs):
+        if elastic_calls is not None:
+            elastic_calls.append(kwargs)
+        tensor = np.eye(*tensor_shape) * getattr(calculator, "scale", 1.0)
+        # Mimic a nonlinear shear response: the diagonal shear C_ii grow with the widest shear strain.
+        widest = max(abs(value) for value in kwargs.get("shear_strains", (0.01,)))
+        for i in range(3, min(tensor_shape)):
+            tensor[i, i] *= 1.0 + shear_softening * (widest - 0.01) / 0.05
+        return {"elastic_tensor": tensor, "tensor_convention": "voigt", "bulk_modulus_vrh": 140.0,
+                "shear_modulus_vrh": 60.0 * tensor[3, 3] if min(tensor_shape) > 3 else 60.0,
+                "youngs_modulus": 157.0,
+                "strains": {"norm_strains": list(kwargs.get("norm_strains", ())),
+                            "shear_strains": list(kwargs.get("shear_strains", ()))},
+                "warnings": [], "units": {}}
 
     def phonon(atoms, calculator, **_):
         return {"frequencies": np.ones((4, 3)), "min_frequency": 0.0, "dynamically_stable": True,
@@ -171,6 +182,58 @@ def test_cli_parses_eos_window_options():
     args = build_parser().parse_args([*base, "--eos-max-strain", "0.05", "--eos-points", "21",
                                       "--eos-refit-window", "0.04"])
     assert (args.eos_max_strain, args.eos_points, args.eos_refit_window) == (0.05, 21, 0.04)
+
+
+def test_elastic_strain_config_validation():
+    config = PropertyConfig(("elasticity",))
+    assert config.elastic_norm_strains == (-0.01, -0.005, 0.005, 0.01)
+    assert config.elastic_shear_strains == (-0.01, -0.005, 0.005, 0.01)
+    assert config.elastic_strain_check is False
+    custom = PropertyConfig(("elasticity",), elastic_norm_strains=[0.1, -0.1],
+                            elastic_shear_strains=np.array([1e-3, 2e-3]))
+    assert custom.elastic_norm_strains == (0.1, -0.1) and custom.elastic_shear_strains == (0.001, 0.002)
+    assert all(type(value) is float for value in custom.elastic_shear_strains)
+    bad = ((0.01,), (), (0.0, 0.01), (0.01, 0.11), (-0.2, 0.01), (0.01, float("nan")), (0.01, float("inf")),
+           (True, 0.01), "0.01 0.02", 0.01, ("a", "b"))
+    for option, name in (("--elastic-norm-strains", "elastic_norm_strains"),
+                         ("--elastic-shear-strains", "elastic_shear_strains")):
+        for strains in bad:
+            with pytest.raises(ConfigurationError, match=option):
+                PropertyConfig(("elasticity",), **{name: strains})
+    with pytest.raises(ConfigurationError, match="--elastic-strain-check needs --property elasticity"):
+        PropertyConfig(("eos",), elastic_strain_check=True)
+
+
+def test_elastic_check_window_is_the_other_window():
+    matcalc = ((-0.01, -0.005, 0.005, 0.01), (-0.06, -0.03, 0.03, 0.06))
+    small = ((-0.01, -0.005, 0.005, 0.01), (-0.01, -0.005, 0.005, 0.01))
+    assert PropertyConfig(("elasticity",)).elastic_check_strains == matcalc
+    assert PropertyConfig(("elasticity",), elastic_shear_strains=matcalc[1]).elastic_check_strains == small
+    assert PropertyConfig(("elasticity",), elastic_shear_strains=(-0.02, 0.02)).elastic_check_strains == matcalc
+
+
+def test_cli_parses_elastic_strain_options():
+    base = ["properties", "run", "TiN.vasp", "--engine", "mace", "--model", "m.model", "--property", "elasticity",
+            "--output", "out"]
+    args = build_parser().parse_args(base)
+    assert args.elastic_norm_strains == [-0.01, -0.005, 0.005, 0.01]
+    assert args.elastic_shear_strains == [-0.01, -0.005, 0.005, 0.01]
+    assert args.elastic_strain_check is False
+    args = build_parser().parse_args([*base, "--elastic-shear-strains", "-0.06", "-0.03", "0.03", "0.06",
+                                      "--elastic-norm-strains", "-0.005", "0.005", "--elastic-strain-check"])
+    assert args.elastic_shear_strains == [-0.06, -0.03, 0.03, 0.06]
+    assert args.elastic_norm_strains == [-0.005, 0.005]
+    assert args.elastic_strain_check is True
+
+
+def test_cli_invalid_elastic_strains_exit_with_error(tmp_path, capsys):
+    model = tmp_path / "m.model"
+    model.write_bytes(b"x")
+    code = cli_main(["properties", "run", "x.vasp", "--engine", "mace", "--model", str(model),
+                     "--property", "elasticity", "--elastic-shear-strains", "0.01", "0.0",
+                     "--output", str(tmp_path / "o")])
+    assert code == 2
+    assert "--elastic-shear-strains" in capsys.readouterr().err
 
 
 def test_cli_invalid_eos_points_exits_with_error(tmp_path, capsys):
@@ -401,6 +464,62 @@ def test_eos_window_is_plumbed_to_backend_and_recorded(tmp_path):
     assert refit["n_members"] == 1 and refit["scalars"]["bulk_modulus"]["mean"] == pytest.approx(154.0)
 
 
+def test_elastic_strains_are_plumbed_to_backend_and_recorded(tmp_path):
+    calls: list = []
+    config = PropertyConfig(("elasticity",), elastic_norm_strains=(-0.005, 0.005),
+                            elastic_shear_strains=(-0.02, 0.02))
+    payload = run_properties(_cu(), [Member("m0", EMT)], config, tmp_path / "o", engine="emt",
+                             backend=_fake_backend(elastic_calls=calls))
+    assert calls == [{"fmax": 0.01, "norm_strains": (-0.005, 0.005), "shear_strains": (-0.02, 0.02)}]
+    on_disk = json.loads((tmp_path / "o" / RESULT_FILE).read_text())
+    settings = on_disk["settings"]
+    assert settings["elastic_norm_strains"] == [-0.005, 0.005] and settings["elastic_shear_strains"] == [-0.02, 0.02]
+    assert settings["elastic_strain_check"] is False
+    elastic = on_disk["models"][0]["results"]["elasticity"]
+    assert elastic["strains"]["shear_strains"] == [-0.02, 0.02] and "strain_check" not in elastic
+    assert "strain_check" not in payload["summary"]["properties"]["elasticity"]
+
+
+def test_elastic_strain_check_passes_for_a_linear_response(tmp_path):
+    calls: list = []
+    config = PropertyConfig(("elasticity",), elastic_strain_check=True)
+    payload = run_properties(_cu(), [Member("m0", EMT)], config, tmp_path / "o", engine="emt",
+                             backend=_fake_backend(elastic_calls=calls))
+    assert [call["shear_strains"] for call in calls] == [(-0.01, -0.005, 0.005, 0.01), (-0.06, -0.03, 0.03, 0.06)]
+    model = payload["models"][0]
+    assert model["status"] == "ok" and model["warnings"] == []
+    check = model["results"]["elasticity"]["strain_check"]
+    assert check["flagged"] is False and check["flagged_components"] == []
+    assert check["max_diagonal_relative_change"] == pytest.approx(0.0)
+    assert check["reference_strains"]["shear_strains"] == [-0.06, -0.03, 0.03, 0.06]
+    summary = payload["summary"]["properties"]["elasticity"]["strain_check"]
+    assert summary["n_members"] == 1 and summary["flagged_members"] == 0
+
+
+def test_elastic_strain_check_flags_nonlinear_shear(tmp_path):
+    members = [Member("m0", EMT), Member("m1", EMT)]
+    config = PropertyConfig(("elasticity",), elastic_strain_check=True)
+    payload = run_properties(_cu(), members, config, tmp_path / "o", engine="emt",
+                             backend=_fake_backend(shear_softening=0.15))
+    model = payload["models"][0]
+    assert model["status"] == "ok"
+    check = model["results"]["elasticity"]["strain_check"]
+    assert check["flagged"] is True and check["flagged_components"] == ["C44", "C55", "C66"]
+    assert list(check["diagonal_relative_change"][:3]) == pytest.approx([0.0, 0.0, 0.0])
+    assert check["diagonal_relative_change"][3] == pytest.approx(0.15)
+    assert len(model["warnings"]) == 1 and "C44 1 -> 1.15 GPa" in model["warnings"][0]
+    assert model["results"]["elasticity"]["warnings"] == model["warnings"]
+    assert payload["summary"]["properties"]["elasticity"]["strain_check"]["flagged_members"] == 2
+    json.loads((tmp_path / "o" / RESULT_FILE).read_text())  # the check block serializes
+
+
+def test_elastic_strain_check_below_tolerance_is_not_flagged(tmp_path):
+    payload = run_properties(_cu(), [Member("m0", EMT)], PropertyConfig(("elasticity",), elastic_strain_check=True),
+                             tmp_path / "o", engine="emt", backend=_fake_backend(shear_softening=0.09))
+    check = payload["models"][0]["results"]["elasticity"]["strain_check"]
+    assert check["flagged"] is False and check["max_diagonal_relative_change"] == pytest.approx(0.09)
+
+
 def test_implausible_bprime_is_flagged_not_failed(tmp_path):
     members = [Member("m0", EMT), Member("m1", EMT)]
     payload = run_properties(_cu(), members, PropertyConfig(("eos",)), tmp_path / "o", engine="emt",
@@ -496,6 +615,8 @@ def test_matcalc_emt_end_to_end(tmp_path, monkeypatch):
     assert eos["near_equilibrium_refit"]["status"] == "skipped"  # the default grid has 1 point within +/-5 %
     elastic = models[0]["results"]["elasticity"]
     assert np.asarray(elastic["elastic_tensor"]).shape == (6, 6)
+    assert elastic["strains"]["norm_strains"] == [-0.01, -0.005, 0.005, 0.01]
+    assert elastic["strains"]["shear_strains"] == [-0.01, -0.005, 0.005, 0.01]
     assert models[0]["results"]["phonon"]["dynamically_stable"]
     out = tmp_path / "o"
     assert json.loads((out / RESULT_FILE).read_text())["inputs_unchanged"] is True
@@ -522,3 +643,23 @@ def test_matcalc_emt_narrow_eos_window(tmp_path):
     assert refit["bulk_modulus"] == pytest.approx(eos["bulk_modulus"], rel=0.05)
     assert eos["bulk_modulus_derivative_plausible"] and refit["bulk_modulus_derivative_plausible"]
     assert model["warnings"] == []
+
+
+def test_matcalc_emt_elastic_strain_windows(tmp_path):
+    pytest.importorskip("matcalc")
+    config = PropertyConfig(("elasticity",), fmax=0.005, elastic_shear_strains=(-0.02, -0.01, 0.01, 0.02),
+                            elastic_strain_check=True)
+    try:
+        payload = run_properties(_cu(), [Member("m0", EMT)], config, tmp_path / "o", engine="emt")
+    except DependencyError:
+        pytest.skip("matcalc import failed")
+    model = payload["models"][0]
+    assert model["status"] == "ok", model.get("error")
+    elastic = model["results"]["elasticity"]
+    assert elastic["strains"]["shear_strains"] == [-0.02, -0.01, 0.01, 0.02]
+    check = elastic["strain_check"]
+    assert check["reference_strains"]["shear_strains"] == [-0.06, -0.03, 0.03, 0.06]
+    tensor = np.asarray(elastic["elastic_tensor"])
+    reference = np.asarray(check["reference_elastic_tensor"])
+    assert tensor[3, 3] > 0 and reference[3, 3] > 0
+    assert check["flagged"] is (check["max_diagonal_relative_change"] > 0.10)
