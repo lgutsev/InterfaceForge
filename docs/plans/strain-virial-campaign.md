@@ -1,6 +1,6 @@
 # Plan: virial fine-tuning and a bulk strain and rattle training campaign
 
-**Status (2026-09-27):** in progress on branch `strain-training-campaign`,
+**Status (2026-09-27):** tooling done (Voigt probe mode, virial opt-in in both MACE launchers, `iface train` MACE/DeePMD); waiting on LONI inputs. In progress on branch `strain-training-campaign`,
 worktree `.claude/worktrees/strain-training-campaign`. **Owner:** lgutsev.
 
 This document is for anyone working on this: people and AI agents. Update
@@ -37,18 +37,18 @@ from the existing seeds**, not retrained from scratch.
 
 ### Track A: fine-tuning with virials, on the existing data
 
-- [ ] `launch_scripts/mace_finetune_committee.sh`: add opt-in virial
+- [x] `launch_scripts/mace_finetune_committee.sh`: add opt-in virial
       training.
   - New env vars: `MACE_LOSS` (default `weighted`, so current behavior is
     unchanged), `MACE_VIRIALS_KEY` / `MACE_STRESS_KEY`, and their weights.
   - Add flags only after probing `mace_run_train --help`, using the
     existing grep pattern, and fail loudly if a requested flag is missing.
   - Add a `MACE_PT_VALID_FILE` pass-through for replay data.
-- [ ] Add the same opt-in to `launch_scripts/mace_train_committee.sh`.
-- [ ] Warn when the training data has `REF_virial` but no virial loss is
+- [x] Add the same opt-in to `launch_scripts/mace_train_committee.sh`.
+- [x] Warn when the training data has `REF_virial` but no virial loss is
       requested. Do this in both launchers and in the MACE command builder
       in `training.py`.
-- [ ] DeePMD: take `start_pref_v` / `limit_pref_v` from
+- [x] DeePMD: take `start_pref_v` / `limit_pref_v` from
       `models.deepmd.loss` (default 0) and record them in the manifest. The
       fine-tune path (`models.deepmd.finetune`, `dpa2_ft` / `dpa3_ft`)
       already exists.
@@ -62,7 +62,7 @@ from the existing seeds**, not retrained from scratch.
       `feat/derivative-probe`, `origin/claude/project-thread-k6pncx` (neural
       density init) and `matcalc-property-validation`. Conflicts resolved:
       `cli.py` imports and one README table row.
-- [ ] `src/interfaceforge/derivative_probe.py`: add `strain_mode = "voigt"`.
+- [x] `src/interfaceforge/derivative_probe.py`: add `strain_mode = "voigt"`.
   - Add `--voigt-components xx yy zz yz xz xy`.
   - Build a symmetric ε, with shear equal to half the engineering strain,
     and apply it as `set_cell(cell @ (I + ε).T, scale_atoms=True)`.
@@ -99,6 +99,20 @@ from the existing seeds**, not retrained from scratch.
       (TiN primitive, Si₃N₄ 14-atom). **Pass criteria:** C₁₂ and G within
       about 10–15 % of the committee's own DFT reference, and the full-scan
       EOS B′ between 3.5 and 5.
+
+## Findings made while building this
+
+- MatCalc's default elasticity shear strains (±3 / ±6 %) give a TiN C₄₄
+  about 13 % higher (committee mean) than the small-strain value (±0.5 / ±1 %), and the
+  shift depends on the seed. Use small shear strains for acceptance. The
+  Voigt probe's ±0.5–2 % fits reproduce MatCalc's small-strain tensor
+  within about 2 GPa. A follow-up is to expose the shear window in
+  `iface properties`.
+- Full test suite on this branch (Windows): 751 passed, 44 failed. That is
+  the 43 known baseline failures plus
+  `test_density_init_potcar_status::test_declared_mp_mapping_is_checked_and_passed_to_the_hook`,
+  which also fails on `origin/claude/project-thread-k6pncx` itself because
+  of Windows path quoting in the test's expectation.
 
 ## Round 2 (later)
 
