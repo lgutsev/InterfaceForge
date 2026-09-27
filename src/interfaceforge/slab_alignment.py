@@ -1128,7 +1128,11 @@ def _write_audit_markers(
     vasp_warning = str(row.get("vasp_vacuum_warning", ""))
     no_field_free_region = "NO_FIELD_FREE_REGION" in vasp_warning
     fix_path = (
-        write_dipole_preview(calc_dir, float(row.get("suggested_DIPOL_normal", row.get("suggested_DIPOL_z"))), str(row.get("axis", "z")))
+        write_dipole_preview(
+            calc_dir,
+            float(row.get("suggested_DIPOL_normal", row.get("suggested_DIPOL_z"))),
+            str(row.get("axis", "z")),
+        )
         if write_fix and not no_field_free_region
         else None
     )
@@ -1297,7 +1301,10 @@ def _analyze_folder(
         row["dipole_axis_status"] = "MATCH" if axis_matches else ("UNKNOWN" if recorded_idipol is None else "MISMATCH")
         if recorded_idipol is not None and not axis_matches:
             selected_status = "FAILED_DIPOLE_AXIS"
-            row["error"] = f"OUTCAR IDIPOL={recorded_idipol}; selected axis {structure.axis} requires IDIPOL={expected_idipol}"
+            row["error"] = (
+                f"OUTCAR IDIPOL={recorded_idipol}; selected axis {structure.axis} "
+                f"requires IDIPOL={expected_idipol}"
+            )
         elif recorded_idipol is None and incar["IDIPOL"] != expected_idipol:
             selected_status = "SUSPECT_DIPOLE_AXIS"
             row["error"] = "INCAR dipole direction does not match selected axis; OUTCAR direction unavailable"

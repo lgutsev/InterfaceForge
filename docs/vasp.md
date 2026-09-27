@@ -145,7 +145,8 @@ On magnetic + DFT+U surfaces the first ionic step starts from an
 atomic-density guess and can spend ~60 SCF iterations sloshing between
 occupation branches — sometimes converging to the wrong one and kicking the
 geometry. `iface vasp step1-prepare --conservative --precondition` (also on
-`step1-repair`) fixes the guess:
+`step1-repair` and `step1-resume`, and the default for repairs prepared by
+`step1-recover`) fixes the guess:
 
 - writes `INCAR.precondition` per run — the rendered preheat INCAR with the
   ionic/thermostat block removed and `NSW=0`, `IBRION=-1`, `ISTART=0`,
@@ -164,49 +165,181 @@ preparation fails with a clear message.
 
 `iface vasp step1-launch <Step1_root>` is the submit step — dry-run by
 default, `--execute` calls `sbatch`, the Step1 analogue of `step2-launch`.
-It preflights every root, then submits each run that was written by
-`step1-prepare` (INCAR/POSCAR hashes still matching `step1_manifest.json`)
-or by `step1-repair` (`step1_repair.json` is `PREPARED`), carries no runtime
-outputs (`OUTCAR` / `OSZICAR` / `vasprun.xml`), and is not already recorded
-in `step1_launch.json`. Finished and running folders are skipped, so after a
-`step1-repair` it relaunches exactly the repaired runs.
+It preflights every root, then submits each run whose *current generation*
+is launchable: generation 0 written by `step1-prepare` (listed in the
+invoked root's `step1_manifest.json` with INCAR/POSCAR hashes still
+matching; kind `prepared`), a `step1-repair` segment (`step1_repair.json` is
+`PREPARED`; `repair-prepared`) or a `step1-resume` segment
+(`step1_resume.json` is `PREPARED`; `resume-prepared`). The run must carry
+no runtime outputs (`OUTCAR` / `OSZICAR` / `vasprun.xml`), must not be an
+active Slurm WorkDir or have an interrupted recovery mutation, and its
+current generation must not already be recorded as submitted. Finished and
+running folders are skipped, so after a repair or resume it relaunches
+exactly the prepared runs.
 
 ```bash
 iface vasp step1-launch Step1                 # verified plan only
 iface vasp step1-launch Step1 --execute       # submit
 iface vasp step1-launch Step1 --only-repaired --execute
+iface vasp step1-launch Step1 --only-resumed --execute
+iface vasp step1-launch Step1 --only-repaired --only-resumed --execute   # both, never gen-0 runs
 ```
 
-Each root gets `step1_launch.{json,tsv}` recording the submitted job ids; a
-second launch refuses the folders it already submitted.
+`--scheduler {auto,slurm,none}` (default `auto`) selects how activity is
+checked: `auto` asks `squeue` when it is on `PATH`, `slurm` refuses when
+`squeue` cannot be asked, `none` skips the check. Immediately before each
+`sbatch` the scheduler is re-queried and the run's fingerprint and
+generation are re-checked. When nothing is launchable the command exits
+with an error that lists the skip reasons.
 
-Then feed `Step1/` to `step2-prepare` as usual.
+The ledger is generation-aware. The invoked directory's `step1_launch.json`
+(schema 2) keeps every row ever written plus a `batches` list, and
+`step1_launch.tsv` mirrors the full history; each job is recorded the
+moment `sbatch` returns, with its `generation_id` and `batch_id`. The
+duplicate guard reads the run's own ledger, every root given and every
+ancestor up to the Step1 root, but only a `SUBMITTED` row of the *current*
+generation blocks it: a historical row of an older generation (for example
+the row written when a leaf was launched as its own root before its next
+repair) never blocks a new generation. Schema-1 ledgers stay readable and are upgraded
+only by an executing launch that appends to them. The matching rules,
+sealing and downgrade caveats are in
+[NiO AIMD policy](nio-aimd.md#generation-aware-launch-provenance).
 
 ### Check how the Step1 runs are doing
 
 `iface vasp step1-status <Step1_root>` is a read-only, one-glance report of
 a prepared (and possibly running) Step1 tree — it never touches a live job,
-only reads `OSZICAR` / `OUTCAR` / `XDATCAR` / `INCAR`.
+only reads `OSZICAR` / `OUTCAR` / `XDATCAR` / `INCAR`, the segment records
+and launch ledgers, and (optionally) asks `squeue`.
 
 ```bash
 iface vasp step1-status Step1
 iface vasp step1-status Step1 --json
 iface vasp step1-status Step1/NiO_m110_Big_U46   # a single run
+iface vasp step1-status Step1 --scheduler none   # file age only, no squeue
 ```
 
-Per run it shows:
+The header states whether the scheduler was verified and which activity
+window applies: with `--stale-hours` unset it is 0.1 h when `squeue`
+answered (the queue decides what is active; the window only covers files
+written as a job leaves) and 6 h when Slurm is not verified. A failing
+`squeue` is reported, never fatal here. Per run it shows:
 
-- **frames produced** — MD steps written so far (from `OSZICAR`, cross
-  checked against `XDATCAR`) versus the `NSW` target, as a count, a
-  percentage, and ps of trajectory;
+- **the recovery category** on the first line —
+  `[state] run  → <category>: <reason>`, with category `done` / `resume` /
+  `repair` / `launch` / `review` / `active` (the rules `step1-recover` acts
+  on, see [NiO AIMD policy](nio-aimd.md#operator-commands));
+- **frames produced** — the cumulative accepted steps (accepted prefix of
+  earlier generations plus the current segment's `OSZICAR` steps, cross
+  checked against `XDATCAR`) versus the whole-run target, as a count, a
+  percentage, and ps of trajectory, plus the mean±std MD temperature and the
+  thermal tail, e.g. `Ttail50=288 K thermal-ok; ready for Step2`,
+  `Ttail33=300 K thermal-ok; incomplete` or `Ttail50=165 K (<250 K);
+  incomplete` (thermal state and readiness are separate; see
+  [thermal tail](nio-aimd.md#thermal-tail-and-step2-readiness));
 - **the INCAR** — `ISTART`, `ENCUT` (with `ENCUT/ENMAX` when a `POTCAR` is
   present), `PREC`, `EDIFF`, `ALGO`, `LREAL`, smearing, and the inherited
   physics (`ISPIN`, the Hubbard `U` values, `LMAXMIX`, `IBRION`/`NSW`/
   `POTIM`, `SMASS`, `TEBEG`);
-- **which job is done** — `not-started` / `running` / `stalled?` (an
-  `OSZICAR` older than `--stale-hours`, default 6) / `done` (reached `NSW`)
-  / `done-early` (clean exit, short of `NSW`) / `error` (a fatal VASP marker
-  in `OUTCAR`), plus the mean±std MD temperature so far.
+- **the lineage** for a repaired or resumed run (or when a submission is
+  known) — generation and id, accepted prefix + current segment, segment
+  `NSW`/`POTIM`, accepted ps, the temperature schedule, and whether the
+  current generation was submitted, e.g. `lineage: repair g2
+  (g2-repair-…) · target 400 · accepted 68 + segment 0 = 68 · segment NSW
+  332 @ POTIM 0.5 fs · accepted 0.042 ps · T 100→300 K ramp (now 100 K) ·
+  current generation not submitted · 1 older submission`;
+- **the stability** — `stability: UNSTABLE — …` (hard reasons) or
+  `stability: WARNING — …` (review-level warnings, marked `(benign startup
+  transient)` when that is the only finding);
+- **the state** — `not-started` / `repair-prepared` / `resume-prepared` /
+  `queued` / `running` / `stalled?` / `interrupted` / `done` (reached the
+  target) / `done-early` (clean exit, short of it) / `error` (a fatal VASP
+  marker in `OUTCAR`) / `unstable`. When Slurm is verified a listed job
+  makes the run `queued` or `running` whatever its file age, and a started,
+  unfinished run that is not listed is `interrupted`; unverified, a quiet
+  run older than the activity window is `stalled?`.
+
+The footer tallies both states and actions. `--json` adds, per run,
+`thermal_tail_ok`, `trajectory_stable`, `complete`, `ready_for_step2`,
+`review_required`, `severity`, `scheduler`, `lineage` and `recovery`
+(`{"category", "reason"}`), and `action_tally` beside `state_tally`.
+
+### Resume interrupted Step1 runs
+
+`iface vasp step1-resume <Step1_root>` continues healthy runs that stopped
+short of their target (wall time, a clean kill) from their latest trusted
+state: a `CONTCAR` that passes the trust check is copied verbatim (the
+dynamics continue with its velocities), otherwise the latest `XDATCAR`
+frame, otherwise the unchanged segment-start `POSCAR`. Every INCAR tag is
+kept except `NSW` (exactly the remaining steps), `TEBEG` (the temperature
+schedule continues where it stopped), `ISTART` and `ICHARG`. Runs that are
+active, recent, unstable, complete, not started, without a completed ionic
+step, or carrying a non-benign review-level warning are skipped with a
+reason. JSON plan, dry-run by default:
+
+```bash
+iface vasp step1-resume Step1
+iface vasp step1-resume Step1 --execute               # archive, prepare step1_resume.json
+iface vasp step1-resume Step1 --execute --submit      # ... and submit exactly those runs
+```
+
+Options: `--launcher`, `--stale-hours`, `--scheduler`, `--precondition` or
+`--fresh-start` (electronic start), `--accept-warnings`,
+`--contcar-tolerance` (Å, default 1.0) and the diagnostic thresholds
+`--energy-jump`, `--max-temperature`, `--startup-grace-steps`,
+`--catastrophic-energy`. The trust check, electronic-start modes and a
+worked temperature-continuation example are in
+[NiO AIMD policy](nio-aimd.md#original-step1-repair-and-resume).
+
+### Repair unstable Step1 runs
+
+`iface vasp step1-repair <Step1_root>` rewinds hard-unstable runs to an
+`XDATCAR` frame `--safety-steps` (default 8) before the first unsafe step
+and prepares a conservative segment for the remaining steps (`POTIM=0.5 fs`,
+`ALGO=Normal`, `EDIFF=1E-5`, `NELM=120`, `NELMIN=6`). Each repair is a new
+generation; a repaired run that fails again is repaired again with the
+accepted prefix accumulated.
+
+```bash
+iface vasp step1-repair Step1 --precondition --ramp-from 100            # plan
+iface vasp step1-repair Step1 --precondition --ramp-from 100 --execute  # archive, prepare step1_repair.json
+iface vasp step1-repair Step1 --precondition --ramp-from 100 --execute --submit
+```
+
+Further options: `--potim`, `--algo`, `--langevin` / `--langevin-gamma`,
+`--safety-steps`, `--stale-hours`, `--scheduler`, `--launcher` (for
+`--submit`) and the four diagnostic thresholds. For repair and resume,
+`--launcher` with `--precondition` is refused unless it names `runvasp.sh`
+or `run.slurm`, the launchers the preconditioning SCF is wrapped into. `--execute` refuses the whole tree while any unstable run is
+active in Slurm, recently modified or needs review. The warning-vs-hard
+table and the repeated-repair accounting are in
+[NiO AIMD policy](nio-aimd.md#warning-vs-hard-instability).
+
+### Recover a whole Step1 tree
+
+`iface vasp step1-recover <Step1_root>` classifies every run exactly as
+`step1-status` does and prints a human-readable plan; `--execute` resumes,
+repairs and (re)launches the automatic entries one run at a time and
+journals every step in `<root>/step1_recover.json`. `done`, `review` and
+`active` runs are never touched.
+
+```bash
+iface vasp step1-recover Step1                          # plan (writes nothing)
+iface vasp step1-recover Step1 --execute                # resume + repair + launch
+iface vasp step1-recover Step1 --execute --only repair  # one or more of resume, repair, launch
+iface vasp step1-recover Step1 --execute --no-submit    # prepare only; submit later
+iface vasp step1-recover Step1 --json                   # raw plan
+```
+
+Repairs use the conservative NiO rescue by default (`--potim 0.5`,
+`--algo Normal`, preconditioning, `--ramp-from 100`; `--no-precondition`,
+`--no-ramp`, `--langevin`, `--langevin-gamma`, `--safety-steps` adjust it).
+Resume options are `--resume-precondition`, `--fresh-start` and
+`--contcar-tolerance`; diagnostic options as above; plus `--launcher`,
+`--stale-hours` and `--scheduler`. Policy, categories and safety invariants:
+[NiO AIMD policy](nio-aimd.md#recovery-policy).
+
+When the runs are done, feed `Step1/` to `step2-prepare` as usual.
 
 ## Promote Step1 into a Step2 temperature series
 

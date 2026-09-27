@@ -2053,7 +2053,12 @@ def _write_poscar_without_velocities(source: str | Path, destination: str | Path
     if end > len(lines):
         raise SafetyError(f"POSCAR has fewer coordinate rows than ions: {source}")
     dropped = any(line.strip() for line in lines[end:])
-    Path(destination).write_text("\n".join(lines[:end]) + "\n", encoding="utf-8")
+    # Temp file + rename: replaces the directory entry instead of writing
+    # through a hard link or symlink shared with a file outside the run.
+    target = Path(destination)
+    temporary = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    temporary.write_text("\n".join(lines[:end]) + "\n", encoding="utf-8")
+    os.replace(temporary, target)
     return dropped
 
 

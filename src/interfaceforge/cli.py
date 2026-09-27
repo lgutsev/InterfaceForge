@@ -90,7 +90,17 @@ from .slab_publication import plot_slab_publication
 from .slab_repair_status import slab_repair_status
 from .slab_tight_scf import prepare_tight_scf
 from .step1_launch import launch_step1_runs
+from .step1_recover import AUTO_CATEGORIES as STEP1_RECOVER_CATEGORIES
+from .step1_recover import (
+    RECOVER_REPAIR_DEFAULTS,
+    execute_step1_recovery,
+    plan_step1_recovery,
+    render_recovery_execution,
+    render_recovery_plan,
+)
 from .step1_repair import prepare_step1_repair
+from .step1_resume import prepare_step1_resume
+from .step1_scheduler import SCHEDULER_MODES, SchedulerGuard
 from .step1_status import render as render_step1_status
 from .step1_status import step1_status
 from .step2_status import render as render_step2_status
@@ -684,44 +694,263 @@ def cmd_vasp_step1_prepare(args: argparse.Namespace) -> int:
     return 0
 
 
+# Plain-ASCII stand-ins for the typographic characters in Step1 human output,
+# used only when the stream cannot encode them (e.g. stdout redirected to a
+# file under a cp1252 locale on Windows).
+_STEP1_ASCII = str.maketrans({"→": "->", "·": "|", "—": "-", "–": "-", "…": "...", "≥": ">=", "≤": "<="})
+
+
+def _print_text(text: str, *, stderr: bool = False) -> None:
+    """Print Step1 human output; a stream that cannot encode a character gets a stand-in, never a crash."""
+
+    stream = sys.stderr if stderr else sys.stdout
+    try:
+        print(text, file=stream, flush=True)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "ascii"
+        safe = text.translate(_STEP1_ASCII).encode(encoding, errors="replace").decode(encoding, errors="replace")
+        print(safe, file=stream, flush=True)
+
+
+def _step1_progress(message: str) -> None:
+    _print_text(message, stderr=True)
+
+
+_STEP1_STALE_HOURS_RULE = (
+    "Default: 0.1 h when squeue answered (Slurm verified -- the queue decides activity; this is only a "
+    "settle window for files written as a job leaves), 6 h when Slurm is not verified"
+)
+
+
+def _add_step1_scheduler_option(parser: argparse.ArgumentParser, *, read_only: bool = False) -> None:
+    detail = (
+        "a failing squeue is reported, never fatal here"
+        if read_only
+        else "'slurm' refuses when squeue cannot be asked; every mutation re-checks squeue first"
+    )
+    parser.add_argument(
+        "--scheduler",
+        choices=SCHEDULER_MODES,
+        default="auto",
+        help=f"Ask squeue which runs are active (auto: only when squeue is on PATH; none: file age only); {detail}",
+    )
+
+
+def _add_step1_new_diagnostic_options(parser: Any) -> None:
+    """``--startup-grace-steps`` / ``--catastrophic-energy`` (None selects the diagnostic default)."""
+
+    parser.add_argument(
+        "--startup-grace-steps",
+        type=int,
+        default=None,
+        help="Ionic steps at the start of a segment where an energy excursion is only a warning (default 10)",
+    )
+    parser.add_argument(
+        "--catastrophic-energy",
+        type=float,
+        default=None,
+        help="Free-energy departure (eV) that is hard-unstable even inside the grace window (default 500)",
+    )
+
+
+def _step1_diagnostic_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    """``prepare_step1_repair`` / ``prepare_step1_resume`` diagnostic keywords; None selects the default."""
+
+    return {
+        "energy_jump_ev": args.energy_jump,
+        "max_temperature_k": args.max_temperature,
+        "startup_grace_steps": args.startup_grace_steps,
+        "catastrophic_energy_ev": args.catastrophic_energy,
+    }
+
+
+def _require_execute_for_submit(args: argparse.Namespace, command: str) -> None:
+    if getattr(args, "submit", False) and not args.execute:
+        raise SafetyError(
+            f"{command} --submit needs --execute: a dry run never prepares or submits anything. "
+            f"Review the plan, then re-run with --execute --submit"
+        )
+    launcher = getattr(args, "launcher", None)
+    if launcher and getattr(args, "precondition", False) and Path(launcher).name not in ("runvasp.sh", "run.slurm"):
+        # The preconditioning static SCF is wrapped into runvasp.sh (else run.slurm);
+        # submitting another launcher would run the MD without it.
+        raise SafetyError(
+            f"{command} --precondition wraps runvasp.sh (else run.slurm); --launcher {launcher} would bypass the "
+            "preconditioning static SCF. Drop --launcher or --precondition"
+        )
+
+
+def _run_label(root: str | Path, run: str | Path) -> str:
+    try:
+        relative = Path(run).resolve().relative_to(Path(root).expanduser().resolve()).as_posix()
+    except ValueError:
+        return str(run)
+    return relative if relative != "." else Path(run).name
+
+
+def _submit_prepared_step1(
+    payload: dict[str, Any],
+    *,
+    command: str,
+    root: str,
+    guard: SchedulerGuard,
+    launcher: str | None,
+) -> None:
+    """``--execute --submit``: launch exactly the runs this invocation prepared (same scheduler guard).
+
+    The launch payload (or its failure) is added to ``payload["launch"]``; the
+    combined payload is printed before a launch failure is re-raised, so the
+    prepared runs stay on record in the output.
+    """
+
+    prepared = [plan["run"] for plan in payload.get("runs") or [] if plan.get("status") == "PREPARED"]
+    if not prepared:
+        payload["launch"] = {"mode": "not performed", "reason": "no run was prepared"}
+        _step1_progress(f"{command}: nothing prepared, nothing submitted")
+        return
+    try:
+        launched = launch_step1_runs(
+            [root], execute=True, launcher=launcher, scheduler=guard, runs=prepared, progress=_step1_progress
+        )
+    except Exception as exc:
+        payload["launch"] = {"mode": "failed", "error": str(exc)}
+        _json(payload)
+        raise
+    payload["launch"] = launched
+    jobs = ", ".join(f"{_run_label(root, job['directory'])} (job {job['job_id']})" for job in launched["jobs"])
+    _step1_progress(f"{command}: submitted {len(launched['jobs'])} job(s): {jobs or 'none'}")
+
+
+def _report_prepared_step1(payload: dict[str, Any], *, command: str, root: str) -> None:
+    prepared = [plan for plan in payload.get("runs") or [] if plan.get("status") == "PREPARED"]
+    if not prepared:
+        _step1_progress(f"{command}: nothing changed (no run was prepared)")
+        return
+    listing = ", ".join(f"{_run_label(root, plan['run'])} ({plan.get('generation_id')})" for plan in prepared)
+    _step1_progress(f"{command}: CHANGED {len(prepared)} run(s): {listing}")
+
+
 def cmd_vasp_step1_status(args: argparse.Namespace) -> int:
-    payload = step1_status(args.root, stale_hours=args.stale_hours)
+    payload = step1_status(args.root, stale_hours=args.stale_hours, scheduler=args.scheduler)
     if args.json:
         _json(payload)
     else:
-        print(render_step1_status(payload))
+        _print_text(render_step1_status(payload))
     return 0
 
 
 def cmd_vasp_step1_repair(args: argparse.Namespace) -> int:
-    _json(
-        prepare_step1_repair(
-            args.root,
-            execute=args.execute,
-            stale_hours=args.stale_hours,
-            potim_fs=args.potim,
-            algo=args.algo,
-            safety_steps=args.safety_steps,
-            energy_jump_ev=args.energy_jump,
-            max_temperature_k=args.max_temperature,
-            langevin_gamma=args.langevin_gamma if args.langevin else None,
-            ramp_from=args.ramp_from,
-            precondition=args.precondition,
-        )
+    _require_execute_for_submit(args, "step1-repair")
+    guard = SchedulerGuard(args.scheduler)
+    payload = prepare_step1_repair(
+        args.root,
+        execute=args.execute,
+        stale_hours=args.stale_hours,
+        scheduler=guard,
+        potim_fs=args.potim,
+        algo=args.algo,
+        safety_steps=args.safety_steps,
+        langevin_gamma=args.langevin_gamma if args.langevin else None,
+        ramp_from=args.ramp_from,
+        precondition=args.precondition,
+        **_step1_diagnostic_kwargs(args),
     )
+    if args.execute:
+        _report_prepared_step1(payload, command="step1-repair", root=args.root)
+        if args.submit:
+            _submit_prepared_step1(payload, command="step1-repair", root=args.root, guard=guard, launcher=args.launcher)
+    _json(payload)
+    return 0
+
+
+def cmd_vasp_step1_resume(args: argparse.Namespace) -> int:
+    _require_execute_for_submit(args, "step1-resume")
+    guard = SchedulerGuard(args.scheduler)
+    payload = prepare_step1_resume(
+        args.root,
+        execute=args.execute,
+        stale_hours=args.stale_hours,
+        scheduler=guard,
+        contcar_tolerance_angstrom=args.contcar_tolerance,
+        precondition=args.precondition,
+        fresh_start=args.fresh_start,
+        accept_warnings=args.accept_warnings,
+        **_step1_diagnostic_kwargs(args),
+    )
+    if args.execute:
+        _report_prepared_step1(payload, command="step1-resume", root=args.root)
+        if args.submit:
+            _submit_prepared_step1(payload, command="step1-resume", root=args.root, guard=guard, launcher=args.launcher)
+    _json(payload)
     return 0
 
 
 def cmd_vasp_step1_launch(args: argparse.Namespace) -> int:
-    _json(
-        launch_step1_runs(
-            args.roots,
-            execute=args.execute,
-            launcher=args.launcher,
-            only_repaired=args.only_repaired,
-            progress=lambda message: print(message, file=sys.stderr, flush=True),
-        )
+    payload = launch_step1_runs(
+        args.roots,
+        execute=args.execute,
+        launcher=args.launcher,
+        only_repaired=args.only_repaired,
+        only_resumed=args.only_resumed,
+        progress=_step1_progress,
+        scheduler=args.scheduler,
     )
+    if args.execute:
+        jobs = ", ".join(f"{job['relative_path']} (job {job['job_id']})" for job in payload.get("jobs") or [])
+        _step1_progress(f"step1-launch: submitted {payload.get('submitted', 0)} job(s): {jobs or 'none'}")
+    _json(payload)
+    return 0
+
+
+def cmd_vasp_step1_recover(args: argparse.Namespace) -> int:
+    if args.no_ramp and args.ramp_from is not None:
+        raise SafetyError("step1-recover: --no-ramp and --ramp-from contradict each other; choose one")
+    options: dict[str, Any] = {
+        "stale_hours": args.stale_hours,
+        "scheduler": args.scheduler,
+        "repair_options": {
+            "potim_fs": args.potim,
+            "algo": args.algo,
+            "safety_steps": args.safety_steps,
+            "langevin_gamma": args.langevin_gamma if args.langevin else None,
+            # None -> the recover default (100 K); --no-ramp -> continue the rewound schedule.
+            "ramp_from": (
+                None
+                if args.no_ramp
+                else (RECOVER_REPAIR_DEFAULTS["ramp_from"] if args.ramp_from is None else args.ramp_from)
+            ),
+            "precondition": not args.no_precondition,
+        },
+        "resume_options": {
+            "contcar_tolerance_angstrom": args.contcar_tolerance,
+            "precondition": args.resume_precondition,
+            "fresh_start": args.fresh_start,
+        },
+        "diagnostic_options": {
+            "energy_jump_ev": args.energy_jump,
+            "max_temperature_k": args.max_temperature,
+            "startup_grace_steps": args.startup_grace_steps,
+            "catastrophic_energy_ev": args.catastrophic_energy,
+        },
+        "launcher": args.launcher,
+    }
+    only = tuple(name for name in STEP1_RECOVER_CATEGORIES if name in (args.only or STEP1_RECOVER_CATEGORIES))
+    if args.execute:
+        payload = execute_step1_recovery(
+            args.root, only=only, submit=not args.no_submit, progress=_step1_progress, **options
+        )
+        if args.json:
+            _json(payload)
+        else:
+            _print_text(render_recovery_execution(payload))
+        return 0
+    plan = plan_step1_recovery(args.root, **options)
+    plan["selected_categories"] = list(only)
+    plan["submit"] = not args.no_submit
+    if args.json:
+        _json(plan)
+    else:
+        _print_text(render_recovery_plan(plan))
     return 0
 
 
@@ -2596,9 +2825,13 @@ def build_parser() -> argparse.ArgumentParser:
     step1_status_parser.add_argument(
         "--stale-hours",
         type=float,
-        default=6.0,
-        help="Flag a running job as 'stalled?' when its OSZICAR is older than this (default 6)",
+        default=None,
+        help=(
+            "Files modified within this window count as active; a started, unfinished run older than it is "
+            "'stalled?'. " + _STEP1_STALE_HOURS_RULE
+        ),
     )
+    _add_step1_scheduler_option(step1_status_parser, read_only=True)
     step1_status_parser.add_argument(
         "--json", action="store_true", help="Emit the raw payload instead of a table"
     )
@@ -2663,18 +2896,102 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="Runaway temperature threshold in K (default max(1200, 4*TEBEG))",
     )
+    _add_step1_new_diagnostic_options(step1_repair)
     step1_repair.add_argument(
         "--stale-hours",
         type=float,
-        default=6.0,
-        help="Refuse to mutate runs updated more recently than this (default 6)",
+        default=None,
+        help="Refuse to mutate runs updated more recently than this. " + _STEP1_STALE_HOURS_RULE,
     )
+    _add_step1_scheduler_option(step1_repair)
     step1_repair.add_argument(
         "--execute",
         action="store_true",
         help="Archive and prepare the repairs; without this flag only print the plan",
     )
+    step1_repair.add_argument(
+        "--submit",
+        action="store_true",
+        help=(
+            "With --execute: submit exactly the repairs this invocation prepared (step1-launch preflight and "
+            "ledger, same scheduler guard). Refused without --execute"
+        ),
+    )
+    step1_repair.add_argument(
+        "--launcher", help="Launcher to submit with --submit (default: prefer runvasp.sh, then run.slurm)"
+    )
     step1_repair.set_defaults(func=cmd_vasp_step1_repair)
+
+    step1_resume = vasp_commands.add_parser(
+        "step1-resume",
+        help=(
+            "Continue healthy but interrupted Step1 AIMD runs from their latest trusted state "
+            "(CONTCAR, else an XDATCAR frame); JSON plan, dry-run by default"
+        ),
+    )
+    step1_resume.add_argument(
+        "root", nargs="?", default=".", help="Step1 tree root or a single run directory"
+    )
+    step1_resume.add_argument(
+        "--execute",
+        action="store_true",
+        help="Archive and prepare the resume segments; without this flag only print the plan",
+    )
+    step1_resume.add_argument(
+        "--submit",
+        action="store_true",
+        help="With --execute: submit exactly the runs this invocation prepared. Refused without --execute",
+    )
+    step1_resume.add_argument(
+        "--launcher", help="Launcher to submit with --submit (default: prefer runvasp.sh, then run.slurm)"
+    )
+    step1_resume.add_argument(
+        "--stale-hours",
+        type=float,
+        default=None,
+        help="Refuse to touch runs whose files are newer than this. " + _STEP1_STALE_HOURS_RULE,
+    )
+    _add_step1_scheduler_option(step1_resume)
+    step1_resume.add_argument(
+        "--precondition",
+        action="store_true",
+        help=(
+            "Write INCAR.precondition and wrap the launcher so the resumed MD restarts from a WAVECAR "
+            "reconverged at the resumed geometry (ISTART=1, WAVECAR removed)"
+        ),
+    )
+    step1_resume.add_argument(
+        "--fresh-start",
+        action="store_true",
+        help="Start the resumed segment electronically from scratch (ISTART=0, WAVECAR removed)",
+    )
+    step1_resume.add_argument(
+        "--accept-warnings",
+        action="store_true",
+        help="Resume runs whose diagnostic raised a non-benign review-level warning (inspect them first)",
+    )
+    step1_resume.add_argument(
+        "--contcar-tolerance",
+        type=float,
+        default=1.0,
+        help=(
+            "Base CONTCAR-vs-latest-frame displacement tolerance in Angstrom (default 1.0; "
+            "0.05 A/fs x elapsed time is added)"
+        ),
+    )
+    step1_resume.add_argument(
+        "--energy-jump",
+        type=float,
+        default=None,
+        help="Free-energy departure from the post-grace reference marking a runaway, in eV (default 50)",
+    )
+    step1_resume.add_argument(
+        "--max-temperature",
+        type=float,
+        help="Runaway temperature threshold in K (default max(1200, 4*T_target))",
+    )
+    _add_step1_new_diagnostic_options(step1_resume)
+    step1_resume.set_defaults(func=cmd_vasp_step1_resume)
 
     step1_launch = vasp_commands.add_parser(
         "step1-launch",
@@ -2693,11 +3010,151 @@ def build_parser() -> argparse.ArgumentParser:
         help="Launch only step1-repair PREPARED runs, not freshly step1-prepare'd ones",
     )
     step1_launch.add_argument(
+        "--only-resumed",
+        action="store_true",
+        help=(
+            "Launch only step1-resume PREPARED runs (with --only-repaired: repaired OR resumed runs, "
+            "never freshly prepared ones)"
+        ),
+    )
+    _add_step1_scheduler_option(step1_launch)
+    step1_launch.add_argument(
         "--execute",
         action="store_true",
         help="Actually call sbatch; without this flag only print the verified launch plan",
     )
     step1_launch.set_defaults(func=cmd_vasp_step1_launch)
+
+    step1_recover = vasp_commands.add_parser(
+        "step1-recover",
+        help=(
+            "Classify every Step1 run (done/resume/repair/launch/review/active) and resume, repair and "
+            "(re)launch the automatic ones; human-readable dry-run plan by default"
+        ),
+        description=(
+            "State-aware recovery of a whole Step1 tree. Every run is classified exactly as step1-status "
+            "does; only resume, repair and launch entries are ever acted on, and only with --execute "
+            "(repairs and resumes first, then launches, one run at a time, each re-checked against Slurm "
+            "and its planning fingerprint immediately before it is changed or submitted). done, review and "
+            "active runs are never touched. Every --execute is journalled in <root>/step1_recover.json."
+        ),
+    )
+    step1_recover.add_argument(
+        "root", nargs="?", default=".", help="Step1 tree root or a single run directory"
+    )
+    step1_recover.add_argument(
+        "--execute",
+        action="store_true",
+        help="Prepare (and, unless --no-submit, submit) the selected entries; without it only print the plan",
+    )
+    step1_recover.add_argument(
+        "--only",
+        nargs="+",
+        choices=STEP1_RECOVER_CATEGORIES,
+        default=list(STEP1_RECOVER_CATEGORIES),
+        metavar="{" + ",".join(STEP1_RECOVER_CATEGORIES) + "}",
+        help="Act only on these categories (default: resume repair launch)",
+    )
+    step1_recover.add_argument(
+        "--no-submit",
+        action="store_true",
+        help=(
+            "Prepare repairs/resumes without sbatch and leave launch entries alone "
+            "(a later plan lists the prepared runs under launch)"
+        ),
+    )
+    step1_recover.add_argument(
+        "--launcher", help="Launcher to submit (default: prefer runvasp.sh, then run.slurm)"
+    )
+    step1_recover.add_argument(
+        "--stale-hours",
+        type=float,
+        default=None,
+        help="Treat runs whose files are newer than this as active. " + _STEP1_STALE_HOURS_RULE,
+    )
+    _add_step1_scheduler_option(step1_recover)
+    repair_group = step1_recover.add_argument_group(
+        "repair options",
+        "Recover's repair defaults are the conservative NiO rescue: POTIM 0.5 fs, ALGO=Normal, a "
+        "preconditioning static SCF and a 100 K -> target ramp",
+    )
+    repair_group.add_argument(
+        "--potim", type=float, default=0.5, help="Repair segment ionic timestep in fs (default 0.5)"
+    )
+    repair_group.add_argument(
+        "--algo",
+        default="Normal",
+        help="Repair electronic minimiser (default Normal; EDIFF=1E-5, NELM=120, NELMIN=6 are always set)",
+    )
+    repair_group.add_argument(
+        "--no-precondition",
+        action="store_true",
+        help="Do not precondition the repaired segment (default: wrap the launcher with a static SCF)",
+    )
+    repair_group.add_argument(
+        "--ramp-from",
+        type=float,
+        default=None,
+        help="Repair segment starting TEBEG in K, ramping to the original target (default 100)",
+    )
+    repair_group.add_argument(
+        "--no-ramp",
+        action="store_true",
+        help="Continue the rewound segment's own schedule instead of ramping from --ramp-from",
+    )
+    repair_group.add_argument(
+        "--langevin",
+        action="store_true",
+        help="Replace SMASS=-1 with a Langevin thermostat (MDALGO=3) on repair segments",
+    )
+    repair_group.add_argument(
+        "--langevin-gamma",
+        type=float,
+        default=10.0,
+        help="Langevin friction in ps^-1 with --langevin (default 10)",
+    )
+    repair_group.add_argument(
+        "--safety-steps",
+        type=int,
+        default=8,
+        help="Rewind this many ionic steps before the first unsafe step (default 8)",
+    )
+    resume_group = step1_recover.add_argument_group("resume options")
+    resume_group.add_argument(
+        "--resume-precondition",
+        action="store_true",
+        help="Precondition resumed segments too (INCAR.precondition + wrapped launcher, ISTART=1)",
+    )
+    resume_group.add_argument(
+        "--fresh-start",
+        action="store_true",
+        help="Start resumed segments electronically from scratch (ISTART=0, WAVECAR removed)",
+    )
+    resume_group.add_argument(
+        "--contcar-tolerance",
+        type=float,
+        default=1.0,
+        help="Base CONTCAR trust tolerance in Angstrom (default 1.0)",
+    )
+    diagnostic_group = step1_recover.add_argument_group(
+        "diagnostic options", "Thresholds of the Step1 stability diagnostic (defaults as in step1-status)"
+    )
+    diagnostic_group.add_argument(
+        "--energy-jump",
+        type=float,
+        default=None,
+        help="Free-energy departure from the post-grace reference marking a runaway, in eV (default 50)",
+    )
+    diagnostic_group.add_argument(
+        "--max-temperature",
+        type=float,
+        help="Runaway temperature threshold in K (default max(1200, 4*T_target))",
+    )
+    _add_step1_new_diagnostic_options(diagnostic_group)
+    step1_recover.add_argument(
+        "--json", action="store_true", help="Emit the raw plan/execution payload instead of the human plan"
+    )
+    step1_recover.set_defaults(func=cmd_vasp_step1_recover)
 
     step2_status_parser = vasp_commands.add_parser(
         "step2-status",
@@ -2937,7 +3394,10 @@ def build_parser() -> argparse.ArgumentParser:
         "root",
         nargs="?",
         default=".",
-        help="Project head; scans direct slabs plus tight_scf/<daughter>, relax_continue/<daughter>, and final_static/<daughter> (default: .)",
+        help=(
+            "Project head; scans direct slabs plus tight_scf/<daughter>, "
+            "relax_continue/<daughter>, and final_static/<daughter> (default: .)"
+        ),
     )
     slab_alignment.add_argument(
         "--config",
