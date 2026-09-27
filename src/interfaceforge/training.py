@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 
 from .config import Campaign, load_profile
-from .errors import SafetyError
+from .errors import ConfigurationError, SafetyError
 from .scheduler import render_job, write_job
 from .state import StateStore, sha256_file
 
@@ -90,6 +90,13 @@ def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[s
     profile_name = str(settings.get("profile", "mace_gpu"))
     roi = dict(settings.get("roi", {}))
     roi_enabled = bool(roi.get("enabled", False))
+    virials = dict(settings.get("virials") or {})
+    virials_enabled = bool(virials.get("enabled", False))
+    virials_key = str(virials.get("key", "REF_virial"))
+    if virials_enabled and roi_enabled:
+        raise ConfigurationError(
+            "models.mace.virials and models.mace.roi cannot be combined: MACE-ROI requires --loss=weighted"
+        )
     roi_manifest: dict[str, Any] | None = None
     if roi_enabled:
         dataset_root, roi_manifest = _mace_roi_dataset(campaign, settings)
@@ -105,6 +112,21 @@ def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[s
         )
         test_file = _resolve(
             campaign.root, settings.get("test_file", "datasets/canonical/test.extxyz")
+        )
+    train_header = _extxyz_header(train_file)
+    virial_training: dict[str, Any] = {
+        "enabled": virials_enabled,
+        "key": virials_key if virials_enabled else None,
+        "train_file_has_key": (f"{virials_key}=" in train_header) if train_header is not None else None,
+        "warning": None,
+    }
+    if virials_enabled and train_header is not None and f"{virials_key}=" not in train_header:
+        raise SafetyError(
+            f"models.mace.virials is enabled, but {virials_key} is not in the first frame of {train_file}"
+        )
+    if not virials_enabled and train_header is not None and "REF_virial=" in train_header:
+        virial_training["warning"] = (
+            f"{train_file} carries REF_virial, but models.mace.virials is not enabled, so stress is not trained on"
         )
     e0s = settings.get("e0s", "average")
     common = [
@@ -124,6 +146,8 @@ def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[s
         f"--seed={int(settings.get('seed', 2026))}",
         "--restart_latest",
     ]
+    if virials_enabled:
+        common.extend(["--loss=virials", f"--virials_key={virials_key}"])
     if roi_enabled:
         common.extend(
             [
@@ -158,6 +182,8 @@ def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[s
         f"--forces_weight={float(settings.get('stage1_forces_weight', 100.0))}",
         f"--patience={int(settings.get('patience', 30))}",
     ]
+    if virials_enabled:
+        stage1.append(f"--virials_weight={float(virials.get('stage1_weight', 1.0))}")
     if roi_enabled:
         stage1.append(f"--if-cycle-weight={stage1_cycle_weight}")
     stage2 = [
@@ -172,6 +198,8 @@ def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[s
         f"--forces_weight={float(settings.get('stage2_forces_weight', 50.0))}",
         f"--patience={int(settings.get('stage2_patience', 20))}",
     ]
+    if virials_enabled:
+        stage2.append(f"--virials_weight={float(virials.get('stage2_weight', virials.get('stage1_weight', 1.0)))}")
     if roi_enabled:
         stage2.append(f"--if-cycle-weight={stage2_cycle_weight}")
     stages: list[dict[str, Any]] = []
@@ -221,6 +249,7 @@ def generate_mace_training(campaign: Campaign, *, force: bool = False) -> dict[s
         "valid_file": str(valid_file),
         "test_file": str(test_file),
         "force_labels": "raw DFT labels; constraints are not applied",
+        "virial_training": virial_training,
         "method": "mace-roi" if roi_enabled else "mace",
         "roi": (
             {
@@ -447,6 +476,41 @@ def _deepmd_descriptor(name: str, backend: str, seed: int) -> dict[str, Any]:
     }
 
 
+def _extxyz_header(path: Path) -> str | None:
+    """The first frame's comment line, or ``None`` when the file is not there yet."""
+
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            handle.readline()
+            return handle.readline()
+    except OSError:
+        return None
+
+
+def _deepmd_virial_prefs(settings: Mapping[str, Any]) -> tuple[float, float]:
+    """``(start_pref_v, limit_pref_v)`` from ``models.deepmd.loss``; 0/0 keeps virials out of the loss."""
+
+    loss = dict(settings.get("loss") or {})
+    unknown = sorted(set(loss) - {"start_pref_v", "limit_pref_v"})
+    if unknown:
+        raise ConfigurationError(f"models.deepmd.loss supports start_pref_v/limit_pref_v only; got {unknown}")
+    prefs = (float(loss.get("start_pref_v", 0.0)), float(loss.get("limit_pref_v", 0.0)))
+    if any(not np.isfinite(value) or value < 0 for value in prefs):
+        raise ConfigurationError("models.deepmd.loss start_pref_v/limit_pref_v must be finite and >= 0")
+    return prefs
+
+
+def _systems_with_virials(systems: Sequence[str]) -> tuple[int, int]:
+    """(systems whose every set.* has virial.npy, total systems)."""
+
+    complete = 0
+    for system in systems:
+        sets = sorted(Path(system).glob("set.*"))
+        if sets and all((item / "virial.npy").is_file() for item in sets):
+            complete += 1
+    return complete, len(systems)
+
+
 def deepmd_input(
     *,
     dataset_root: Path,
@@ -457,6 +521,7 @@ def deepmd_input(
     numb_steps: int,
     batch_atoms: int,
     systems: Mapping[str, Sequence[str]],
+    virial_prefs: tuple[float, float] = (0.0, 0.0),
 ) -> dict[str, Any]:
     if architecture == "dpa4":
         model: dict[str, Any] = {
@@ -505,8 +570,8 @@ def deepmd_input(
             "limit_pref_e": 1.0,
             "start_pref_f": 1000.0,
             "limit_pref_f": 1.0,
-            "start_pref_v": 0.0,
-            "limit_pref_v": 0.0,
+            "start_pref_v": float(virial_prefs[0]),
+            "limit_pref_v": float(virial_prefs[1]),
         },
         "training": {
             "training_data": {
@@ -603,6 +668,24 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
     seeds = [int(value) for value in settings.get("seeds", [11, 23, 37, 53])][:committee]
     backend = str(settings.get("backend", "tensorflow"))
     architectures = [str(value) for value in settings.get("architectures", [settings.get("descriptor", "dpa1")])]
+    virial_prefs = _deepmd_virial_prefs(settings)
+    with_virials, n_train = _systems_with_virials(split_systems["train"])
+    virial_training: dict[str, Any] = {
+        "start_pref_v": virial_prefs[0],
+        "limit_pref_v": virial_prefs[1],
+        "train_systems_with_virials": f"{with_virials}/{n_train}",
+        "warning": None,
+    }
+    if max(virial_prefs) > 0 and with_virials < n_train:
+        raise SafetyError(
+            f"models.deepmd.loss enables virial training, but only {with_virials}/{n_train} train systems carry "
+            "virial.npy in every set; collect with dataset.include_virial: true"
+        )
+    if max(virial_prefs) == 0 and with_virials:
+        virial_training["warning"] = (
+            f"{with_virials}/{n_train} train systems carry virial.npy, but the virial loss prefactors are 0, "
+            "so stress is not trained on; set models.deepmd.loss.start_pref_v/limit_pref_v (e.g. 0.02 -> 1.0)"
+        )
     models: list[dict[str, Any]] = []
     for architecture_index, architecture in enumerate(architectures):
         for index, seed in enumerate(seeds):
@@ -619,6 +702,7 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
                 numb_steps=int(settings.get("numb_steps", 500000)),
                 batch_atoms=int(settings.get("batch_atoms", 1024)),
                 systems=split_systems,
+                virial_prefs=virial_prefs,
             )
             _write_json(run / "input.json", payload)
             models.append(
@@ -883,6 +967,7 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
         "dataset_root": str(dataset_root),
         "type_map": type_map,
         "split_systems": {name: len(values) for name, values in split_systems.items()},
+        "virial_training": virial_training,
         "models": models,
         "launcher": str(root / "run_ensemble.slurm"),
         "preflight_launcher": str(root / "run_preflight.slurm"),

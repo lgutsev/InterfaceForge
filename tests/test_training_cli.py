@@ -35,6 +35,120 @@ def make_deepmd_system(root: Path, split: str) -> None:
     np.save(set_dir / "force.npy", np.zeros((1, 6)))
 
 
+class DeepmdVirialTrainingTests(unittest.TestCase):
+    """models.deepmd.loss opts into virial training; the default stays energy + forces."""
+
+    def _manifest(self, root: Path, *, virials: bool, loss: dict | None = None) -> dict:
+        for split in ("train", "valid", "test"):
+            make_deepmd_system(root, split)
+            if virials:
+                set_dir = root / "datasets/canonical/deepmd" / split / "system/set.000"
+                np.save(set_dir / "virial.npy", np.zeros((1, 9)))
+        deepmd = {
+            "enabled": True,
+            "profile": "deepmd_gpu",
+            "backend": "pt_expt",
+            "architectures": ["dpa3"],
+            "committee": 1,
+            "seeds": [11],
+            "numb_steps": 100,
+            "batch_atoms": 64,
+            "max_concurrent": 1,
+        }
+        if loss is not None:
+            deepmd["loss"] = loss
+        return generate_deepmd_training(load_campaign(write_campaign(root, deepmd=deepmd)))
+
+    def _input(self, root: Path) -> dict:
+        return json.loads((root / "models/deepmd/dpa3/model_000/input.json").read_text(encoding="utf-8"))
+
+    def test_default_keeps_virials_out_and_warns_when_data_has_them(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self._manifest(root, virials=True)
+            loss = self._input(root)["loss"]
+            self.assertEqual((loss["start_pref_v"], loss["limit_pref_v"]), (0.0, 0.0))
+            self.assertEqual(manifest["virial_training"]["train_systems_with_virials"], "1/1")
+            self.assertIn("not trained on", manifest["virial_training"]["warning"])
+
+    def test_default_without_virial_data_has_no_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = self._manifest(Path(temporary), virials=False)
+            self.assertIsNone(manifest["virial_training"]["warning"])
+            self.assertEqual(manifest["virial_training"]["train_systems_with_virials"], "0/1")
+
+    def test_opt_in_writes_prefactors_and_records_them(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self._manifest(root, virials=True, loss={"start_pref_v": 0.02, "limit_pref_v": 1.0})
+            loss = self._input(root)["loss"]
+            self.assertEqual((loss["start_pref_v"], loss["limit_pref_v"]), (0.02, 1.0))
+            self.assertEqual(manifest["virial_training"]["start_pref_v"], 0.02)
+            self.assertIsNone(manifest["virial_training"]["warning"])
+
+    def test_opt_in_without_virial_data_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(SafetyError, "include_virial"):
+                self._manifest(Path(temporary), virials=False, loss={"start_pref_v": 0.02, "limit_pref_v": 1.0})
+
+    def test_unknown_or_negative_loss_settings_are_rejected(self) -> None:
+        for loss in ({"start_pref_e": 1.0}, {"limit_pref_v": -1.0}):
+            with tempfile.TemporaryDirectory() as temporary, self.assertRaises(ConfigurationError):
+                self._manifest(Path(temporary), virials=True, loss=loss)
+
+
+class MaceVirialTrainingTests(unittest.TestCase):
+    """models.mace.virials opts into --loss=virials; the default is unchanged."""
+
+    def _write_train(self, root: Path, *, virial: bool) -> None:
+        canonical = root / "datasets/canonical"
+        canonical.mkdir(parents=True, exist_ok=True)
+        extra = ' REF_virial="0 0 0 0 0 0 0 0 0"' if virial else ""
+        (canonical / "train.extxyz").write_text(
+            f'1\nLattice="3 0 0 0 3 0 0 0 3" Properties=species:S:1:pos:R:3 REF_energy=-1.0{extra}\nSi 0 0 0\n',
+            encoding="utf-8",
+        )
+
+    def test_default_command_is_unchanged_and_warns_about_ignored_virials(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_train(root, virial=True)
+            manifest = generate_mace_training(load_campaign(write_campaign(root, mace={"enabled": True})))
+            commands = " ".join(stage["command"] for stage in manifest["stages"])
+            self.assertNotIn("--loss=virials", commands)
+            self.assertNotIn("--virials", commands)
+            self.assertIn("not trained on", manifest["virial_training"]["warning"])
+
+    def test_opt_in_adds_loss_key_and_per_stage_weights(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_train(root, virial=True)
+            mace = {"enabled": True, "virials": {"enabled": True, "stage1_weight": 5.0, "stage2_weight": 10.0}}
+            manifest = generate_mace_training(load_campaign(write_campaign(root, mace=mace)))
+            stage1, stage2 = (stage["command"] for stage in manifest["stages"])
+            for command in (stage1, stage2):
+                self.assertIn("--loss=virials", command)
+                self.assertIn("--virials_key=REF_virial", command)
+            self.assertIn("--virials_weight=5.0", stage1)
+            self.assertIn("--virials_weight=10.0", stage2)
+            self.assertTrue(manifest["virial_training"]["train_file_has_key"])
+
+    def test_opt_in_without_the_key_in_data_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_train(root, virial=False)
+            mace = {"enabled": True, "virials": {"enabled": True}}
+            with self.assertRaisesRegex(SafetyError, "REF_virial"):
+                generate_mace_training(load_campaign(write_campaign(root, mace=mace)))
+
+    def test_virials_and_roi_cannot_be_combined(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mace = {"enabled": True, "virials": {"enabled": True}, "roi": {"enabled": True}}
+            with self.assertRaises(ConfigurationError):
+                generate_mace_training(load_campaign(write_campaign(root, mace=mace)))
+
+
 class TrainingTests(unittest.TestCase):
     def test_modern_deepmd_campaign_generates_valid_shell(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
