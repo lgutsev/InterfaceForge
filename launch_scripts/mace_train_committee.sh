@@ -32,6 +32,20 @@ fi
 MODEL_PREFIX="${MACE_MODEL_PREFIX:-SiN_TiN_TiO_periodic_mace}"
 ENERGY_KEY="${MACE_ENERGY_KEY:-REF_energy}"
 FORCES_KEY="${MACE_FORCES_KEY:-REF_forces}"
+# Stress training is opt-in; the default "weighted" loss is energy + forces only
+# and silently ignores REF_virial even when every frame carries it. Set
+# MACE_LOSS=virials (key REF_virial, the InterfaceForge collector's virial
+# -V*sigma in eV) or MACE_LOSS=stress with MACE_STRESS_KEY for stress labels.
+LOSS="${MACE_LOSS:-weighted}"
+VIRIALS_KEY="${MACE_VIRIALS_KEY:-}"
+STRESS_KEY="${MACE_STRESS_KEY:-}"
+VIRIALS_WEIGHT="${MACE_VIRIALS_WEIGHT:-1.0}"
+STAGE_TWO_VIRIALS_WEIGHT="${MACE_STAGE_TWO_VIRIALS_WEIGHT:-$VIRIALS_WEIGHT}"
+STRESS_WEIGHT="${MACE_STRESS_WEIGHT:-1.0}"
+STAGE_TWO_STRESS_WEIGHT="${MACE_STAGE_TWO_STRESS_WEIGHT:-$STRESS_WEIGHT}"
+if [[ "$LOSS" == "virials" && -z "$VIRIALS_KEY" ]]; then
+    VIRIALS_KEY="REF_virial"
+fi
 
 for required_value in MODEL_PREFIX ENERGY_KEY FORCES_KEY; do
     if [[ -z "${!required_value}" ]]; then
@@ -286,6 +300,43 @@ elif grep -q -- "--swa" <<< "$HELP_TXT"; then
     )
 fi
 
+# Stress/virial training: every requested flag must exist in this MACE, and the
+# requested key must be in the training data; never fall back silently.
+# (Read the first extxyz comment line into a variable: head|grep -q under
+# pipefail can fail spuriously on SIGPIPE.)
+TRAIN_HEADER="$(sed -n '2{p;q}' "$TRAIN_FILE")"
+STRESS_ARGS=()
+case "$LOSS" in
+    virials)
+        grep -q -- "--virials_key" <<< "$HELP_TXT" || { echo "ERROR: MACE_LOSS=virials, but this MACE has no --virials_key"; exit 1; }
+        grep -q -- "$VIRIALS_KEY=" <<< "$TRAIN_HEADER" || { echo "ERROR: $VIRIALS_KEY not found in the first frame of $TRAIN_FILE"; exit 1; }
+        STRESS_ARGS+=(--virials_key "$VIRIALS_KEY" --virials_weight "$VIRIALS_WEIGHT")
+        if grep -q -- "--stage_two_virials_weight" <<< "$HELP_TXT"; then
+            STRESS_ARGS+=(--stage_two_virials_weight "$STAGE_TWO_VIRIALS_WEIGHT")
+        elif grep -q -- "--swa_virials_weight" <<< "$HELP_TXT"; then
+            STRESS_ARGS+=(--swa_virials_weight "$STAGE_TWO_VIRIALS_WEIGHT")
+        fi
+        ;;
+    stress)
+        [[ -n "$STRESS_KEY" ]] || { echo "ERROR: MACE_LOSS=stress needs MACE_STRESS_KEY (InterfaceForge collects virials; use MACE_LOSS=virials)"; exit 1; }
+        grep -q -- "--stress_key" <<< "$HELP_TXT" || { echo "ERROR: MACE_LOSS=stress, but this MACE has no --stress_key"; exit 1; }
+        grep -q -- "$STRESS_KEY=" <<< "$TRAIN_HEADER" || { echo "ERROR: $STRESS_KEY not found in the first frame of $TRAIN_FILE"; exit 1; }
+        STRESS_ARGS+=(--stress_key "$STRESS_KEY" --stress_weight "$STRESS_WEIGHT")
+        if grep -q -- "--stage_two_stress_weight" <<< "$HELP_TXT"; then
+            STRESS_ARGS+=(--stage_two_stress_weight "$STAGE_TWO_STRESS_WEIGHT")
+        elif grep -q -- "--swa_stress_weight" <<< "$HELP_TXT"; then
+            STRESS_ARGS+=(--swa_stress_weight "$STAGE_TWO_STRESS_WEIGHT")
+        fi
+        ;;
+    *)
+        if grep -q -- "REF_virial=" <<< "$TRAIN_HEADER"; then
+            echo "WARNING: $TRAIN_FILE carries REF_virial, but MACE_LOSS=$LOSS does not train on it."
+            echo "         Elastic response and stress will be unconstrained. Set MACE_LOSS=virials to use it."
+        fi
+        ;;
+esac
+echo "Loss: $LOSS ${STRESS_ARGS[*]}"
+
 export MASTER_ADDR
 MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | sed -n '1p')"
 
@@ -358,7 +409,7 @@ srun --ntasks=2 --kill-on-bad-exit=1 \
     --valid_batch_size "$VALID_BATCH_SIZE" \
     --max_num_epochs "$MAX_EPOCHS" \
     --patience "$PATIENCE" \
-    --loss "weighted" \
+    --loss "$LOSS" \
     --error_table "PerAtomRMSE" \
     --default_dtype "float32" \
     --ema \
@@ -368,6 +419,7 @@ srun --ntasks=2 --kill-on-bad-exit=1 \
     --distributed \
     --restart_latest \
     "${STAGE_TWO_ARGS[@]}" \
+    "${STRESS_ARGS[@]}" \
     "${EXTRA_ARGS[@]}"
 
 echo
