@@ -82,6 +82,11 @@ environment paths, wall time, job name, executable, and resource counts before r
 - `freeze_missing_deepmd_dpa2.sbatch`: idempotent four-member array job that
   exports missing DPA-2 `frozen_model.pth` files and validates each through
   DeePMD's inference API; existing exports are not overwritten.
+- `freeze_deepmd_committees.sbatch`: campaign-wide GPU2 freeze job for
+  `dpa2`, `dpa2_ft`, `dpa3`, `dpa3_ft`, and `dpa4`. Ordinary PyTorch
+  committees are validated as `frozen_model.pth`; DPA-4 uses DeePMD's
+  AOTInductor `frozen_model.pt2` export path. Existing non-empty exports are
+  left untouched.
 - `separation_energy_merge.sbatch`: merges those partials on `single` and renders
   the combined DFT/MACE/DeePMD reports.
 - `submit_separation_energy.sh`: submits both GPU jobs concurrently and attaches
@@ -201,12 +206,23 @@ module) and how to fix it. `SEPARATION_DEEPMD_USER_PIP=1` lets the job
 `~/.local` site as a one-time self-heal (off by default because `~/.local` is
 shared by every Python of that version).
 
-To restore missing DeePMD frozen artifacts separately, submit from
+To restore only missing DPA-2 frozen artifacts, submit from
 `Periodic_MLIPs`:
 
 ```bash
 sbatch /path/to/InterfaceForge/launch_scripts/freeze_missing_deepmd_dpa2.sbatch
 ```
+
+To freeze every trained DeePMD committee in the campaign (including DPA-2/3
+fine-tunes and the DPA-4 `.pt2` deployment artifact), submit:
+
+```bash
+sbatch /path/to/InterfaceForge/launch_scripts/freeze_deepmd_committees.sbatch
+```
+
+The campaign-wide launcher defaults to
+`dpa2 dpa2_ft dpa3 dpa3_ft dpa4`. Override with
+`DEEPMD_ARCHS="dpa3 dpa3_ft"` when only selected architectures should run.
 
 Recovery locks each member, exports into a temporary directory, loads the
 export through `DeepPot`, and only then renames it to `frozen_model.pth`.
