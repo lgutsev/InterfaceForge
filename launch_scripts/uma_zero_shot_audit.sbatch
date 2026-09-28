@@ -26,7 +26,7 @@ set -euo pipefail
 
 CAMP="${UMA_CAMPAIGN_ROOT:-${SLURM_SUBMIT_DIR:?Submit from the campaign root}}"
 IFACE_ROOT="${INTERFACEFORGE_ROOT:-/project/lgutsev/git_develop/InterfaceForge}"
-UMA_ENV="${UMA_ENV:-/project/lgutsev/env/uma}"
+UMA_ENV="${UMA_ENV:-/project/lgutsev/env/lgutsev_dev}"
 UMA_MODEL="${UMA_MODEL:-uma-s-1p2p1}"
 UMA_TASK="${UMA_TASK:-omat}"
 UMA_DEVICE="${UMA_DEVICE:-cuda}"
