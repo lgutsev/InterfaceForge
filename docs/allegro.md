@@ -3,6 +3,8 @@
 > **Verification note:** code-only. No InterfaceForge-generated Allegro model has
 > yet been trained, compiled, or run through LAMMPS under human inspection.
 
+Allegro and NequIP share the NequIP framework tooling but are different architectures: the NequIP message-passing GNN has its own backend, configuration block (`models.nequip`) and guide ([NequIP committees](nequip.md)); nothing on this page configures it.
+
 InterfaceForge treats Allegro as an optional MLIP backend for workloads where a strictly local equivariant model is attractive, especially large LAMMPS interface simulations. The adapter does not assume that the cluster-provided LAMMPS is usable. Instead it generates training, model-compilation, LAMMPS-build, runtime-preflight, and MD launcher assets under `models/allegro/`.
 
 ## Install

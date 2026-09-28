@@ -1,5 +1,5 @@
 # ruff: noqa: E501
-"""Matched-frame, cross-backend MACE/DeePMD accuracy audits."""
+"""Matched-frame, cross-backend MACE / DeePMD-DPA / NequIP accuracy audits."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import csv
 import json
 import math
 import re
+import shlex
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -70,7 +71,9 @@ for system in systems:
     for atoms in frames:
         atoms.calc = calculator
         energies.append(float(atoms.get_potential_energy()))
-        forces.append(np.asarray(atoms.get_forces(), dtype=np.float64))
+        # Frames read from extxyz carry move_mask as FixAtoms; the reference labels
+        # keep raw DFT forces on frozen atoms, so predictions must be raw as well.
+        forces.append(np.asarray(atoms.get_forces(apply_constraint=False), dtype=np.float64))
     temporary = target.with_suffix(".npz.tmp")
     with temporary.open("wb") as handle:
         np.savez_compressed(
@@ -81,6 +84,112 @@ for system in systems:
     os.replace(temporary, target)
     print(f'{row["model"]} {system["system_id"]}: {len(frames)} frames', flush=True)
 """
+
+
+# Internal engine keys. "DPA2" is the legacy key for whichever DeePMD/DPA
+# architecture is compared (its display name comes from DEEPMD_DISPLAY).
+ENGINE_ORDER = ("MACE", "DPA2", "NEQUIP")
+BACKEND_ENGINE = {"mace": "MACE", "deepmd": "DPA2", "nequip": "NEQUIP"}
+ENGINE_COLORS = {"MACE": "#0072B2", "DPA2": "#D55E00", "NEQUIP": "#009E73"}
+DEFAULT_BACKENDS = ("mace", "deepmd")
+ENERGY_NORMALIZATION = (
+    "(E_pred - E_DFT) / N_atoms in meV/atom on total energies against the canonical REF_energy "
+    "labels shared by every backend; no per-backend reference shift. 'centered' additionally "
+    "removes each system's mean offset."
+)
+STRESS_POLICY = (
+    "not compared: the canonical labels exclude virials and not every backend was trained on "
+    "stress, so no scientifically comparable stress value exists"
+)
+
+NEQUIP_EVALUATOR = r"""#!/usr/bin/env python3
+# InterfaceForge mlip-compare NequIP evaluator (generated). Mirrors evaluate_mace.py:
+# one committee member per array task, predictions for every matched system.
+import argparse
+import csv
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+from ase.io import read
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--root", type=Path, required=True)
+parser.add_argument("--task", type=int)
+parser.add_argument("--device", default="cuda", choices=("cuda", "cpu"))
+args = parser.parse_args()
+task = args.task if args.task is not None else int(os.environ["SLURM_ARRAY_TASK_ID"])
+with (args.root / "nequip_models.tsv").open(newline="", encoding="utf-8") as handle:
+    models = list(csv.DictReader(handle, delimiter="\t"))
+if task < 0 or task >= len(models):
+    raise SystemExit(f"Invalid model task {task}")
+row = models[task]
+model_path = Path(row["model_path"])
+if not model_path.is_file():
+    raise SystemExit(f"Missing compiled NequIP model: {model_path}")
+try:
+    from nequip.integrations.ase import NequIPCalculator
+except ImportError:
+    from nequip.ase import NequIPCalculator
+calculator = NequIPCalculator.from_compiled_model(str(model_path), device=args.device)
+systems = json.loads((args.root / "systems.json").read_text(encoding="utf-8"))
+target_root = args.root / "predictions" / "nequip" / row["model"]
+target_root.mkdir(parents=True, exist_ok=True)
+for system in systems:
+    target = target_root / f'{system["system_id"]}.npz'
+    if target.is_file() and target.stat().st_size:
+        continue
+    frames = read(system["mace_input"], index=":")
+    energies, forces = [], []
+    for atoms in frames:
+        atoms.calc = calculator
+        energies.append(float(atoms.get_potential_energy()))
+        forces.append(np.asarray(atoms.get_forces(apply_constraint=False), dtype=np.float64))
+    temporary = target.with_suffix(".npz.tmp")
+    with temporary.open("wb") as handle:
+        np.savez_compressed(
+            handle,
+            energy=np.asarray(energies, dtype=np.float64),
+            forces=np.asarray(forces, dtype=np.float64),
+        )
+    os.replace(temporary, target)
+    print(f'{row["model"]} {system["system_id"]}: {len(frames)} frames', flush=True)
+"""
+
+
+def engine_display(engine: str, deepmd_arch: str = "dpa2") -> str:
+    return {"MACE": "MACE", "NEQUIP": "NequIP"}.get(
+        engine, DEEPMD_DISPLAY.get(deepmd_arch, deepmd_arch.upper()) if engine == "DPA2" else engine
+    )
+
+
+def _discover_nequip_models(root: Path, seeds: tuple[int, ...] | None) -> list[dict[str, Any]]:
+    """Compiled NequIP committee members, labelled model_000.. in seed order."""
+
+    from .nequip import discover_members
+
+    if not root.is_dir():
+        raise SafetyError(f"NequIP committee root not found: {root}")
+    state = discover_members(root)
+    by_seed = {member["seed"]: member for member in state["members"]}
+    order = list(seeds) if seeds else [member["seed"] for member in state["members"]]
+    if not order:
+        raise SafetyError(f"No NequIP seed_* members under {root}")
+    rows, missing = [], []
+    for index, seed in enumerate(order):
+        member = by_seed.get(seed)
+        if member is None or not member["compiled_model"]:
+            missing.append(seed)
+            continue
+        rows.append({"model": f"model_{index:03d}", "seed": seed, "model_path": member["compiled_model"]})
+    if missing:
+        ready = [member["seed"] for member in state["members"] if member["compiled_model"]]
+        raise SafetyError(
+            f"No compiled NequIP model for seed(s) {missing} under {root}. "
+            f"Seeds with a compiled model: {ready or 'none'} (train/finalize first, or pass --nequip-seeds)"
+        )
+    return rows
 
 
 def _ase_io() -> tuple[Any, Any]:
@@ -233,6 +342,21 @@ def validate_membership(
         system_id = f"system_{index:03d}"
         mace_input = grouped / f"{system_id}.extxyz"
         write(str(mace_input), ordered, format="extxyz")
+        first = ordered[0].info
+        metadata = {
+            key: first[info_key]
+            for key, info_key in (
+                ("stage", "IF_stage"),
+                ("temperature_k", "IF_temperature_k"),
+                ("case", "IF_case"),
+                ("ligand", "IF_ligand"),
+                ("coverage_pct", "IF_coverage_pct"),
+            )
+            if info_key in first
+        }
+        if "case" in metadata:
+            # Canonical NiO frames omit IF_ligand for ligand-free cases: that is "none", not unknown.
+            metadata.setdefault("ligand", "none")
         rows.append(
             {
                 "system_id": system_id,
@@ -243,6 +367,12 @@ def validate_membership(
                 "frames": nframes,
                 "natoms": natoms,
                 **_groups(leaf),
+                "frame_ids": [
+                    str(atoms.info.get("frame_id") or f"{leaf}:{int(atoms.info['source_frame'])}")
+                    for atoms in ordered
+                ],
+                "source_frames": [int(atoms.info["source_frame"]) for atoms in ordered],
+                "metadata": {key: (value.item() if hasattr(value, "item") else value) for key, value in metadata.items()},
             }
         )
         atom_frames += nframes * natoms
@@ -407,6 +537,44 @@ python {root / "evaluate_mace.py"} --root {root}
 """
 
 
+def _resolve_nequip_root(campaign: Path, value: str | Path | None) -> Path:
+    if not value:
+        return campaign / "models" / "nequip"
+    given = Path(value).expanduser()
+    return given.resolve() if given.is_absolute() else (campaign / given).resolve()
+
+
+def _nequip_launcher(root: Path, nmodels: int, profile_path: str | Path | None, profile_job: str) -> str:
+    """Render the NequIP inference array from the campaign's scheduler profile.
+
+    Unlike the historical MACE launcher, no account, partition or environment is
+    hard-coded here: everything comes from ``profile_job`` in the profile.
+    """
+
+    from .config import load_profile
+    from .scheduler import render_job
+
+    if profile_path is None:
+        raise SafetyError("NequIP comparison needs the campaign scheduler profile (run via 'iface mlip-compare')")
+    profile = load_profile(profile_path)
+    job = dict(profile.get("jobs", {}).get(profile_job, {}))
+    if not job:
+        raise SafetyError(f"Scheduler profile has no job {profile_job!r} for NequIP inference")
+    device = "cuda" if int(job.get("gpus", 0) or 0) > 0 else "cpu"
+    command = f"python {shlex.quote(str(root / 'evaluate_nequip.py'))} --root {shlex.quote(str(root))} --device {device}"
+    if str(profile.get("scheduler")) == "local":
+        command = f"for TASK in $(seq 0 {nmodels - 1}); do {command} --task \"$TASK\"; done"
+        return render_job(profile, profile_job, command=command, job_name="mlip_nequip_audit", working_directory=str(root))
+    return render_job(
+        profile,
+        profile_job,
+        command=command,
+        job_name="mlip_nequip_audit",
+        array=f"0-{nmodels - 1}%2",
+        working_directory=str(root),
+    )
+
+
 def prepare_comparison(
     campaign_root: str | Path,
     *,
@@ -415,30 +583,70 @@ def prepare_comparison(
     seeds: tuple[int, ...] = DEFAULT_SEEDS,
     deepmd_arch: str = "dpa2",
     force: bool = False,
+    backends: tuple[str, ...] | None = None,
+    nequip_models_root: str | Path | None = None,
+    nequip_seeds: tuple[int, ...] | None = None,
+    profile_path: str | Path | None = None,
+    nequip_profile: str = "nequip_gpu",
 ) -> dict[str, Any]:
+    """Validate matched canonical test frames and stage inference for each backend.
+
+    ``backends`` defaults to MACE + DeePMD (the historical comparison) and gains
+    ``nequip`` automatically when ``nequip_models_root`` is given. Every backend is
+    evaluated on the *same* ``inputs/system_XXX.extxyz`` frames, whose identity,
+    geometry and labels were proven equal to the DeePMD systems.
+    """
+
     if deepmd_arch not in DEEPMD_DISPLAY:
         raise SafetyError(
             f"Unknown DeePMD architecture {deepmd_arch!r}; expected one of "
             f"{sorted(DEEPMD_DISPLAY)}"
         )
+    selected = tuple(backends) if backends else DEFAULT_BACKENDS + (("nequip",) if nequip_models_root else ())
+    unknown = sorted(set(selected) - set(BACKEND_ENGINE))
+    if unknown or not selected or len(set(selected)) != len(selected):
+        raise SafetyError(f"backends must be distinct values from {sorted(BACKEND_ENGINE)}; got {list(selected)}")
     campaign = Path(campaign_root).expanduser().resolve()
     output = Path(output_root).expanduser().resolve() if output_root else campaign / "audit" / "mlip_compare"
     _prepare_output(output, campaign, force)
     canonical = campaign / "datasets" / "canonical"
-    model_root = _resolve_committee_root(campaign, mace_models_root)
-    models, model_notes = _discover_models(model_root, seeds)
     systems, validation = validate_membership(
         canonical / "test.extxyz", canonical / "deepmd" / "test", output / "inputs"
     )
-    (output / "evaluate_mace.py").write_text(MACE_EVALUATOR, encoding="utf-8")
-    (output / "evaluate_mace.py").chmod(0o755)
     _write_json(output / "systems.json", systems)
-    with (output / "mace_models.tsv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=("model", "seed", "model_path"), delimiter="\t")
-        writer.writeheader()
-        writer.writerows(models)
-    launcher = output / "run_mace_evaluate.slurm"
-    launcher.write_text(_slurm(output, len(models)), encoding="utf-8")
+    engines: dict[str, list[dict[str, Any]]] = {}
+    launchers: dict[str, str] = {}
+    model_notes: list[str] = []
+    if "mace" in selected:
+        model_root = _resolve_committee_root(campaign, mace_models_root)
+        mace_models, model_notes = _discover_models(model_root, seeds)
+        (output / "evaluate_mace.py").write_text(MACE_EVALUATOR, encoding="utf-8")
+        (output / "evaluate_mace.py").chmod(0o755)
+        with (output / "mace_models.tsv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=("model", "seed", "model_path"), delimiter="\t")
+            writer.writeheader()
+            writer.writerows(mace_models)
+        launcher = output / "run_mace_evaluate.slurm"
+        launcher.write_text(_slurm(output, len(mace_models)), encoding="utf-8")
+        launchers["MACE"] = str(launcher)
+        engines["MACE"] = mace_models
+    if "deepmd" in selected:
+        engines["DPA2"] = [{"model": f"model_{index:03d}", "seed": seed} for index, seed in enumerate(seeds)]
+    if "nequip" in selected:
+        nequip_root = _resolve_nequip_root(campaign, nequip_models_root)
+        nequip_models = _discover_nequip_models(nequip_root, nequip_seeds)
+        (output / "evaluate_nequip.py").write_text(NEQUIP_EVALUATOR, encoding="utf-8")
+        (output / "evaluate_nequip.py").chmod(0o755)
+        with (output / "nequip_models.tsv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=("model", "seed", "model_path"), delimiter="\t")
+            writer.writeheader()
+            writer.writerows(nequip_models)
+        launcher = output / "run_nequip_evaluate.slurm"
+        launcher.write_text(_nequip_launcher(output, len(nequip_models), profile_path, nequip_profile), encoding="utf-8")
+        launcher.chmod(0o750)
+        launchers["NEQUIP"] = str(launcher)
+        engines["NEQUIP"] = nequip_models
+    legacy_models = engines.get("MACE") or engines.get("DPA2") or engines.get("NEQUIP") or []
     payload = {
         "schema_version": 1,
         "status": "READY",
@@ -447,12 +655,20 @@ def prepare_comparison(
         "deepmd_architecture": deepmd_arch,
         "campaign_root": str(campaign),
         "output_root": str(output),
-        "models": models,
+        "backends": list(selected),
+        "engines": engines,
+        "engine_display": {engine: engine_display(engine, deepmd_arch) for engine in engines},
+        "models": legacy_models,
         "model_selection_notes": model_notes,
         "systems": systems,
         "validation": validation,
-        "launcher": str(launcher),
-        "next": f"sbatch {launcher}",
+        "energy_normalization": ENERGY_NORMALIZATION,
+        "stress_comparison": STRESS_POLICY,
+        "launchers": launchers,
+        "launcher": launchers.get("MACE") or next(iter(launchers.values()), None),
+        "next": f"sbatch {launchers.get('MACE') or next(iter(launchers.values()), '')}".strip(),
+        "next_steps": [f"sbatch {path}" for path in launchers.values()]
+        + ([f"run the DeePMD `dp test` evaluation job for {deepmd_arch}"] if "DPA2" in engines else []),
     }
     _write_json(output / "comparison_manifest.json", payload)
     return payload
@@ -479,6 +695,19 @@ def _latest_deepmd_eval(campaign: Path, arch: str = "dpa2") -> Path | None:
     return max(roots, key=lambda path: path.stat().st_mtime)
 
 
+def _manifest_engines(manifest: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Engines of a comparison manifest; pre-NequIP manifests were MACE + DeePMD."""
+
+    engines = manifest.get("engines")
+    if isinstance(engines, dict) and engines:
+        return {engine: list(models) for engine, models in engines.items()}
+    return {"MACE": list(manifest["models"]), "DPA2": list(manifest["models"])}
+
+
+def _prediction_file(output: Path, engine: str, label: str, system_id: str) -> Path:
+    return output / "predictions" / engine.lower() / label / f"{system_id}.npz"
+
+
 def comparison_status(
     campaign_root: str | Path,
     *,
@@ -491,35 +720,49 @@ def comparison_status(
     if not manifest_path.is_file():
         raise SafetyError(f"Run mlip-compare prepare first: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    systems, models = manifest["systems"], manifest["models"]
+    systems = manifest["systems"]
+    engines = _manifest_engines(manifest)
     arch = str(manifest.get("deepmd_architecture", "dpa2"))
-    dpa_root = (
-        Path(deepmd_eval_root).expanduser().resolve()
-        if deepmd_eval_root
-        else _latest_deepmd_eval(campaign, arch)
-    )
-    mace_counts, dpa_counts = {}, {}
-    for model in models:
-        label = model["model"]
-        mace_counts[label] = sum(
-            (output / "predictions" / "mace" / label / f'{system["system_id"]}.npz').is_file()
-            for system in systems
+    dpa_root = None
+    if "DPA2" in engines:
+        dpa_root = (
+            Path(deepmd_eval_root).expanduser().resolve()
+            if deepmd_eval_root
+            else _latest_deepmd_eval(campaign, arch)
         )
-        dpa_counts[label] = 0
-        if dpa_root:
-            for system in systems:
-                prefix = dpa_root / "by_system" / system["system_id"] / f"{label}_detail"
-                if Path(str(prefix) + ".e_peratom.out").is_file() and Path(str(prefix) + ".f.out").is_file():
-                    dpa_counts[label] += 1
+    counts: dict[str, dict[str, int]] = {}
+    for engine, models in engines.items():
+        counts[engine] = {}
+        for model in models:
+            label = model["model"]
+            if engine == "DPA2":
+                done = 0
+                if dpa_root:
+                    for system in systems:
+                        prefix = dpa_root / "by_system" / system["system_id"] / f"{label}_detail"
+                        if Path(str(prefix) + ".e_peratom.out").is_file() and Path(str(prefix) + ".f.out").is_file():
+                            done += 1
+                counts[engine][label] = done
+            else:
+                counts[engine][label] = sum(
+                    _prediction_file(output, engine, label, system["system_id"]).is_file() for system in systems
+                )
     expected = len(systems)
-    mace_ready = all(value == expected for value in mace_counts.values())
-    dpa_ready = bool(dpa_counts) and all(value == expected for value in dpa_counts.values())
+    ready = {
+        engine: bool(values) and all(value == expected for value in values.values())
+        for engine, values in counts.items()
+    }
     hints: list[str] = []
-    if not mace_ready:
+    launchers = manifest.get("launchers", {})
+    if "MACE" in engines and not ready["MACE"]:
         hints.append(
             f"MACE inference incomplete -- (re-)submit {output / 'run_mace_evaluate.slurm'}"
         )
-    if not dpa_ready:
+    if "NEQUIP" in engines and not ready["NEQUIP"]:
+        hints.append(
+            f"NequIP inference incomplete -- (re-)submit {launchers.get('NEQUIP', output / 'run_nequip_evaluate.slurm')}"
+        )
+    if "DPA2" in engines and not ready["DPA2"]:
         if deepmd_eval_root and not (dpa_root and dpa_root.is_dir()):
             hints.append(f"--deepmd-eval-root does not exist: {dpa_root}")
         elif dpa_root is None:
@@ -527,7 +770,7 @@ def comparison_status(
                 f"no job_* evaluation under {campaign / 'models' / 'deepmd' / 'evaluation' / arch}/"
                 " -- run the DeePMD `dp test` job for this architecture first"
             )
-        elif all(value == 0 for value in dpa_counts.values()):
+        elif all(value == 0 for value in counts["DPA2"].values()):
             hints.append(
                 f"{dpa_root} has no by_system/*/model_XXX_detail.*.out files for this test set"
             )
@@ -535,11 +778,14 @@ def comparison_status(
             hints.append(f"DeePMD evaluation partial under {dpa_root}")
     return {
         "schema_version": 1,
-        "status": "READY_TO_FINALIZE" if (mace_ready and dpa_ready) else "INCOMPLETE",
+        "status": "READY_TO_FINALIZE" if all(ready.values()) else "INCOMPLETE",
         "expected_systems_per_model": expected,
         "deepmd_architecture": arch,
-        "mace": mace_counts,
-        "deepmd": dpa_counts,
+        "engines": list(engines),
+        "mace": counts.get("MACE", {}),
+        "deepmd": counts.get("DPA2", {}),
+        "nequip": counts.get("NEQUIP", {}),
+        "ready": ready,
         "deepmd_eval_root": str(dpa_root) if dpa_root else None,
         "deepmd_eval_root_exists": bool(dpa_root and dpa_root.is_dir()),
         "hints": hints,
@@ -592,6 +838,9 @@ def _metrics(
     }
 
 
+METADATA_GROUP_FIELDS = ("stage", "temperature_k", "ligand", "coverage_pct")
+
+
 def _system_row(
     engine: str,
     model: str,
@@ -612,6 +861,7 @@ def _system_row(
         "family": system["family"],
         "termination": system["termination"],
         "oxidation": system["oxidation"],
+        **{key: (system.get("metadata") or {}).get(key, "NA") for key in METADATA_GROUP_FIELDS},
         **metrics,
     }
 
@@ -696,9 +946,9 @@ def _write_svg(
         for row in overall
         if row["model"] == "ensemble_mean" and row["averaging"] == "micro"
     }
-    engines = [name for name in ("MACE", "DPA2") if name in rows]
-    labels = {"MACE": "MACE", "DPA2": deepmd_display}
-    colors = {"MACE": "#2563eb", "DPA2": "#dc2626"}
+    engines = [name for name in ENGINE_ORDER if name in rows]
+    labels = {"MACE": "MACE", "DPA2": deepmd_display, "NEQUIP": "NequIP"}
+    colors = {"MACE": "#2563eb", "DPA2": "#dc2626", "NEQUIP": "#059669"}
     metrics = (
         ("Energy RMSE (meV/atom)", "energy_rmse_mev_per_atom"),
         ("Force RMSE (meV/A)", "force_rmse_mev_per_angstrom"),
@@ -739,6 +989,9 @@ def _heatmap_label(row: dict[str, Any]) -> str:
 
     if row["heritage"] == "bulk":
         return f'bulk / {row["relative_leaf"].removeprefix("bulk/")}'
+    if row.get("family", "NA") == "NA" and row.get("termination", "NA") == "NA":
+        leaf = str(row["relative_leaf"])
+        return leaf if len(leaf) <= 70 else "…" + leaf[-69:]
     return (
         f'interface / {row["temperature"]} / {row["family"]} / '
         f'{row["termination"]} / O={row["oxidation"]}'
@@ -751,7 +1004,7 @@ def _write_force_heatmaps(
     *,
     deepmd_display: str = "DPA-2",
 ) -> dict[str, Path]:
-    """Plot member-by-system force RMSE using one scale for both engines."""
+    """Plot member-by-system force RMSE on one shared scale for every engine."""
 
     try:
         import matplotlib
@@ -764,9 +1017,10 @@ def _write_force_heatmaps(
             "install InterfaceForge with interfaceforge[report]"
         ) from exc
 
-    engines = ("MACE", "DPA2")
     rows = [row for row in system_rows if row["model"] != "ensemble_mean"]
-    model_names = sorted({str(row["model"]) for row in rows})
+    engines = tuple(engine for engine in ENGINE_ORDER if any(row["engine"] == engine for row in rows))
+    if not engines:
+        raise SafetyError("Cannot plot force RMSE heatmaps without member rows")
     system_ids = sorted(
         {str(row["system_id"]) for row in rows},
         key=lambda value: int(value.rsplit("_", 1)[-1]),
@@ -775,34 +1029,33 @@ def _write_force_heatmaps(
         (str(row["engine"]), str(row["model"]), str(row["system_id"])): row
         for row in rows
     }
-    template = {
-        str(row["system_id"]): row
-        for row in rows
-        if row["engine"] == engines[0] and row["model"] == model_names[0]
+    model_names = {
+        engine: sorted({str(row["model"]) for row in rows if row["engine"] == engine}) for engine in engines
     }
-    expected = len(engines) * len(model_names) * len(system_ids)
-    if len(lookup) != expected or len(template) != len(system_ids):
-        raise SafetyError(
-            "Cannot plot force RMSE heatmaps from an incomplete system/member matrix"
-        )
-
-    matrices: dict[str, np.ndarray] = {}
+    template: dict[str, dict[str, Any]] = {}
     for engine in engines:
-        matrices[engine] = np.asarray(
+        for model in model_names[engine]:
+            for system_id in system_ids:
+                row = lookup.get((engine, model, system_id))
+                if row is None:
+                    raise SafetyError(
+                        "Cannot plot force RMSE heatmaps from an incomplete system/member matrix"
+                    )
+                template.setdefault(system_id, row)
+
+    matrices: dict[str, np.ndarray] = {
+        engine: np.asarray(
             [
                 [
-                    float(
-                        lookup[(engine, model, system_id)][
-                            "force_rmse_mev_per_angstrom"
-                        ]
-                    )
-                    / 1000.0
-                    for model in model_names
+                    float(lookup[(engine, model, system_id)]["force_rmse_mev_per_angstrom"]) / 1000.0
+                    for model in model_names[engine]
                 ]
                 for system_id in system_ids
             ],
             dtype=float,
         )
+        for engine in engines
+    }
     labels = [_heatmap_label(template[system_id]) for system_id in system_ids]
     shared_min = min(float(np.min(matrix)) for matrix in matrices.values())
     shared_max = max(float(np.max(matrix)) for matrix in matrices.values())
@@ -810,10 +1063,11 @@ def _write_force_heatmaps(
         raise SafetyError("Non-finite force RMSE cannot be plotted")
     if shared_max <= shared_min:
         shared_max = shared_min + 1.0e-12
+    display = {"MACE": "MACE", "DPA2": deepmd_display, "NEQUIP": "NequIP"}
 
     def render(path_stem: str, selected: tuple[str, ...]) -> tuple[Path, Path]:
         height = max(10.0, 0.31 * len(system_ids) + 2.0)
-        width = 12.0 if len(selected) == 1 else 18.0
+        width = 12.0 if len(selected) == 1 else 9.0 * len(selected)
         fig, axes = plt.subplots(
             1,
             len(selected),
@@ -826,6 +1080,7 @@ def _write_force_heatmaps(
         for panel, engine in enumerate(selected):
             ax = axes[0, panel]
             matrix = matrices[engine]
+            names = model_names[engine]
             image = ax.imshow(
                 matrix,
                 aspect="auto",
@@ -833,8 +1088,8 @@ def _write_force_heatmaps(
                 vmin=shared_min,
                 vmax=shared_max,
             )
-            ax.set_title(deepmd_display if engine == "DPA2" else engine, fontsize=14)
-            ax.set_xticks(range(len(model_names)), labels=model_names, rotation=28, ha="right")
+            ax.set_title(display[engine], fontsize=14)
+            ax.set_xticks(range(len(names)), labels=names, rotation=28, ha="right")
             ax.set_yticks(range(len(labels)), labels=labels)
             ax.tick_params(axis="y", labelsize=7.2, labelleft=panel == 0)
             ax.tick_params(axis="x", labelsize=8.5)
@@ -853,15 +1108,17 @@ def _write_force_heatmaps(
                     )
             for row_index in range(len(system_ids) + 1):
                 ax.axhline(row_index - 0.5, color="white", linewidth=0.25, alpha=0.45)
-            for column_index in range(len(model_names) + 1):
+            for column_index in range(len(names) + 1):
                 ax.axvline(column_index - 0.5, color="white", linewidth=0.25, alpha=0.45)
 
         assert image is not None
         colorbar = fig.colorbar(image, ax=list(axes[0]), shrink=0.78, pad=0.02)
         colorbar.set_label("Force RMSE (eV/Å)")
         title = "Per-system force RMSE"
-        if len(selected) == 2:
-            title += f" — matched MACE and {deepmd_display} committees (shared scale)"
+        if len(selected) > 1:
+            names = [display[engine] for engine in selected]
+            joined = " and ".join(names) if len(names) == 2 else ", ".join(names[:-1]) + f" and {names[-1]}"
+            title += f" — matched {joined} committees (shared scale)"
         fig.suptitle(title, fontsize=16)
         png = output / f"{path_stem}.png"
         svg = output / f"{path_stem}.svg"
@@ -870,19 +1127,16 @@ def _write_force_heatmaps(
         plt.close(fig)
         return png, svg
 
-    mace_png, mace_svg = render("force_rmse_heatmap_mace", ("MACE",))
-    dpa_png, dpa_svg = render("force_rmse_heatmap_dpa2", ("DPA2",))
-    combined_png, combined_svg = render(
-        "force_rmse_heatmaps", ("MACE", "DPA2")
-    )
-    return {
-        "force_heatmap_mace_png": mace_png,
-        "force_heatmap_mace_svg": mace_svg,
-        "force_heatmap_dpa2_png": dpa_png,
-        "force_heatmap_dpa2_svg": dpa_svg,
-        "force_heatmaps_png": combined_png,
-        "force_heatmaps_svg": combined_svg,
-    }
+    outputs: dict[str, Path] = {}
+    for engine in engines:
+        png, svg = render(f"force_rmse_heatmap_{engine.lower()}", (engine,))
+        outputs[f"force_heatmap_{engine.lower()}_png"] = png
+        outputs[f"force_heatmap_{engine.lower()}_svg"] = svg
+    if len(engines) > 1:
+        png, svg = render("force_rmse_heatmaps", engines)
+        outputs["force_heatmaps_png"] = png
+        outputs["force_heatmaps_svg"] = svg
+    return outputs
 
 
 PUBLICATION_GROUP_ORDER = (
@@ -896,7 +1150,7 @@ PUBLICATION_GROUP_ORDER = (
     "Real / Ti-terminated interface",
 )
 
-TEMPERATURE_GROUP_ORDER = ("Overall", "300 K", "450 K")
+TEMPERATURE_GROUP_ORDER = ("Overall", "300 K", "450 K", "600 K")
 
 OXIDATION_GROUP_ORDER = (
     "Overall",
@@ -945,6 +1199,12 @@ def _publication_summary_rows(
 
 
 def _temperature_group(row: dict[str, Any]) -> str:
+    exported = row.get("temperature_k", "NA")
+    if exported not in (None, "", "NA"):
+        try:
+            return f"{float(exported):g} K"
+        except (TypeError, ValueError):
+            pass
     temperature = str(row["temperature"])
     if not re.fullmatch(r"\d+K", temperature):
         raise SafetyError(
@@ -997,6 +1257,10 @@ def _oxidation_summary_rows(
     )
 
 
+def _natural_key(value: str) -> tuple[Any, ...]:
+    return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", str(value)))
+
+
 def _pooled_summary_rows(
     system_rows: list[dict[str, Any]],
     *,
@@ -1017,11 +1281,11 @@ def _pooled_summary_rows(
         group
         for group in group_order
         if group == "Overall" or group in groups_present
-    ]
+    ] + sorted(groups_present - set(group_order), key=_natural_key)
     rows: list[dict[str, Any]] = []
     engines = [
         engine
-        for engine in ("MACE", "DPA2")
+        for engine in ENGINE_ORDER
         if any(row["engine"] == engine for row in system_rows)
     ]
     for engine in engines:
@@ -1149,7 +1413,7 @@ def _render_rmse_summary(
 
     present = list(dict.fromkeys(str(row[family_key]) for row in summary_rows))
     families = list(families) if families is not None else [
-        name for name in ("MACE", "DPA2") if name in present
+        name for name in ENGINE_ORDER if name in present
     ] or present
     missing = [name for name in families if name not in present]
     if missing:
@@ -1167,6 +1431,9 @@ def _render_rmse_summary(
         for group in group_order
         if any(row[group_key] == group for row in summary_rows)
     ]
+    groups += sorted(
+        {str(row[group_key]) for row in summary_rows} - set(groups), key=_natural_key
+    )
     if not groups:
         raise SafetyError("No groups available for the RMSE figure")
     group_counts = {
@@ -1335,8 +1602,10 @@ def _write_publication_rmse_figure(
     figure_height: float = 4.0,
     deepmd_display: str = "DPA-2",
 ) -> dict[str, Path]:
-    """Two-family (MACE vs one DeePMD arch) wrapper over ``_render_rmse_summary``."""
+    """Engine-family wrapper (MACE / DeePMD arch / NequIP) over ``_render_rmse_summary``."""
 
+    present = {str(row["engine"]) for row in summary_rows}
+    families = tuple(engine for engine in ENGINE_ORDER if engine in present)
     return _render_rmse_summary(
         output,
         summary_rows,
@@ -1345,12 +1614,57 @@ def _write_publication_rmse_figure(
         path_stem=path_stem,
         output_key=output_key,
         figure_height=figure_height,
-        families=("MACE", "DPA2"),
+        families=families,
         family_key="engine",
-        family_display={"MACE": "MACE", "DPA2": deepmd_display},
-        family_colors={"MACE": "#0072B2", "DPA2": "#D55E00"},
+        family_display={"MACE": "MACE", "DPA2": deepmd_display, "NEQUIP": "NequIP"},
+        family_colors={engine: ENGINE_COLORS[engine] for engine in families},
         members=True,
     )
+
+
+ENGINE_COLUMN = {"MACE": "mace", "DPA2": "deepmd", "NEQUIP": "nequip"}
+
+
+def _load_engine_prediction(
+    engine: str,
+    *,
+    output: Path,
+    dpa_root: Path | None,
+    label: str,
+    system: dict[str, Any],
+    ref_e: np.ndarray,
+    ref_f: np.ndarray,
+    ref_delta: dict[str, float],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-atom energies and raw forces of one member on one matched system."""
+
+    natoms = int(system["natoms"])
+    if engine == "DPA2":
+        assert dpa_root is not None
+        prefix = dpa_root / "by_system" / system["system_id"] / f"{label}_detail"
+        e_detail = _numeric(Path(str(prefix) + ".e_peratom.out"))
+        f_detail = _numeric(Path(str(prefix) + ".f.out"))
+        if e_detail.shape != (len(ref_e), 2):
+            raise SafetyError(f"Unexpected DeePMD energy detail shape: {e_detail.shape}")
+        if f_detail.shape != (len(ref_e) * natoms, 6):
+            raise SafetyError(f"Unexpected DeePMD force detail shape: {f_detail.shape}")
+        dpa_ref_e, dpa_e = e_detail[:, 0], e_detail[:, 1]
+        dpa_ref_f = f_detail[:, :3].reshape(ref_f.shape)
+        dpa_f = f_detail[:, 3:].reshape(ref_f.shape)
+        ref_delta["energy"] = max(ref_delta["energy"], float(np.max(np.abs(dpa_ref_e - ref_e))))
+        ref_delta["force"] = max(ref_delta["force"], float(np.max(np.abs(dpa_ref_f - ref_f))))
+        if ref_delta["energy"] > 1.0e-7 or ref_delta["force"] > 1.0e-7:
+            raise SafetyError(f"DeePMD detail references differ from canonical labels: {ref_delta}")
+        return dpa_e, dpa_f
+    path = _prediction_file(output, engine, label, system["system_id"])
+    with np.load(path) as prediction:
+        energy = np.asarray(prediction["energy"], dtype=float) / natoms
+        forces = np.asarray(prediction["forces"], dtype=float)
+    if energy.shape != ref_e.shape or forces.shape != ref_f.shape:
+        raise SafetyError(f"{engine_display(engine)} prediction shape mismatch: {path}")
+    if not np.isfinite(energy).all() or not np.isfinite(forces).all():
+        raise SafetyError(f"Non-finite {engine_display(engine)} prediction: {path}")
+    return energy, forces
 
 
 def finalize_comparison(
@@ -1359,7 +1673,7 @@ def finalize_comparison(
     output_root: str | Path | None = None,
     deepmd_eval_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Write matched MACE/DPA-2 metrics only after both committees are complete."""
+    """Write matched-frame metrics for every prepared engine once all are complete."""
 
     campaign = Path(campaign_root).expanduser().resolve()
     output = Path(output_root).expanduser().resolve() if output_root else campaign / "audit" / "mlip_compare"
@@ -1376,65 +1690,97 @@ def finalize_comparison(
         hints = "; ".join(status.get("hints", [])) or "see the counts below"
         raise SafetyError(
             f"Comparison is incomplete ({hints}). MACE {status['mace']}, "
-            f"DeePMD {status['deepmd']} of {status['expected_systems_per_model']} systems."
+            f"DeePMD {status['deepmd']}, NequIP {status['nequip']} of "
+            f"{status['expected_systems_per_model']} systems."
         )
-    dpa_root = Path(status["deepmd_eval_root"])
+    dpa_root = Path(status["deepmd_eval_root"]) if status.get("deepmd_eval_root") else None
     iread, _ = _ase_io()
-    systems, models = manifest["systems"], manifest["models"]
-    data: dict[str, list[list[Any]]] = {
-        "MACE": [[] for _ in models],
-        "DPA2": [[] for _ in models],
-    }
+    systems = manifest["systems"]
+    engine_models = _manifest_engines(manifest)
+    engines = [engine for engine in ENGINE_ORDER if engine in engine_models]
+    display = {engine: engine_display(engine, arch) for engine in engines}
+    data: dict[str, list[list[Any]]] = {engine: [[] for _ in engine_models[engine]] for engine in engines}
     system_rows: list[dict[str, Any]] = []
     ref_delta = {"energy": 0.0, "force": 0.0}
+    frame_rows: list[dict[str, Any]] = []
+    member_rows: list[dict[str, Any]] = []
 
     for system in systems:
         frames = list(iread(system["mace_input"], index=":"))
         natoms = int(system["natoms"])
         ref_e = np.asarray([float(atoms.info[ENERGY_KEY]) / natoms for atoms in frames])
         ref_f = np.asarray([np.asarray(atoms.arrays[FORCES_KEY]) for atoms in frames])
-        for model_index, model in enumerate(models):
-            label = model["model"]
-            mace_file = output / "predictions" / "mace" / label / f'{system["system_id"]}.npz'
-            with np.load(mace_file) as prediction:
-                mace_e = np.asarray(prediction["energy"], dtype=float) / natoms
-                mace_f = np.asarray(prediction["forces"], dtype=float)
-            if mace_e.shape != ref_e.shape or mace_f.shape != ref_f.shape:
-                raise SafetyError(f"MACE prediction shape mismatch: {mace_file}")
-            entry = (system, ref_e, mace_e, ref_f, mace_f)
-            data["MACE"][model_index].append(entry)
-            system_rows.append(
-                _system_row("MACE", label, model["seed"], system, _metrics(*entry[1:]))
-            )
-
-            prefix = dpa_root / "by_system" / system["system_id"] / f"{label}_detail"
-            e_detail = _numeric(Path(str(prefix) + ".e_peratom.out"))
-            f_detail = _numeric(Path(str(prefix) + ".f.out"))
-            if e_detail.shape != (len(frames), 2):
-                raise SafetyError(f"Unexpected DeePMD energy detail shape: {e_detail.shape}")
-            if f_detail.shape != (len(frames) * natoms, 6):
-                raise SafetyError(f"Unexpected DeePMD force detail shape: {f_detail.shape}")
-            dpa_ref_e, dpa_e = e_detail[:, 0], e_detail[:, 1]
-            dpa_ref_f = f_detail[:, :3].reshape(ref_f.shape)
-            dpa_f = f_detail[:, 3:].reshape(ref_f.shape)
-            ref_delta["energy"] = max(
-                ref_delta["energy"], float(np.max(np.abs(dpa_ref_e - ref_e)))
-            )
-            ref_delta["force"] = max(
-                ref_delta["force"], float(np.max(np.abs(dpa_ref_f - ref_f)))
-            )
-            if ref_delta["energy"] > 1.0e-7 or ref_delta["force"] > 1.0e-7:
-                raise SafetyError(
-                    f"DeePMD detail references differ from canonical labels: {ref_delta}"
+        frame_ids = system.get("frame_ids") or [
+            f'{system["relative_leaf"]}:{int(atoms.info["source_frame"])}' for atoms in frames
+        ]
+        per_engine: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
+        for engine in engines:
+            per_engine[engine] = []
+            for model_index, model in enumerate(engine_models[engine]):
+                label = model["model"]
+                pred_e, pred_f = _load_engine_prediction(
+                    engine,
+                    output=output,
+                    dpa_root=dpa_root,
+                    label=label,
+                    system=system,
+                    ref_e=ref_e,
+                    ref_f=ref_f,
+                    ref_delta=ref_delta,
                 )
-            entry = (system, ref_e, dpa_e, ref_f, dpa_f)
-            data["DPA2"][model_index].append(entry)
-            system_rows.append(
-                _system_row("DPA2", label, model["seed"], system, _metrics(*entry[1:]))
-            )
+                entry = (system, ref_e, pred_e, ref_f, pred_f)
+                data[engine][model_index].append(entry)
+                per_engine[engine].append((pred_e, pred_f))
+                system_rows.append(_system_row(engine, label, model["seed"], system, _metrics(*entry[1:])))
+                for frame_index in range(len(frames)):
+                    member_rows.append(
+                        {
+                            "engine": engine,
+                            "engine_display": display[engine],
+                            "model": label,
+                            "seed": model["seed"],
+                            "system_id": system["system_id"],
+                            "relative_leaf": system["relative_leaf"],
+                            "frame_index": frame_index,
+                            "frame_id": frame_ids[frame_index],
+                            "natoms": natoms,
+                            "dft_energy_per_atom_ev": ref_e[frame_index],
+                            "energy_per_atom_ev": pred_e[frame_index],
+                            "energy_error_mev_per_atom": (pred_e[frame_index] - ref_e[frame_index]) * 1000.0,
+                            "force_rmse_mev_per_angstrom": float(
+                                np.sqrt(np.mean((pred_f[frame_index] - ref_f[frame_index]) ** 2)) * 1000.0
+                            ),
+                        }
+                    )
+        for frame_index in range(len(frames)):
+            row: dict[str, Any] = {
+                "system_id": system["system_id"],
+                "relative_leaf": system["relative_leaf"],
+                "frame_index": frame_index,
+                "frame_id": frame_ids[frame_index],
+                "source_frame": int(frames[frame_index].info["source_frame"]),
+                "natoms": natoms,
+                "dft_energy_per_atom_ev": ref_e[frame_index],
+            }
+            for engine in engines:
+                column = ENGINE_COLUMN[engine]
+                energies = np.asarray([member[0][frame_index] for member in per_engine[engine]])
+                forces = np.asarray([member[1][frame_index] for member in per_engine[engine]])
+                mean_f = forces.mean(axis=0)
+                row[f"{column}_energy_per_atom_ev"] = float(energies.mean())
+                row[f"{column}_energy_error_mev_per_atom"] = float((energies.mean() - ref_e[frame_index]) * 1000.0)
+                row[f"{column}_energy_spread_mev_per_atom"] = float(energies.std() * 1000.0)
+                row[f"{column}_force_rmse_mev_per_angstrom"] = float(
+                    np.sqrt(np.mean((mean_f - ref_f[frame_index]) ** 2)) * 1000.0
+                )
+                row[f"{column}_force_disagreement_mev_per_angstrom"] = float(
+                    np.mean(np.linalg.norm(forces.std(axis=0), axis=1)) * 1000.0
+                )
+            frame_rows.append(row)
 
     overall_rows, ensemble_rows, uncertainty_rows = [], [], []
     for engine, members in data.items():
+        models = engine_models[engine]
         for model, entries in zip(models, members, strict=True):
             overall_rows.extend(_overall(engine, model["model"], model["seed"], entries))
         ensemble_entries = []
@@ -1469,13 +1815,18 @@ def finalize_comparison(
             ]
         )
 
+    group_fields = ["heritage", "temperature", "family", "termination", "oxidation"] + [
+        field
+        for field in METADATA_GROUP_FIELDS
+        if any((system.get("metadata") or {}).get(field) not in (None, "NA") for system in systems)
+    ]
     group_rows = []
-    for engine in ("MACE", "DPA2"):
+    for engine in engines:
         members = data[engine]
         engine_rows = [row for row in ensemble_rows if row["engine"] == engine]
-        for field in ("heritage", "temperature", "family", "termination", "oxidation"):
-            for group_value in sorted({row[field] for row in engine_rows}):
-                selected = {row["system_id"] for row in engine_rows if row[field] == group_value}
+        for field in group_fields:
+            for group_value in sorted({str(row[field]) for row in engine_rows}, key=_natural_key):
+                selected = {row["system_id"] for row in engine_rows if str(row[field]) == group_value}
                 entries = []
                 for index, system in enumerate(systems):
                     if system["system_id"] not in selected:
@@ -1505,68 +1856,106 @@ def finalize_comparison(
     _write_csv(output / "metrics_overall.csv", overall_rows)
     _write_csv(output / "metrics_by_group.csv", group_rows)
     _write_csv(output / "uncertainty_calibration.csv", uncertainty_rows)
+    _write_csv(output / "matched_frames.csv", frame_rows)
+    _write_csv(output / "matched_frames_members.csv", member_rows)
     _write_svg(output / "comparison.svg", overall_rows, deepmd_display=deepmd_display)
     heatmaps = _write_force_heatmaps(output, system_rows, deepmd_display=deepmd_display)
-    publication_rows = _publication_summary_rows(system_rows)
-    _write_csv(output / "publication_rmse_by_group.csv", publication_rows)
-    publication_figures = _write_publication_rmse_figure(
-        output, publication_rows, deepmd_display=deepmd_display
+
+    outputs: dict[str, Any] = {}
+    views_skipped: dict[str, str] = {}
+    views = (
+        ("publication", _publication_summary_rows, "physical_group", PUBLICATION_GROUP_ORDER,
+         "publication_rmse_summary", "publication_rmse", 4.0, "publication_rmse_by_group.csv"),
+        ("temperature", _temperature_summary_rows, "temperature_group", TEMPERATURE_GROUP_ORDER,
+         "temperature_rmse_summary", "temperature_rmse", 2.6, "temperature_rmse_by_group.csv"),
+        ("oxidation", _oxidation_summary_rows, "oxidation_group", OXIDATION_GROUP_ORDER,
+         "oxidation_rmse_summary", "oxidation_rmse", 3.6, "oxidation_rmse_by_group.csv"),
     )
-    temperature_rows = _temperature_summary_rows(system_rows)
-    _write_csv(output / "temperature_rmse_by_group.csv", temperature_rows)
-    temperature_figures = _write_publication_rmse_figure(
-        output,
-        temperature_rows,
-        group_key="temperature_group",
-        group_order=TEMPERATURE_GROUP_ORDER,
-        path_stem="temperature_rmse_summary",
-        output_key="temperature_rmse",
-        figure_height=2.6,
-        deepmd_display=deepmd_display,
+    uninformative_oxidation = all(
+        system["heritage"] == "interface" and system["oxidation"] == "0" for system in systems
     )
-    oxidation_rows = _oxidation_summary_rows(system_rows)
-    _write_csv(output / "oxidation_rmse_by_group.csv", oxidation_rows)
-    oxidation_figures = _write_publication_rmse_figure(
-        output,
-        oxidation_rows,
-        group_key="oxidation_group",
-        group_order=OXIDATION_GROUP_ORDER,
-        path_stem="oxidation_rmse_summary",
-        output_key="oxidation_rmse",
-        figure_height=3.6,
-        deepmd_display=deepmd_display,
-    )
+    for name, builder, group_key, order, stem, key, height, csv_name in views:
+        if name == "oxidation" and uninformative_oxidation:
+            views_skipped[name] = "no system carries an oxidation (O_x) or bulk coordinate"
+            continue
+        try:
+            summary_rows = builder(system_rows)
+        except SafetyError as exc:
+            views_skipped[name] = f"chemistry-specific grouping does not apply: {exc}"
+            continue
+        _write_csv(output / csv_name, summary_rows)
+        outputs[f"{name}_by_group"] = str(output / csv_name)
+        figures = _write_publication_rmse_figure(
+            output,
+            summary_rows,
+            group_key=group_key,
+            group_order=order,
+            path_stem=stem,
+            output_key=key,
+            figure_height=height,
+            deepmd_display=deepmd_display,
+        )
+        outputs.update({figure: str(path) for figure, path in figures.items()})
+    for field in ("ligand", "coverage_pct", "stage"):
+        if field not in group_fields:
+            continue
+        summary_rows = _pooled_summary_rows(
+            system_rows,
+            group_key=f"{field}_group",
+            group_order=("Overall",),
+            group_for=lambda row, field=field: f"{field}={row.get(field, 'NA')}",
+        )
+        _write_csv(output / f"{field}_rmse_by_group.csv", summary_rows)
+        outputs[f"{field}_by_group"] = str(output / f"{field}_rmse_by_group.csv")
+
     headline = [
         row
         for row in overall_rows
         if row["model"] == "ensemble_mean" and row["averaging"] == "micro"
     ]
-    engine_label = {"MACE": "MACE", "DPA2": deepmd_display}
+    member_range: dict[str, tuple[float, float]] = {}
+    for engine in engines:
+        values = [
+            float(row["force_rmse_mev_per_angstrom"])
+            for row in overall_rows
+            if row["engine"] == engine and row["model"] != "ensemble_mean" and row["averaging"] == "micro"
+        ]
+        member_range[engine] = (min(values), max(values))
+    title_names = [display[engine] for engine in engines]
     lines = [
-        f"# Matched-frame MACE versus {deepmd_display} audit",
+        f"# Matched-frame {' versus '.join(title_names)} audit",
         "",
         "**Scope:** in-distribution interpolation on identical synchronized test frames.",
         "",
-        "| Engine | E RMSE (meV/atom) | Centered E RMSE | F RMSE (meV/A) | Relative F RMSE (%) |",
-        "|---|---:|---:|---:|---:|",
+        "| Engine | E RMSE (meV/atom) | Centered E RMSE | F RMSE (meV/A) | Relative F RMSE (%) | Member F RMSE range |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
     for row in headline:
+        low, high = member_range[row["engine"]]
         lines.append(
-            f'| {engine_label.get(row["engine"], row["engine"])} | '
+            f'| {display.get(row["engine"], row["engine"])} | '
             f'{row["energy_rmse_mev_per_atom"]:.4f} | '
             f'{row["energy_centered_rmse_mev_per_atom"]:.4f} | '
             f'{row["force_rmse_mev_per_angstrom"]:.4f} | '
-            f'{row["force_relative_rmse_percent"]:.3f} |'
+            f'{row["force_relative_rmse_percent"]:.3f} | '
+            f"{low:.2f}–{high:.2f} |"
         )
     lines.extend(
         [
             "",
             "Micro metrics weight every observation equally; macro metrics weight every trajectory equally.",
+            f"Energy error normalization: {ENERGY_NORMALIZATION}",
+            "Forces are raw predictions (constraints never applied) against raw DFT forces, all atoms.",
             "Committee spread remains a heuristic until calibrated; see uncertainty_calibration.csv.",
-            "Virials are excluded because this MACE committee was not trained on virials.",
+            f"Stress: {STRESS_POLICY}.",
+            "Per-frame values for every engine are in matched_frames.csv (ensemble) and "
+            "matched_frames_members.csv (every member).",
             "Use an independent trajectory or physical-regime challenge set for transferability claims.",
         ]
     )
+    if views_skipped:
+        lines.append("")
+        lines.extend(f"View `{name}` skipped: {reason}." for name, reason in views_skipped.items())
     (output / "comparison.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     payload = {
         "schema_version": 1,
@@ -1574,23 +1963,26 @@ def finalize_comparison(
         "benchmark_scope": "in-distribution interpolation",
         "mace_inference_dtype": "float32",
         "deepmd_architecture": arch,
+        "engines": engines,
+        "engine_display": display,
         "validation": manifest["validation"],
         "deepmd_reference_max_absolute_delta": ref_delta,
+        "energy_normalization": ENERGY_NORMALIZATION,
+        "force_convention": "raw predicted vs raw DFT forces; constraints never applied",
+        "stress_comparison": STRESS_POLICY,
         "headline": headline,
+        "views_skipped": views_skipped,
         "outputs": {
             "by_system": str(output / "metrics_by_system.csv"),
             "overall": str(output / "metrics_overall.csv"),
             "by_group": str(output / "metrics_by_group.csv"),
             "uncertainty": str(output / "uncertainty_calibration.csv"),
-            "publication_by_group": str(output / "publication_rmse_by_group.csv"),
-            "temperature_by_group": str(output / "temperature_rmse_by_group.csv"),
-            "oxidation_by_group": str(output / "oxidation_rmse_by_group.csv"),
+            "matched_frames": str(output / "matched_frames.csv"),
+            "matched_frames_members": str(output / "matched_frames_members.csv"),
             "markdown": str(output / "comparison.md"),
             "svg": str(output / "comparison.svg"),
+            **outputs,
             **{name: str(path) for name, path in heatmaps.items()},
-            **{name: str(path) for name, path in publication_figures.items()},
-            **{name: str(path) for name, path in temperature_figures.items()},
-            **{name: str(path) for name, path in oxidation_figures.items()},
         },
     }
     _write_json(output / "comparison.json", payload)
@@ -1609,9 +2001,14 @@ _COMBINE_VIEWS = (
 
 
 def _infer_engine(label: str) -> str:
-    """A run label naming a MACE committee contributes its MACE rows, else DPA2."""
+    """A run label naming a MACE (or NequIP) committee contributes those rows, else DPA2."""
 
-    return "MACE" if label.lower().replace("-", "_").startswith("mace") else "DPA2"
+    lowered = label.lower().replace("-", "_")
+    if lowered.startswith("mace"):
+        return "MACE"
+    if lowered.startswith("nequip"):
+        return "NEQUIP"
+    return "DPA2"
 
 
 def parse_combine_entry(item: str) -> tuple[str, str, str]:
@@ -1623,9 +2020,15 @@ def parse_combine_entry(item: str) -> tuple[str, str, str]:
     label, _, engine_raw = spec.partition(":")
     label = label.strip()
     engine = engine_raw.strip().upper().replace("-", "").replace("_", "") or _infer_engine(label)
-    engine = {"MACE": "MACE", "DPA2": "DPA2", "DPA": "DPA2", "DEEPMD": "DPA2"}.get(engine, engine)
-    if engine not in {"MACE", "DPA2"}:
-        raise SafetyError(f"--run engine must be MACE or DPA2; got {engine_raw!r}")
+    engine = {
+        "MACE": "MACE",
+        "DPA2": "DPA2",
+        "DPA": "DPA2",
+        "DEEPMD": "DPA2",
+        "NEQUIP": "NEQUIP",
+    }.get(engine, engine)
+    if engine not in {"MACE", "DPA2", "NEQUIP"}:
+        raise SafetyError(f"--run engine must be MACE, DPA2 or NEQUIP; got {engine_raw!r}")
     return label, engine, directory.strip()
 
 
@@ -1741,6 +2144,11 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument(
                 "--deepmd-arch", default="dpa2", choices=sorted(DEEPMD_DISPLAY)
             )
+            command.add_argument("--backends", nargs="+", choices=sorted(BACKEND_ENGINE))
+            command.add_argument("--nequip-root")
+            command.add_argument("--nequip-seeds", nargs="+", type=int)
+            command.add_argument("--profile", help="Scheduler profile YAML for the NequIP launcher")
+            command.add_argument("--nequip-profile", default="nequip_gpu")
             command.add_argument("--force", action="store_true")
     combine = commands.add_parser(
         "combine",
@@ -1753,7 +2161,7 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         metavar="LABEL[:ENGINE]=DIR",
         help="a finalized mlip-compare output dir and the family label for it; "
-        "ENGINE (MACE|DPA2) defaults to MACE when LABEL starts with 'mace', else DPA2",
+        "ENGINE (MACE|DPA2|NEQUIP) defaults from the LABEL prefix (mace*, nequip*, else DPA2)",
     )
     members = combine.add_mutually_exclusive_group()
     members.add_argument("--members", action="store_true", default=None)
@@ -1775,6 +2183,11 @@ def main(argv: list[str] | None = None) -> int:
             seeds=tuple(args.seeds),
             deepmd_arch=args.deepmd_arch,
             force=args.force,
+            backends=tuple(args.backends) if args.backends else None,
+            nequip_models_root=args.nequip_root,
+            nequip_seeds=tuple(args.nequip_seeds) if args.nequip_seeds else None,
+            profile_path=args.profile,
+            nequip_profile=args.nequip_profile,
         )
     elif args.command == "status":
         payload = comparison_status(

@@ -105,6 +105,26 @@ models:
     num_scalar_features: 64
     num_tensor_features: 32
     compile_device: cuda
+  # NequIP message-passing GNN committee (`iface train nequip`). Distinct from
+  # Allegro above. Reads the same canonical dataset/split as MACE and DeePMD.
+  nequip:
+    enabled: false
+    profile: nequip_gpu            # nequip_cpu for CPU-only debugging
+    device: cuda                   # cuda | cpu (must match the profile's GPU request)
+    dataset: datasets/canonical    # canonical dataset (manifest.json + split hashes)
+    seeds: [11, 23, 37, 53]
+    max_concurrent: 2
+    model_dtype: float32           # float32 | float64
+    # r_max: 5.0                   # REQUIRED when enabled: no silent cutoff default
+    # Omitted hyperparameters fall back to documented starting points and are
+    # listed under defaults_applied in models/nequip/training_manifest.json:
+    # num_layers: 4
+    # l_max: 1
+    # num_features: 32
+    # batch_size: 4
+    # max_epochs: 500
+    # learning_rate: 0.005
+    # max_time: "02:23:00:00"      # end cleanly before the 72 h walltime; resume with last.ckpt
 
 exploration:
   temperatures: [300, 450, 600]

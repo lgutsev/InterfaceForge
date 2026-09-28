@@ -1,7 +1,14 @@
-# Matched MACE versus DeePMD audit
+# Matched-frame MLIP comparison (MACE, DeePMD/DPA, NequIP)
 
-This workflow compares existing MACE and DPA-2 committees on the exact same
-canonical test configurations. It does not retrain either model.
+This workflow compares existing MACE, DeePMD/DPA and (optionally) NequIP
+committees on the exact same canonical test configurations. It does not
+retrain any model. The DeePMD test systems define the matched frames; every
+backend is then evaluated on identical `inputs/system_XXX.extxyz` files whose
+identity, geometry and labels were proven equal to them.
+
+> **Verification note:** the MACE/DPA-2 path is automated-test-only (see
+> [Verification and maturity](verification.md)); the NequIP path is
+> automated-test-only as well and has not been run with a real NequIP model.
 
 Install the reporting dependencies before finalization so the audit can render
 the per-system committee heatmaps:
@@ -113,6 +120,47 @@ iface mlip-compare finalize --output-root audit/mlip_compare_mace_ft \
 
 MACE inference re-runs per architecture (cheap at float32).
 
+### Adding NequIP, or choosing the backends
+
+```bash
+iface mlip-compare prepare --nequip-root models/nequip --force        # MACE + DeePMD + NequIP
+iface mlip-compare prepare --backends mace nequip --nequip-root models/nequip \
+    --output-root audit/mlip_compare_mace_nequip --force                # no DeePMD evaluation needed
+sbatch audit/mlip_compare/run_nequip_evaluate.slurm
+iface mlip-compare status  --deepmd-eval-root models/deepmd/evaluation/dpa2/job_<jobid>
+iface mlip-compare finalize --deepmd-eval-root models/deepmd/evaluation/dpa2/job_<jobid>
+```
+
+`--backends` (default `mace deepmd`, plus `nequip` whenever `--nequip-root` is
+given) selects which committees are evaluated on the matched frames; `status`
+and `finalize` wait only for the selected ones. NequIP members are taken from an
+`iface train nequip` root (`seed_<seed>/final/model.nequip.pt2`, every requested
+member must be compiled; `--nequip-seeds` picks a subset) and labelled
+`model_000..` in seed order. `run_nequip_evaluate.slurm` is rendered from the
+campaign scheduler profile (`--nequip-profile`, default `nequip_gpu`): no
+account, partition, path or environment is hard-coded in it.
+
+Force convention: every generated evaluator uses
+`atoms.get_forces(apply_constraint=False)`. Frames read back from extxyz carry
+`move_mask` as ASE `FixAtoms`; with the default `get_forces()` ASE would zero
+the *predicted* forces on frozen atoms while the DFT reference keeps raw forces
+(DeePMD's `dp test` compares raw forces). The MACE evaluator used this default
+before this change, so earlier MACE numbers are affected **only** for test
+frames that had frozen atoms (every NiO slab has a frozen bottom plane);
+re-run MACE inference for such campaigns before comparing.
+
+Energy normalisation for every backend: `(E_pred − E_DFT) / N_atoms` in
+meV/atom on total energies against the canonical `REF_energy` labels shared by
+all backends, with no per-backend reference shift; `centered` additionally
+removes each system's mean offset. Stress/virials are **not** compared: the
+canonical labels exclude virials and not every backend was trained on them.
+
+Chemistry-specific views skip cleanly instead of failing: the TiN/SiN
+`publication` bins and the `oxidation` view are skipped (and listed under
+`views_skipped`) for NiO data, while temperature (now including 600 K and any
+other exported temperature), ligand, coverage and stage breakdowns are written
+from the canonical dataset metadata.
+
 ### `combine`: one figure for every family
 
 `iface mlip-compare combine` overlays the pooled per-group RMSE CSVs from
@@ -130,8 +178,9 @@ iface mlip-compare combine audit/mlip_compare_all \
 ```
 
 Each `--run LABEL[:ENGINE]=DIR` names a finalized output directory and the
-family label to draw it as. `ENGINE` is `MACE` or `DPA2` and defaults to `MACE`
-when the label starts with `mace` (case-insensitive), else `DPA2` — so a MACE
+family label to draw it as. `ENGINE` is `MACE`, `DPA2` or `NEQUIP` and defaults to
+`MACE` when the label starts with `mace`, `NEQUIP` when it starts with `nequip`
+(case-insensitive), else `DPA2` — so a MACE
 row is pulled from any run and each DeePMD arch from its own run. Output is
 `audit/mlip_compare_all/{publication,temperature,oxidation}_rmse_summary.{png,svg,pdf}`
 plus the merged CSVs and `combined_manifest.json`. Views whose CSV is missing
@@ -164,10 +213,19 @@ Finalization independently checks that the reference columns written by
 - `oxidation_rmse_summary.{png,svg,pdf}`: same encoding again, resolving whether
   accuracy is coverage-dependent (e.g. worse at full oxidation) for either
   engine;
-- `force_rmse_heatmap_mace.{png,svg}` and
-  `force_rmse_heatmap_dpa2.{png,svg}`: annotated member-by-system heatmaps;
-- `force_rmse_heatmaps.{png,svg}`: both committees side by side with identical
-  system order and one shared color scale, for a visually honest comparison.
+- `force_rmse_heatmap_mace.{png,svg}`, `force_rmse_heatmap_dpa2.{png,svg}`
+  and (with NequIP) `force_rmse_heatmap_nequip.{png,svg}`: annotated
+  member-by-system heatmaps;
+- `force_rmse_heatmaps.{png,svg}`: every committee side by side with identical
+  system order and one shared color scale, for a visually honest comparison;
+- `matched_frames.csv`: one row per matched frame (`frame_id`, system,
+  `source_frame`, DFT energy per atom) with, per backend, the committee-mean
+  energy, energy error, energy spread, force RMSE and force disagreement — the
+  `frame | DFT | MACE | DPA | NequIP` table;
+- `matched_frames_members.csv`: the same frames for every individual member,
+  so raw per-frame statistics and plots can be made independently;
+- `ligand_rmse_by_group.csv`, `coverage_pct_rmse_by_group.csv`,
+  `stage_rmse_by_group.csv` when the canonical frames carry that metadata.
 
 The heatmaps report force-component RMSE in eV/Å, matching the conventional
 unit used in MACE and DeePMD evaluation figures. Their underlying CSV values
