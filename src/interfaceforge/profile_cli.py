@@ -19,7 +19,6 @@ from .cli import build_parser
 from .errors import InterfaceForgeError, SafetyError
 from .vasp import prepare_step1_series
 
-
 STEP1_PROFILES: dict[str, dict[str, Any]] = {
     "nio": {
         "description": (
