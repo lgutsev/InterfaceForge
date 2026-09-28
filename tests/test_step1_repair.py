@@ -159,7 +159,6 @@ class Step1RepairTests(unittest.TestCase):
     def test_completed_unstable_run_is_repairable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run = _run(Path(tmp))
-            incar = parse_incar(run / "INCAR")
             (run / "INCAR").write_text(
                 (run / "INCAR").read_text(encoding="utf-8").replace("NSW=400", "NSW=22"),
                 encoding="utf-8",

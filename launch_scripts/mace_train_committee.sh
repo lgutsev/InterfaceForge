@@ -32,6 +32,27 @@ fi
 MODEL_PREFIX="${MACE_MODEL_PREFIX:-SiN_TiN_TiO_periodic_mace}"
 ENERGY_KEY="${MACE_ENERGY_KEY:-REF_energy}"
 FORCES_KEY="${MACE_FORCES_KEY:-REF_forces}"
+LOSS="${MACE_LOSS:-weighted}"
+VIRIALS_KEY="${MACE_VIRIALS_KEY:-}"
+VIRIALS_WEIGHT="${MACE_VIRIALS_WEIGHT:-1.0}"
+STRESS_KEY="${MACE_STRESS_KEY:-}"
+STRESS_WEIGHT="${MACE_STRESS_WEIGHT:-1.0}"
+ENERGY_WEIGHT="${MACE_ENERGY_WEIGHT:-}"
+FORCES_WEIGHT="${MACE_FORCES_WEIGHT:-}"
+ERROR_TABLE="${MACE_ERROR_TABLE:-PerAtomRMSE}"
+
+if [[ -n "$VIRIALS_KEY" && -n "$STRESS_KEY" ]]; then
+    echo "ERROR: set only one of MACE_VIRIALS_KEY or MACE_STRESS_KEY." >&2
+    exit 1
+fi
+if [[ -n "$VIRIALS_KEY" && "$LOSS" != "virials" ]]; then
+    echo "ERROR: MACE_VIRIALS_KEY requires MACE_LOSS=virials so the label enters the loss." >&2
+    exit 1
+fi
+if [[ -n "$STRESS_KEY" && "$LOSS" != "stress" ]]; then
+    echo "ERROR: MACE_STRESS_KEY requires MACE_LOSS=stress so the label enters the loss." >&2
+    exit 1
+fi
 
 for required_value in MODEL_PREFIX ENERGY_KEY FORCES_KEY; do
     if [[ -z "${!required_value}" ]]; then
@@ -98,15 +119,6 @@ MODEL_DIR="$RUN_DIR/mace_model"
 CHECKPOINTS_DIR="$RUN_DIR/checkpoints"
 RESULTS_DIR="$RUN_DIR/results"
 LOG_DIR="$RUN_DIR/logs"
-
-if [[ "${MACE_PREFLIGHT_ONLY:-False}" == "True" ]]; then
-    echo "MACE committee preflight succeeded"
-    echo "  submit dir:  $SUBMIT_DIR"
-    echo "  dataset dir: $DATASET_DIR"
-    echo "  output root: $OUTPUT_ROOT"
-    echo "  run dir:     $RUN_DIR"
-    exit 0
-fi
 
 mkdir -p \
     "$MODEL_DIR" \
@@ -205,6 +217,7 @@ echo "Checking first-frame keys..."
 DATASET_FILES="$TRAIN_FILE:$VALID_FILE:$TEST_FILE" \
 ENERGY_KEY="$ENERGY_KEY" \
 FORCES_KEY="$FORCES_KEY" \
+TENSOR_KEY="${VIRIALS_KEY:-$STRESS_KEY}" \
 python - <<'PY'
 import os
 
@@ -213,6 +226,7 @@ from ase.io import read
 
 energy_key = os.environ["ENERGY_KEY"]
 forces_key = os.environ["FORCES_KEY"]
+tensor_key = os.environ.get("TENSOR_KEY", "")
 
 for fname in os.environ["DATASET_FILES"].split(os.pathsep):
     atoms = read(fname, index=0)
@@ -247,6 +261,19 @@ for fname in os.environ["DATASET_FILES"].split(os.pathsep):
 
     print("  energy:     ", energy.item())
     print("  forces:     ", forces.shape)
+
+    if tensor_key:
+        if tensor_key not in atoms.info:
+            raise RuntimeError(
+                f"{fname}: missing tensor label {tensor_key!r} in atoms.info"
+            )
+        tensor = np.asarray(atoms.info[tensor_key], dtype=float)
+        if tensor.size not in {6, 9} or not np.isfinite(tensor).all():
+            raise RuntimeError(
+                f"{fname}: {tensor_key!r} must contain 6 or 9 finite tensor "
+                f"components; got shape {tensor.shape}"
+            )
+        print("  tensor:     ", tensor_key, tensor.shape)
 PY
 
 # Conservative committee settings for heterogeneous bulk/surface/interface
@@ -271,6 +298,33 @@ if grep -q -- "--keep_checkpoints" <<< "$HELP_TXT"; then
     EXTRA_ARGS+=(--keep_checkpoints)
 fi
 
+LABEL_ARGS=()
+if [[ -n "$VIRIALS_KEY" ]]; then
+    grep -q -- "--virials_key" <<< "$HELP_TXT" || {
+        echo "ERROR: installed MACE lacks --virials_key; refusing an E/F-only fallback." >&2
+        exit 2
+    }
+    grep -q -- "--virials_weight" <<< "$HELP_TXT" || {
+        echo "ERROR: installed MACE lacks --virials_weight; refusing an E/F-only fallback." >&2
+        exit 2
+    }
+    LABEL_ARGS+=(--virials_key "$VIRIALS_KEY" --virials_weight "$VIRIALS_WEIGHT")
+elif [[ -n "$STRESS_KEY" ]]; then
+    grep -q -- "--stress_key" <<< "$HELP_TXT" || {
+        echo "ERROR: installed MACE lacks --stress_key; refusing an E/F-only fallback." >&2
+        exit 2
+    }
+    grep -q -- "--stress_weight" <<< "$HELP_TXT" || {
+        echo "ERROR: installed MACE lacks --stress_weight; refusing an E/F-only fallback." >&2
+        exit 2
+    }
+    LABEL_ARGS+=(--stress_key "$STRESS_KEY" --stress_weight "$STRESS_WEIGHT")
+fi
+
+WEIGHT_ARGS=()
+[[ -n "$ENERGY_WEIGHT" ]] && WEIGHT_ARGS+=(--energy_weight "$ENERGY_WEIGHT")
+[[ -n "$FORCES_WEIGHT" ]] && WEIGHT_ARGS+=(--forces_weight "$FORCES_WEIGHT")
+
 # Support both current and older MACE names for the second stage.
 STAGE_TWO_ARGS=()
 
@@ -284,6 +338,22 @@ elif grep -q -- "--swa" <<< "$HELP_TXT"; then
         --swa
         --start_swa "$START_STAGE_TWO"
     )
+fi
+
+if [[ "${MACE_PREFLIGHT_ONLY:-False}" == "True" ]]; then
+    echo "MACE committee preflight succeeded"
+    echo "  submit dir:      $SUBMIT_DIR"
+    echo "  dataset dir:     $DATASET_DIR"
+    echo "  output root:     $OUTPUT_ROOT"
+    echo "  run dir:         $RUN_DIR"
+    echo "  loss:            $LOSS"
+    echo "  virials key:     ${VIRIALS_KEY:-disabled}"
+    echo "  stress key:      ${STRESS_KEY:-disabled}"
+    echo "  energy weight:   ${ENERGY_WEIGHT:-MACE default}"
+    echo "  forces weight:   ${FORCES_WEIGHT:-MACE default}"
+    echo "  virials weight:  $VIRIALS_WEIGHT"
+    echo "  stress weight:   $STRESS_WEIGHT"
+    exit 0
 fi
 
 export MASTER_ADDR
@@ -358,8 +428,8 @@ srun --ntasks=2 --kill-on-bad-exit=1 \
     --valid_batch_size "$VALID_BATCH_SIZE" \
     --max_num_epochs "$MAX_EPOCHS" \
     --patience "$PATIENCE" \
-    --loss "weighted" \
-    --error_table "PerAtomRMSE" \
+    --loss "$LOSS" \
+    --error_table "$ERROR_TABLE" \
     --default_dtype "float32" \
     --ema \
     --ema_decay 0.99 \
@@ -367,6 +437,8 @@ srun --ntasks=2 --kill-on-bad-exit=1 \
     --device cuda \
     --distributed \
     --restart_latest \
+    "${LABEL_ARGS[@]}" \
+    "${WEIGHT_ARGS[@]}" \
     "${STAGE_TWO_ARGS[@]}" \
     "${EXTRA_ARGS[@]}"
 
