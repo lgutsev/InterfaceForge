@@ -59,6 +59,24 @@ set +u
 source /home/lgutsev/miniforge3/etc/profile.d/conda.sh
 conda activate "$UMA_ENV"
 set -u
+hash -r
+
+UMA_PYTHON="$UMA_ENV/bin/python"
+[[ -x "$UMA_PYTHON" ]] || { echo "Missing UMA Python: $UMA_PYTHON" >&2; exit 2; }
+
+# The login environment carries old compiler/MPI runtime paths. Make the
+# Conda C++ runtime win so FAIR-Chem/ASE load the matching libstdc++.
+export LD_LIBRARY_PATH="$UMA_ENV/lib:${LD_LIBRARY_PATH:-}"
+
+# Keep runtime caches/temp files off the small home filesystem.
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/project/lgutsev/cache/pip}"
+export HF_HOME="${HF_HOME:-/project/lgutsev/cache/huggingface}"
+export TORCH_HOME="${TORCH_HOME:-/project/lgutsev/cache/torch}"
+export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-/project/lgutsev/cache/torch_extensions}"
+export NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-/project/lgutsev/cache/numba}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/project/lgutsev/cache/xdg}"
+export TMPDIR="${TMPDIR:-/project/lgutsev/tmp}"
+mkdir -p "$PIP_CACHE_DIR" "$HF_HOME" "$TORCH_HOME" "$TORCH_EXTENSIONS_DIR"     "$NUMBA_CACHE_DIR" "$XDG_CACHE_HOME" "$TMPDIR"
 
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export MKL_NUM_THREADS="$OMP_NUM_THREADS"
@@ -80,7 +98,7 @@ echo "  stride:     $UMA_STRIDE"
 echo "  HF_HOME:    $HF_HOME"
 
 nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader
-python - <<'PY'
+"$UMA_PYTHON" - <<'PY'
 import sys
 import torch
 import fairchem
@@ -113,4 +131,4 @@ if [[ "$UMA_RESUME" == "1" ]]; then
     ARGS+=(--resume)
 fi
 
-python "$SCRIPT" "${ARGS[@]}"
+"$UMA_PYTHON" "$SCRIPT" "${ARGS[@]}"
