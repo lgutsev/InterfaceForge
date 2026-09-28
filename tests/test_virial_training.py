@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,8 @@ from interfaceforge.training import (
 ROOT = Path(__file__).resolve().parents[1]
 MACE_FINETUNE = ROOT / "launch_scripts" / "mace_finetune_committee.sh"
 MACE_TRAIN = ROOT / "launch_scripts" / "mace_train_committee.sh"
+MACE_VIRIAL_A1 = ROOT / "launch_scripts" / "mace_virial_finetune.sbatch"
+DEEPMD_VIRIAL_A1 = ROOT / "launch_scripts" / "deepmd_virial_finetune.sbatch"
 
 
 def _make_deepmd_system(root: Path, split: str, *, with_virial: bool) -> None:
@@ -52,6 +55,27 @@ class VirialTrainingTests(unittest.TestCase):
         self.assertIn('--virials_key "$VIRIALS_KEY"', script)
         self.assertIn('--loss "$LOSS"', script)
         self.assertNotIn('--loss "weighted"', script)
+
+    def test_mace_virial_a1_wrapper_is_isolated_and_uses_original_split(self) -> None:
+        script = MACE_VIRIAL_A1.read_text(encoding="utf-8")
+        self.assertIn('DATASET="$CAMP/models/mace_committee_520eV"', script)
+        self.assertIn('OUTPUT="$CAMP/models/mace_committee_520eV_$RUN_TAG"', script)
+        self.assertIn('MACE_LOSS="${MACE_LOSS:-virials}"', script)
+        self.assertIn('MACE_VIRIALS_KEY="${MACE_VIRIALS_KEY:-REF_virial}"', script)
+        self.assertIn('MACE_USE_STAGE_TWO="${MACE_USE_STAGE_TWO:-False}"', script)
+        self.assertIn('MACE_LR="${MACE_LR:-0.001}"', script)
+        self.assertIn('MACE_MAX_EPOCHS="${MACE_MAX_EPOCHS:-30}"', script)
+
+    def test_virial_a1_slurm_wrappers_have_valid_bash_syntax(self) -> None:
+        for launcher in (MACE_VIRIAL_A1, DEEPMD_VIRIAL_A1):
+            with self.subTest(launcher=launcher.name):
+                result = subprocess.run(
+                    ["bash", "-n", str(launcher)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_deepmd_input_accepts_virial_preferences(self) -> None:
         payload = deepmd_input(
