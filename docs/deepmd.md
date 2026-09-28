@@ -104,10 +104,12 @@ frozen model with `dp test`, committee deviation, and the exact downstream MD
 engine.
 
 For PyTorch, audit jobs use `model.ckpt.pt` directly. This avoids making model
-quality assessment depend on TorchScript export compatibility. Export remains
-a separate deployment gate: a failed or unreadable `frozen_model.pth` does not
-invalidate a working training checkpoint, but that checkpoint is not yet
-approved for LAMMPS. TensorFlow audits continue to use the frozen model.
+quality assessment depend on deployment export compatibility. Export remains
+a separate deployment gate: ordinary PyTorch DPA models freeze to
+`frozen_model.pth`, while DeePMD 3.2 DPA-4 uses the AOTInductor
+`frozen_model.pt2` archive. A failed or unreadable export does not invalidate a
+working training checkpoint, but that checkpoint is not yet approved for
+LAMMPS. TensorFlow audits continue to use the frozen model.
 
 The evaluation directory contains:
 
@@ -209,6 +211,9 @@ iface package huggingface stored_models/sintin_dpa2_v1 hf/sintin_dpa2_v1 \
     --metrics models/deepmd/evaluation/dpa2/job_<jobid>/rmse_overall.csv --zip
 ```
 
-Each `model_NNN/` must contain a non-empty `frozen_model.pth` / `.pb`; seeds,
-architecture, backend and `type_map` are recovered from `ensemble_manifest.json`.
-InterfaceForge never pushes to the Hub. See [the packaging guide](packaging.md).
+Each `model_NNN/` must contain a non-empty deployable model:
+`frozen_model.pth` for ordinary PyTorch, `frozen_model.pt2` for DeePMD 3.2
+DPA-4, or `frozen_model.pb` for TensorFlow. Seeds, architecture, backend and
+`type_map` are recovered from `ensemble_manifest.json`. InterfaceForge
+preserves the deployment extension in the stored committee bundle and never
+pushes to the Hub. See [the packaging guide](packaging.md).

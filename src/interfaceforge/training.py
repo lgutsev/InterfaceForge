@@ -641,13 +641,24 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
     restart_marker = "model.ckpt.index" if backend == "tensorflow" else checkpoint
     freeze_checkpoint = "." if backend == "tensorflow" else checkpoint
     evaluation_model = frozen_name if backend == "tensorflow" else checkpoint
+    frozen_model_names = {
+        architecture: (
+            "frozen_model.pt2"
+            if backend != "tensorflow" and architecture == "dpa4"
+            else frozen_name
+        )
+        for architecture in architectures
+    }
     if backend == "tensorflow":
         freeze_command = f"dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name}"
     else:
         freeze_command = (
             f'if [[ "$ARCH" == "dpa4" ]]; then '
-            f"dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name} "
+            f"dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o frozen_model "
             f'|| {{ echo "ERROR: DPA-4 freeze failed; deployment is not approved."; exit 3; }}; '
+            '[[ -s frozen_model.pt2 ]] || { '
+            'echo "ERROR: DPA-4 freeze did not produce frozen_model.pt2; deployment is not approved."; '
+            'exit 3; }; '
             f"else dp_exec {backend_flag} freeze -c {freeze_checkpoint} -o {frozen_name} "
             f'|| echo "WARNING: freeze failed; {checkpoint} remains valid for auditing, '
             'but deployment is not approved."; fi'
@@ -896,6 +907,7 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
         ],
         "test_systems": str(test_systems_path),
         "frozen_model_name": frozen_name,
+        "frozen_model_names": frozen_model_names,
         "evaluation_model_name": evaluation_model,
         "evaluation_reports": ["rmse_by_system.csv", "rmse_overall.csv", "rmse_audit.json"],
         "evaluation_audit_script": str(audit_script),

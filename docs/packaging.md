@@ -159,7 +159,9 @@ e.g. to backfill extxyz for a DeePMD-only export.
 
 `iface committee collect` now takes `--engine deepmd`. Point it at a
 `models/deepmd/<arch>` directory containing the trained `model_NNN/` runs; each
-member must have a non-empty frozen model (`frozen_model.pth` / `.pb`), so run
+member must have a non-empty deployable model. Ordinary PyTorch models use
+`frozen_model.pth`, DeePMD 3.2 DPA-4 uses the AOTInductor
+`frozen_model.pt2` archive, and TensorFlow uses `frozen_model.pb`. Run
 `dp freeze` (or the generated `run_ensemble.slurm`, which freezes automatically)
 first.
 
@@ -169,12 +171,13 @@ iface committee collect models/deepmd/dpa2 stored_models/sintin_dpa2_v1 \
 iface committee verify stored_models/sintin_dpa2_v1
 ```
 
-The bundle has the same shape as a MACE bundle — `models/model_000.pth`, …,
-`manifest.json`, `checksums.sha256`, `committee-models.txt`, `README.md`, and a
-`.zip` — plus DeePMD provenance in the manifest (`architecture`, `backend`,
-`type_map`, `numb_steps`, `base_checkpoint` for `*_ft`, and each member's parsed
-`input.json`). Seeds are recovered from the sibling `ensemble_manifest.json`
-when it is present.
+The bundle has the same shape as a MACE bundle — `models/model_000.pth`, …
+(or `models/model_000.pt2` for DPA-4), `manifest.json`, `checksums.sha256`,
+`committee-models.txt`, `README.md`, and a `.zip` — plus DeePMD provenance in
+the manifest (`architecture`, `backend`, `type_map`, `numb_steps`,
+`base_checkpoint` for `*_ft`, each member's parsed `input.json`, and the
+frozen-model format). Seeds are recovered from the sibling
+`ensemble_manifest.json` when it is present.
 
 ## Hugging Face model repository
 
