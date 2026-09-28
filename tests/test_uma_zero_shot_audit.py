@@ -96,7 +96,7 @@ class UmaZeroShotAuditTests(unittest.TestCase):
             script,
         )
         self.assertIn(
-            'UMA_ENV="${UMA_ENV:-/project/lgutsev/env/uma}"', script
+            'UMA_ENV="${UMA_ENV:-/project/lgutsev/env/lgutsev_dev}"', script
         )
         self.assertIn("UMA_RESUME", script)
 
