@@ -55,6 +55,15 @@ DEFAULT_ELASTIC_SHEAR_STRAINS = (-0.01, -0.005, 0.005, 0.01)
 # --elastic-strain-check flags a diagonal C_ii that moves by more than this fraction between the two windows.
 ELASTIC_STRAIN_CHECK_TOL = 0.10
 VOIGT_DIAGONAL = ("C11", "C22", "C33", "C44", "C55", "C66")
+# Clamped-ion constants move the atoms affinely with the cell. That is exact only when no atom can relax. For
+# beta-Si3N4 it made C44/C66/G ~45 % too stiff and C12 too low in every model (UMA-s included), so "auto" (the
+# default) picks relaxed-ion unless symmetry proves the internal strain is zero.
+ELASTIC_ION_RELAXATIONS = ("auto", "relaxed", "clamped")
+# Force criterion for relaxing each deformed cell. The strain-induced forces are ~0.05-0.5 eV/A at 0.5-1 % strain.
+DEFAULT_ELASTIC_FMAX = 0.005
+# spglib distance tolerance (A) for the inversion-site test. It is kept tight, because a missed symmetry only
+# costs time (relaxed-ion is always correct), while a spurious one would give clamped-ion constants.
+ION_RELAXATION_SYMPREC = 1e-3
 
 _SCALARS = {
     "relax": ("energy_per_atom", "volume_per_atom", "a", "b", "c", "alpha", "beta", "gamma", "max_abs_final_stress"),
@@ -88,6 +97,9 @@ class PropertyConfig:
     elastic_shear_strains: tuple[float, ...] = DEFAULT_ELASTIC_SHEAR_STRAINS
     # Re-run elasticity with a second strain window and flag diagonal C_ii changes > ELASTIC_STRAIN_CHECK_TOL.
     elastic_strain_check: bool = False
+    elastic_ion_relaxation: str = "auto"
+    # Force criterion (eV/A) for the fixed-cell relaxation of each deformed structure (relaxed-ion only).
+    elastic_fmax: float = DEFAULT_ELASTIC_FMAX
 
     def __post_init__(self) -> None:
         if not self.properties:
@@ -117,6 +129,14 @@ class PropertyConfig:
             object.__setattr__(self, attribute, _elastic_strains(option, getattr(self, attribute)))
         if self.elastic_strain_check and "elasticity" not in self.properties:
             raise ConfigurationError("--elastic-strain-check needs --property elasticity")
+        if self.elastic_ion_relaxation not in ELASTIC_ION_RELAXATIONS:
+            raise ConfigurationError(
+                f"--elastic-ion-relaxation must be one of {', '.join(ELASTIC_ION_RELAXATIONS)}, "
+                f"not {self.elastic_ion_relaxation!r}"
+            )
+        if isinstance(self.elastic_fmax, bool) or not isinstance(self.elastic_fmax, (int, float)) \
+                or not (self.elastic_fmax > 0 and math.isfinite(self.elastic_fmax)):
+            raise ConfigurationError("--elastic-fmax must be a positive number of eV/A")
 
     @property
     def ordered(self) -> tuple[str, ...]:
@@ -270,6 +290,72 @@ def require_stress(atoms: Any, calculator: Any) -> None:
         raise SafetyError(f"{type(calculator).__name__} returned an unusable stress: {stress!r}")
 
 
+# ------------------------------------------------------- ion relaxation
+
+
+def _centrosymmetric_sites(atoms: Any, symprec: float) -> list[bool] | None:
+    """Per atom: does an inversion of the crystal fix the site? ``None`` if spglib is missing or finds nothing."""
+
+    try:
+        import spglib
+    except ImportError:
+        return None
+    cell = np.asarray(atoms.cell.array, dtype=float)
+    positions = np.asarray(atoms.get_scaled_positions(wrap=True), dtype=float)
+    try:
+        symmetry = spglib.get_symmetry((cell, positions, np.asarray(atoms.numbers)), symprec=symprec)
+    except Exception:  # noqa: BLE001 - any spglib failure means "unknown", which selects relaxed-ion
+        return None
+    if not symmetry:
+        return None
+    inversions = [translation
+                  for rotation, translation in zip(symmetry["rotations"], symmetry["translations"], strict=True)
+                  if np.array_equal(rotation, -np.eye(3, dtype=int))]
+    flags = []
+    for position in positions:
+        fixed = False
+        for translation in inversions:
+            delta = translation - 2.0 * position
+            delta -= np.round(delta)
+            if np.linalg.norm(delta @ cell) <= symprec:
+                fixed = True
+                break
+        flags.append(fixed)
+    return flags
+
+
+def select_ion_relaxation(requested: str, atoms: Any, *, symprec: float = ION_RELAXATION_SYMPREC) -> dict[str, Any]:
+    """Resolve ``--elastic-ion-relaxation`` for one (relaxed) structure.
+
+    The first-order internal strain (the force on an atom per unit homogeneous strain) is a polar rank-3 tensor. It
+    therefore vanishes on a site that is an inversion centre and is allowed on any other site. So clamped-ion and
+    relaxed-ion constants agree exactly only when every atom sits on an inversion centre (rock salt, CsCl, fcc,
+    bcc, cubic perovskite). ``auto`` picks clamped-ion only then, and relaxed-ion otherwise, including whenever the
+    symmetry cannot be determined. Examples of relaxed-ion cells are beta-Si3N4, wurtzite, zinc blende, diamond,
+    hcp and fluorite.
+    """
+
+    record: dict[str, Any] = {"requested": requested, "symprec_a": symprec}
+    if requested != "auto":
+        return {**record, "ion_relaxation": requested, "reason": "explicit --elastic-ion-relaxation"}
+    flags = _centrosymmetric_sites(atoms, symprec)
+    if flags is None:
+        return {**record, "ion_relaxation": "relaxed",
+                "reason": "site symmetry could not be determined (spglib unavailable or failed); relaxed-ion is "
+                          "always valid"}
+    free = [index for index, fixed in enumerate(flags) if not fixed]
+    record["non_centrosymmetric_sites"] = free
+    if free:
+        symbols = atoms.get_chemical_symbols()
+        species = sorted({symbols[index] for index in free})
+        return {**record, "ion_relaxation": "relaxed",
+                "reason": f"{len(free)} of {len(atoms)} atoms ({', '.join(species)}) are not on an inversion "
+                          "centre, so the ions can relax under strain"}
+    return {**record, "ion_relaxation": "clamped",
+            "reason": f"all {len(atoms)} atoms are on inversion centres: the internal strain vanishes by symmetry, "
+                      "so clamped-ion equals relaxed-ion"}
+
+
 # --------------------------------------------------------------- execution
 
 
@@ -341,6 +427,26 @@ def check_elastic_strains(result: dict[str, Any], reference: dict[str, Any]) -> 
     return [message]
 
 
+def check_deformed_relaxations(result: dict[str, Any]) -> list[str]:
+    """Warn when a relaxed-ion fit used deformed structures that did not reach the force criterion."""
+
+    deformed = result.get("deformed_relaxations")
+    if not isinstance(deformed, dict):
+        return []
+    if deformed.get("converged") is None:
+        message = f"elasticity: relaxed-ion deformed-structure convergence is unchecked ({deformed.get('reason')})"
+    elif deformed["converged"]:
+        return []
+    else:
+        message = (
+            f"elasticity: {deformed['n_structures'] - deformed['n_converged']} of {deformed['n_structures']} "
+            f"deformed structures did not relax to fmax={deformed['fmax']} eV/A within {deformed['max_steps']} "
+            f"steps (worst max|F|={deformed['max_force']:.3g} eV/A); the relaxed-ion constants are not reliable"
+        )
+    result.setdefault("warnings", []).append(message)
+    return [message]
+
+
 def _run_member(atoms: Any, member: Member, config: PropertyConfig, member_dir: Path, backend: Any) -> dict[str, Any]:
     record = dict(member.record)
     record.update({"label": member.label, "status": "failed", "error": None, "failed_property": None, "results": {},
@@ -382,13 +488,17 @@ def _run_member(atoms: Any, member: Member, config: PropertyConfig, member_dir: 
                                      n_points=config.eos_points, refit_volume_window=config.eos_refit_window)
                 record["warnings"].extend(check_eos(result))
             elif name == "elasticity":
-                result = backend.elasticity(equilibrium, calculator, fmax=config.fmax,
-                                            norm_strains=config.elastic_norm_strains,
-                                            shear_strains=config.elastic_shear_strains)
+                selection = select_ion_relaxation(config.elastic_ion_relaxation, equilibrium)
+                options = {"fmax": config.elastic_fmax, "ion_relaxation": selection["ion_relaxation"],
+                           "max_steps": config.max_steps, "optimizer": config.optimizer}
+                result = backend.elasticity(equilibrium, calculator, norm_strains=config.elastic_norm_strains,
+                                            shear_strains=config.elastic_shear_strains, **options)
+                result["ion_relaxation_selection"] = selection
+                record["warnings"].extend(check_deformed_relaxations(result))
                 if config.elastic_strain_check:
                     check_norm, check_shear = config.elastic_check_strains
-                    reference = backend.elasticity(equilibrium, calculator, fmax=config.fmax,
-                                                   norm_strains=check_norm, shear_strains=check_shear)
+                    reference = backend.elasticity(equilibrium, calculator, norm_strains=check_norm,
+                                                   shear_strains=check_shear, **options)
                     record["warnings"].extend(check_elastic_strains(result, reference))
             else:
                 result = backend.phonon(equilibrium, calculator, min_length=config.phonon_min_length,
@@ -469,11 +579,24 @@ def summarize(models: Sequence[dict[str, Any]], properties: Sequence[str]) -> di
             }
         if name == "elasticity" and results:
             conventions = {item["tensor_convention"] for item in results}
-            entry["elastic_tensor"] = (
-                _array_stats([item["elastic_tensor"] for item in results], "elastic tensor")
-                if len(conventions) == 1
-                else {"aggregated": False, "reason": f"tensor conventions differ: {sorted(conventions)}"}
-            )
+            treatments = [str(item.get("ion_relaxation")) for item in results]
+            entry["ion_relaxation"] = {treatment: treatments.count(treatment) for treatment in sorted(set(treatments))}
+            if len(conventions) != 1:
+                entry["elastic_tensor"] = {"aggregated": False,
+                                           "reason": f"tensor conventions differ: {sorted(conventions)}"}
+            elif len(entry["ion_relaxation"]) != 1:
+                reason = f"ion relaxation differs across members: {entry['ion_relaxation']}"
+                entry["elastic_tensor"] = {"aggregated": False, "reason": reason}
+            else:
+                entry["elastic_tensor"] = _array_stats([item["elastic_tensor"] for item in results], "elastic tensor")
+            deformed = [item["deformed_relaxations"] for item in results
+                        if isinstance(item.get("deformed_relaxations"), dict)]
+            if deformed:
+                entry["deformed_relaxations"] = {
+                    "n_members": len(deformed),
+                    "unconverged_members": sum(item.get("converged") is False for item in deformed),
+                    "unchecked_members": sum(item.get("converged") is None for item in deformed),
+                }
             checked = [item["strain_check"] for item in results if "strain_check" in item]
             if checked:
                 entry["strain_check"] = {
@@ -629,6 +752,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         elastic_norm_strains=tuple(args.elastic_norm_strains),
         elastic_shear_strains=tuple(args.elastic_shear_strains),
         elastic_strain_check=args.elastic_strain_check,
+        elastic_ion_relaxation=args.elastic_ion_relaxation,
+        elastic_fmax=args.elastic_fmax,
     )
     if bool(args.model) == bool(args.committee):
         raise ConfigurationError("Pass either --model (repeatable) or --committee, not both / neither")
@@ -685,6 +810,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 unit = entry["units"].get(key, "")
                 spread = f" +/- {stats['std']:.4g}" if stats["std"] is not None else ""
                 print(f"  {name}.{key}: {stats['mean']:.4g}{spread} {unit} (n={stats['n']})")
+        if "ion_relaxation" in entry:
+            counts = ", ".join(f"{key} (n={value})" for key, value in entry["ion_relaxation"].items())
+            print(f"  {name}.ion_relaxation: {counts}")
         refit = entry.get("near_equilibrium_refit", {}).get("scalars", {}).get("bulk_modulus")
         if refit:
             spread = f" +/- {refit['std']:.4g}" if refit["std"] is not None else ""
@@ -733,5 +861,13 @@ def register_commands(commands: Any) -> None:
     run.add_argument("--elastic-strain-check", action="store_true",
                      help="Also fit elasticity with MatCalc's default strain window (or the small default window if "
                           "that is already the primary) and warn when any diagonal C_ii changes by > 10%%")
+    run.add_argument("--elastic-ion-relaxation", choices=ELASTIC_ION_RELAXATIONS, default="auto",
+                     help="relaxed: relax the ions in every deformed cell (relaxed-ion constants, which is what "
+                          "experiment measures); clamped: move the ions affinely with the cell (MatCalc's default); "
+                          "auto (default): clamped only when every atom is on an inversion centre (rock salt, fcc, "
+                          "...), otherwise relaxed")
+    run.add_argument("--elastic-fmax", type=float, default=DEFAULT_ELASTIC_FMAX,
+                     help=f"Force criterion for relaxing each deformed cell at fixed shape, eV/A "
+                          f"(relaxed-ion only; default {DEFAULT_ELASTIC_FMAX})")
     run.add_argument("--force", action="store_true", help="Replace a prior property result in --output")
     run.set_defaults(func=cmd_run)

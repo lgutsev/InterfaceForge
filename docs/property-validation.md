@@ -115,6 +115,8 @@ iface properties run TiN.vasp \
 | `--elastic-norm-strains X [X ...]` | Normal strains for the elastic fit: ≥ 2 values, each nonzero with \|x\| ≤ 0.1 (default `-0.01 -0.005 0.005 0.01`, same as MatCalc) |
 | `--elastic-shear-strains X [X ...]` | Engineering shear strains, same rules (default `-0.01 -0.005 0.005 0.01`; **MatCalc's default is `-0.06 -0.03 0.03 0.06`**) |
 | `--elastic-strain-check` | Also fit with a second strain window and warn when any diagonal C_ii changes by > 10 % (doubles the elasticity cost) |
+| `--elastic-ion-relaxation {auto,relaxed,clamped}` | `relaxed`: relax the ions in every deformed cell (relaxed-ion constants); `clamped`: move the ions affinely with the cell (**MatCalc's default**); `auto` (default): clamped only when every atom sits on an inversion centre, otherwise relaxed |
+| `--elastic-fmax` | Force criterion in eV/Å for relaxing each deformed cell at fixed shape (relaxed-ion only; default 0.005). The deformed-cell relaxations use `--max-steps` and `--optimizer` |
 
 Exit status is 0 when every member succeeded, 1 when at least one member
 failed (the JSON is still written), and 2 for usage/safety errors.
@@ -210,11 +212,86 @@ the summary counts flagged members in
 **Elasticity.** Full 6×6 Voigt tensor in GPa (pymatgen order xx, yy, zz,
 yz, xz, xy), plus VRH bulk and shear moduli and Young's modulus. MatCalc
 applies each strain value to one component of the deformation gradient
-(pymatgen `DeformedStructureSet`), fits stress against strain linearly per
-component, and does not relax the deformed cells' internal coordinates
-(`relax_deformed_structures=False`, MatCalc's default). A shear value is the
-engineering shear strain γ, so `0.06` means γ = 6 % (it also induces a
-second-order normal strain of γ²/2 = 0.18 %).
+(pymatgen `DeformedStructureSet`), and fits stress against strain linearly
+per component. With relaxed ions (the default for any cell with internal
+coordinates; see below) the atoms in every deformed cell are first relaxed
+at fixed cell shape. A shear value is the engineering shear strain γ, so
+`0.06` means γ = 6 % (it also induces a second-order normal strain of
+γ²/2 = 0.18 %).
+
+*Clamped-ion vs relaxed-ion, and why relaxed-ion is the default.* Straining
+a crystal moves every atom affinely with the cell. In a cell with free
+internal coordinates the atoms are then no longer at a force minimum, so
+they relax, and that relaxation lowers the energy and the stress. The
+**clamped-ion** constants (atoms held at their affine positions) leave this
+out. The **relaxed-ion** constants include it. The relaxed-ion constants are
+the physical ones: they are what ultrasonic, Brillouin and
+resonant-ultrasound experiments measure, and what DFT elastic workflows
+(VASP `IBRION=6, ISIF=3` including the ionic-relaxation contribution,
+Materials Project) report. Clamped-ion constants are always stiffer in the
+directions the atoms can relax (C_ii only go down), and the off-diagonal
+terms can shift either way.
+
+MatCalc's `ElasticityCalc` defaults to `relax_deformed_structures=False`,
+i.e. clamped ions, and InterfaceForge used that default before this option
+existed. For β-Si₃N₄ (14-atom primitive cell, P6₃/m, no atom on an
+inversion centre) that made every model look about 45 % too stiff in shear and C12/C13
+too low. That included UMA-s, which was trained on independent data, so the
+error came from the method, not the models (2026-09-28; fmax 0.005,
+±0.5/1 % strains, GPa):
+
+| β-Si₃N₄ | G_VRH | C44 | C66 | C12 |
+|---|---|---|---|---|
+| UMA-s 1.1, clamped-ion | 193 | 166 | 197 | 113 |
+| UMA-s 1.1, relaxed-ion | 124 | 104 | 113 | 175 |
+| MACE seed 11, clamped-ion | 181 | | | |
+| MACE seed 11, relaxed-ion | 118 | | | |
+| experiment | 129 | 108 | 119 | 195 |
+
+Rock-salt TiN (2-atom primitive cell, both atoms on inversion centres) has
+no internal coordinates, so both treatments agree exactly. EMT hcp Cu, the
+small test case in the test suite, shows the β-Si₃N₄ pattern: relaxing the
+ions lowers C66 from 69 to 52 GPa and raises C12 from 95 to 112 GPa, while
+C33 and C44 are unchanged.
+
+*How `auto` decides.* The force on an atom per unit homogeneous strain
+(the internal-strain tensor) is a polar rank-3 tensor. It therefore
+vanishes on a site that is an inversion centre and is allowed on any other
+site. `auto` runs spglib (`symprec` 10⁻³ Å) on each member's relaxed
+structure. It picks **clamped** only when every atom is fixed by an
+inversion of the crystal. That holds for fcc, bcc, rock salt, CsCl and cubic
+perovskite, and there clamped-ion equals relaxed-ion by symmetry and
+skips the relaxations. Everything else gets **relaxed**, including
+β-Si₃N₄, wurtzite, zinc blende, diamond, hcp, fluorite (where the F atoms
+relax) and any rattled, defected or symmetry-broken cell. If spglib is
+missing or fails, `auto` also picks relaxed, which is always valid; it only
+costs more. The tolerance is deliberately tight, because a missed symmetry
+only costs time, while a spurious one would give clamped-ion constants.
+Pass `relaxed` or `clamped` to override it, e.g. `clamped` to reproduce
+MatCalc's default or earlier runs.
+
+*Recording.* Every elasticity result records `ion_relaxation`
+(`"relaxed"` or `"clamped"`, what was actually used) and
+`ion_relaxation_selection` (`requested`, `reason`, and under `auto`
+`non_centrosymmetric_sites`, the atom indices that can relax). MatCalc
+relaxes each deformed cell but keeps only its final structure. The adapter
+records each of those relaxations anyway, so a relaxed-ion result carries
+`deformed_relaxations`: `n_structures` (24 for the default 4 + 4 strains),
+`n_converged`, `converged`, the worst `max_force`, `per_structure_max_force`,
+`fmax`, `max_steps`, `optimizer`, `relax_cell: false`. With the cell fixed,
+max|F| ≤ fmax is the complete convergence criterion. If any deformed cell
+did not converge, a warning goes to `results.elasticity.warnings` and to the
+member's `warnings`. The member still succeeds, and the summary counts it
+under `summary.properties.elasticity.deformed_relaxations`. For clamped
+ions, `deformed_relaxations` is `null`. `--elastic-fmax` (default
+0.005 eV/Å) sets the criterion. The strain-induced forces at 0.5–1 % strain
+are about 0.05–0.5 eV/Å in covalent solids, so 0.005 eV/Å converges the
+relaxation well. Soft metals have smaller strain forces and may need a
+tighter value. `--elastic-strain-check` refits with the same ion treatment.
+
+Relaxed-ion costs one fixed-cell relaxation per deformed structure instead
+of one single-point evaluation. For a 14-atom cell that is still small next
+to phonons.
 
 *Strain window, and why the shear default differs from MatCalc.* MatCalc
 0.5.1 uses ±0.5/±1 % normal strains but ±3/±6 % shear strains. A linear fit
@@ -227,7 +304,8 @@ difference of the model stress at |γ| ≤ 1 % gave 95–96 GPa for seed 11 in
 both the 2-atom and 8-atom cells. That matches the small-window value, not
 the MatCalc one. EMT copper shows the same effect: C44 is 90.2 GPa with
 ±1 % shear and 98.5 GPa with ±6 % (+9 %). For β-Si₃N₄ the two windows agree
-within about 2 GPa.
+within about 2 GPa (measured with clamped ions; TiN and Cu are the same
+either way).
 
 InterfaceForge therefore **defaults to the same ±0.5/±1 % window for shear
 as for normal strain**. Elastic constants are defined as the small-strain
@@ -292,7 +370,8 @@ interfaceforge_property_validation`) contains:
   `committee:<dir>`), seed when recoverable (from `seed_N` in the path, or
   from the committee manifest), device, dtype, native dtype, calculator
   class, `status`, `error`, `failed_property`, `warnings` (e.g. an
-  implausible EOS B′ or an elastic strain-window flag), per-property
+  implausible EOS B′, an elastic strain-window flag, or unconverged
+  deformed-cell relaxations), per-property
   `results` with an explicit `units` map,
   and package versions;
 - `summary`: `success_fraction` (e.g. `3/4`), `failed_members` with their
@@ -309,8 +388,11 @@ only when complete.
   frequency): mean, sample standard deviation (ddof = 1; `null` for one
   member), min, max, n.
 - Elastic tensor: every member's full tensor is kept. The elementwise
-  mean/std is given only when all shapes and conventions match; otherwise the
-  entry says `aggregated: false` and why.
+  mean/std is given only when all shapes, conventions and ion treatments
+  match; otherwise the entry says `aggregated: false` and why.
+  `summary.properties.elasticity.ion_relaxation` counts members per
+  treatment (e.g. `{"relaxed": 4}`). Under `auto` a member can differ only if
+  its relaxed structure has a different symmetry.
 - Phonons: member frequencies are always kept. Mean/std arrays are given only
   when the arrays align exactly; otherwise `aggregated: false`. There is no
   scalar "phonon score". The summary reports how many members are

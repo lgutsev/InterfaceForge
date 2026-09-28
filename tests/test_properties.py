@@ -24,6 +24,7 @@ from interfaceforge.properties import (
     require_bulk,
     require_stress,
     run_properties,
+    select_ion_relaxation,
     summarize,
     to_jsonable,
 )
@@ -40,7 +41,8 @@ class NoStressCalculator(Calculator):
 
 def _fake_backend(bulk_modulus: float = 140.0, *, tensor_shape: tuple[int, int] = (6, 6), converged: bool = True,
                   bprime: float = 4.5, refit_bprime: float | None = None, eos_calls: list | None = None,
-                  elastic_calls: list | None = None, shear_softening: float = 0.0):
+                  elastic_calls: list | None = None, shear_softening: float = 0.0,
+                  deformed_converged: bool | None = True):
     """MatCalc-shaped results without MatCalc, so the runner is testable anywhere."""
 
     def relax(atoms, calculator, *, fmax, max_steps, optimizer, member_dir):
@@ -76,7 +78,15 @@ def _fake_backend(bulk_modulus: float = 140.0, *, tensor_shape: tuple[int, int] 
         widest = max(abs(value) for value in kwargs.get("shear_strains", (0.01,)))
         for i in range(3, min(tensor_shape)):
             tensor[i, i] *= 1.0 + shear_softening * (widest - 0.01) / 0.05
+        ion_relaxation = kwargs.get("ion_relaxation", "relaxed")
+        deformed = None
+        if ion_relaxation == "relaxed":
+            deformed = {"n_structures": 24, "fmax": kwargs.get("fmax"), "max_steps": kwargs.get("max_steps"),
+                        "converged": deformed_converged, "n_converged": 24 if deformed_converged else 20,
+                        "max_force": 0.004 if deformed_converged else 0.08,
+                        "reason": None if deformed_converged is not None else "not exposed"}
         return {"elastic_tensor": tensor, "tensor_convention": "voigt", "bulk_modulus_vrh": 140.0,
+                "ion_relaxation": ion_relaxation, "deformed_relaxations": deformed,
                 "shear_modulus_vrh": 60.0 * tensor[3, 3] if min(tensor_shape) > 3 else 60.0,
                 "youngs_modulus": 157.0,
                 "strains": {"norm_strains": list(kwargs.get("norm_strains", ())),
@@ -101,6 +111,11 @@ def _scaled_emt(scale: float):
 
 def _cu() -> Atoms:
     return bulk("Cu", "fcc", a=3.6)
+
+
+def _hcp_cu() -> Atoms:
+    # Two atoms on -6m2 sites (no inversion centre): in-plane strain moves them, so C11/C12/C66 relax.
+    return bulk("Cu", "hcp", a=2.55, c=4.16)
 
 
 # ---------------------------------------------------------------- dependency
@@ -224,6 +239,70 @@ def test_cli_parses_elastic_strain_options():
     assert args.elastic_shear_strains == [-0.06, -0.03, 0.03, 0.06]
     assert args.elastic_norm_strains == [-0.005, 0.005]
     assert args.elastic_strain_check is True
+
+
+def test_elastic_ion_relaxation_config_validation():
+    config = PropertyConfig(("elasticity",))
+    assert config.elastic_ion_relaxation == "auto" and config.elastic_fmax == 0.005
+    for choice in ("auto", "relaxed", "clamped"):
+        assert PropertyConfig(("elasticity",), elastic_ion_relaxation=choice).elastic_ion_relaxation == choice
+    with pytest.raises(ConfigurationError, match="--elastic-ion-relaxation must be one of auto, relaxed, clamped"):
+        PropertyConfig(("elasticity",), elastic_ion_relaxation="frozen")
+    for bad in (0.0, -0.001, float("nan"), float("inf"), True, "0.005"):
+        with pytest.raises(ConfigurationError, match="--elastic-fmax"):
+            PropertyConfig(("elasticity",), elastic_fmax=bad)
+
+
+def test_cli_parses_elastic_ion_relaxation_options():
+    base = ["properties", "run", "TiN.vasp", "--engine", "mace", "--model", "m.model", "--property", "elasticity",
+            "--output", "out"]
+    args = build_parser().parse_args(base)
+    assert (args.elastic_ion_relaxation, args.elastic_fmax) == ("auto", 0.005)
+    args = build_parser().parse_args([*base, "--elastic-ion-relaxation", "clamped", "--elastic-fmax", "0.002"])
+    assert (args.elastic_ion_relaxation, args.elastic_fmax) == ("clamped", 0.002)
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([*base, "--elastic-ion-relaxation", "frozen"])
+
+
+def test_auto_ion_relaxation_follows_site_inversion_symmetry():
+    pytest.importorskip("spglib")
+    clamped = {"fcc Cu": _cu(), "rocksalt TiN": bulk("TiN", "rocksalt", a=4.24),
+               "rocksalt TiN supercell": bulk("TiN", "rocksalt", a=4.24, cubic=True).repeat(2),
+               "CsCl": bulk("CsCl", "cesiumchloride", a=4.1)}
+    relaxed = {"hcp Cu": _hcp_cu(), "diamond Si": bulk("Si", "diamond", a=5.43),
+               "wurtzite ZnO": bulk("ZnO", "wurtzite", a=3.25, c=5.2),
+               "fluorite CaF2": bulk("CaF2", "fluorite", a=5.46)}
+    for name, atoms in clamped.items():
+        selection = select_ion_relaxation("auto", atoms)
+        assert selection["ion_relaxation"] == "clamped", name
+        assert selection["non_centrosymmetric_sites"] == []
+    for name, atoms in relaxed.items():
+        assert select_ion_relaxation("auto", atoms)["ion_relaxation"] == "relaxed", name
+    # Fluorite: Ca sits on an inversion centre, the two F do not.
+    assert select_ion_relaxation("auto", bulk("CaF2", "fluorite", a=5.46))["non_centrosymmetric_sites"] == [1, 2]
+    # A rattled rock salt has lost its inversion centres, so it is relaxed-ion.
+    rattled = bulk("TiN", "rocksalt", a=4.24, cubic=True)
+    rattled.rattle(0.01, seed=1)
+    assert select_ion_relaxation("auto", rattled)["ion_relaxation"] == "relaxed"
+
+
+def test_explicit_ion_relaxation_overrides_symmetry():
+    assert select_ion_relaxation("relaxed", _cu())["ion_relaxation"] == "relaxed"
+    selection = select_ion_relaxation("clamped", _hcp_cu())
+    assert selection["ion_relaxation"] == "clamped" and selection["reason"] == "explicit --elastic-ion-relaxation"
+
+
+def test_auto_ion_relaxation_defaults_to_relaxed_without_spglib(monkeypatch):
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "spglib":
+            raise ImportError("no spglib")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    selection = select_ion_relaxation("auto", _cu())
+    assert selection["ion_relaxation"] == "relaxed" and "could not be determined" in selection["reason"]
 
 
 def test_cli_invalid_elastic_strains_exit_with_error(tmp_path, capsys):
@@ -467,10 +546,11 @@ def test_eos_window_is_plumbed_to_backend_and_recorded(tmp_path):
 def test_elastic_strains_are_plumbed_to_backend_and_recorded(tmp_path):
     calls: list = []
     config = PropertyConfig(("elasticity",), elastic_norm_strains=(-0.005, 0.005),
-                            elastic_shear_strains=(-0.02, 0.02))
+                            elastic_shear_strains=(-0.02, 0.02), elastic_ion_relaxation="clamped")
     payload = run_properties(_cu(), [Member("m0", EMT)], config, tmp_path / "o", engine="emt",
                              backend=_fake_backend(elastic_calls=calls))
-    assert calls == [{"fmax": 0.01, "norm_strains": (-0.005, 0.005), "shear_strains": (-0.02, 0.02)}]
+    assert calls == [{"fmax": 0.005, "norm_strains": (-0.005, 0.005), "shear_strains": (-0.02, 0.02),
+                      "ion_relaxation": "clamped", "max_steps": 500, "optimizer": "FIRE"}]
     on_disk = json.loads((tmp_path / "o" / RESULT_FILE).read_text())
     settings = on_disk["settings"]
     assert settings["elastic_norm_strains"] == [-0.005, 0.005] and settings["elastic_shear_strains"] == [-0.02, 0.02]
@@ -518,6 +598,86 @@ def test_elastic_strain_check_below_tolerance_is_not_flagged(tmp_path):
                              tmp_path / "o", engine="emt", backend=_fake_backend(shear_softening=0.09))
     check = payload["models"][0]["results"]["elasticity"]["strain_check"]
     assert check["flagged"] is False and check["max_diagonal_relative_change"] == pytest.approx(0.09)
+
+
+def test_auto_ion_relaxation_is_plumbed_to_backend_and_recorded(tmp_path):
+    pytest.importorskip("spglib")
+    calls: list = []
+    config = PropertyConfig(("elasticity",), max_steps=300, optimizer="BFGS", elastic_strain_check=True)
+    payload = run_properties(_hcp_cu(), [Member("m0", EMT)], config, tmp_path / "o", engine="emt",
+                             backend=_fake_backend(elastic_calls=calls))
+    # The strain-check refit uses the same ion treatment and deformed-structure relaxation settings.
+    assert [(call["ion_relaxation"], call["fmax"], call["max_steps"], call["optimizer"]) for call in calls] == [
+        ("relaxed", 0.005, 300, "BFGS"), ("relaxed", 0.005, 300, "BFGS")]
+    on_disk = json.loads((tmp_path / "o" / RESULT_FILE).read_text())
+    assert on_disk["settings"]["elastic_ion_relaxation"] == "auto" and on_disk["settings"]["elastic_fmax"] == 0.005
+    model = on_disk["models"][0]
+    assert model["status"] == "ok" and model["warnings"] == []
+    elastic = model["results"]["elasticity"]
+    assert elastic["ion_relaxation"] == "relaxed"
+    assert elastic["ion_relaxation_selection"]["requested"] == "auto"
+    assert elastic["ion_relaxation_selection"]["non_centrosymmetric_sites"] == [0, 1]
+    assert elastic["deformed_relaxations"]["converged"] is True
+    summary = payload["summary"]["properties"]["elasticity"]
+    assert summary["ion_relaxation"] == {"relaxed": 1}
+    assert summary["deformed_relaxations"] == {"n_members": 1, "unconverged_members": 0, "unchecked_members": 0}
+
+
+def test_auto_ion_relaxation_clamps_a_centrosymmetric_cell(tmp_path):
+    pytest.importorskip("spglib")
+    calls: list = []
+    payload = run_properties(_cu(), [Member("m0", EMT)], PropertyConfig(("elasticity",)), tmp_path / "o",
+                             engine="emt", backend=_fake_backend(elastic_calls=calls))
+    assert [call["ion_relaxation"] for call in calls] == ["clamped"]
+    elastic = payload["models"][0]["results"]["elasticity"]
+    assert elastic["ion_relaxation"] == "clamped" and elastic["deformed_relaxations"] is None
+    summary = payload["summary"]["properties"]["elasticity"]
+    assert summary["ion_relaxation"] == {"clamped": 1} and "deformed_relaxations" not in summary
+
+
+def test_unconverged_deformed_relaxations_are_flagged_not_failed(tmp_path):
+    members = [Member("m0", EMT), Member("m1", EMT)]
+    config = PropertyConfig(("elasticity",), elastic_ion_relaxation="relaxed")
+    payload = run_properties(_cu(), members, config, tmp_path / "o", engine="emt",
+                             backend=_fake_backend(deformed_converged=False))
+    model = payload["models"][0]
+    assert model["status"] == "ok"
+    assert len(model["warnings"]) == 1 and "4 of 24 deformed structures did not relax" in model["warnings"][0]
+    assert model["results"]["elasticity"]["warnings"] == model["warnings"]
+    summary = payload["summary"]["properties"]["elasticity"]["deformed_relaxations"]
+    assert summary == {"n_members": 2, "unconverged_members": 2, "unchecked_members": 0}
+
+
+def test_unchecked_deformed_relaxations_are_flagged(tmp_path):
+    config = PropertyConfig(("elasticity",), elastic_ion_relaxation="relaxed")
+    payload = run_properties(_cu(), [Member("m0", EMT)], config, tmp_path / "o", engine="emt",
+                             backend=_fake_backend(deformed_converged=None))
+    assert "convergence is unchecked (not exposed)" in payload["models"][0]["warnings"][0]
+    assert payload["summary"]["properties"]["elasticity"]["deformed_relaxations"]["unchecked_members"] == 1
+
+
+def test_mixed_ion_relaxation_is_not_aggregated():
+    def model(label, treatment):
+        return {"label": label, "status": "ok", "results": {"elasticity": {
+            "elastic_tensor": np.eye(6), "tensor_convention": "v", "ion_relaxation": treatment,
+            "bulk_modulus_vrh": 1.0, "shear_modulus_vrh": 1.0, "youngs_modulus": 1.0}}}
+
+    entry = summarize([model("a", "relaxed"), model("b", "clamped")], ["elasticity"])["properties"]["elasticity"]
+    assert entry["ion_relaxation"] == {"clamped": 1, "relaxed": 1}
+    assert entry["elastic_tensor"]["aggregated"] is False
+    assert "ion relaxation differs" in entry["elastic_tensor"]["reason"]
+
+
+def test_deformed_relaxation_record():
+    ok = matcalc_adapter._deformed_relaxation_record(
+        [{"is_converged": True, "max_force": 0.001}, {"is_converged": False, "max_force": 0.02}], 2,
+        fmax=0.005, max_steps=10, optimizer="FIRE")
+    assert ok["convergence_checked"] and ok["converged"] is False and ok["n_converged"] == 1
+    assert ok["max_force"] == 0.02 and ok["per_structure_max_force"] == [0.001, 0.02]
+    missing = matcalc_adapter._deformed_relaxation_record(None, 24, fmax=0.005, max_steps=10, optimizer="FIRE")
+    assert missing["convergence_checked"] is False and missing["converged"] is None
+    short = matcalc_adapter._deformed_relaxation_record([], 24, fmax=0.005, max_steps=10, optimizer="FIRE")
+    assert short["converged"] is None and "recorded 0 relaxations for 24" in short["reason"]
 
 
 def test_implausible_bprime_is_flagged_not_failed(tmp_path):
@@ -617,6 +777,7 @@ def test_matcalc_emt_end_to_end(tmp_path, monkeypatch):
     assert np.asarray(elastic["elastic_tensor"]).shape == (6, 6)
     assert elastic["strains"]["norm_strains"] == [-0.01, -0.005, 0.005, 0.01]
     assert elastic["strains"]["shear_strains"] == [-0.01, -0.005, 0.005, 0.01]
+    assert elastic["ion_relaxation"] == "clamped" and elastic["deformed_relaxations"] is None  # fcc: 1-atom cell
     assert models[0]["results"]["phonon"]["dynamically_stable"]
     out = tmp_path / "o"
     assert json.loads((out / RESULT_FILE).read_text())["inputs_unchanged"] is True
@@ -663,3 +824,60 @@ def test_matcalc_emt_elastic_strain_windows(tmp_path):
     reference = np.asarray(check["reference_elastic_tensor"])
     assert tensor[3, 3] > 0 and reference[3, 3] > 0
     assert check["flagged"] is (check["max_diagonal_relative_change"] > 0.10)
+
+
+def _matcalc_elasticity(atoms, ion_relaxation, tmp_path, **options):
+    config = PropertyConfig(("elasticity",), fmax=1e-4, max_steps=2000, elastic_ion_relaxation=ion_relaxation,
+                            **options)
+    try:
+        payload = run_properties(atoms, [Member("m0", EMT)], config, tmp_path / ion_relaxation, engine="emt")
+    except DependencyError:
+        pytest.skip("matcalc import failed")
+    model = payload["models"][0]
+    assert model["status"] == "ok", model.get("error")
+    return model["results"]["elasticity"]
+
+
+def test_matcalc_emt_relaxed_ion_differs_from_clamped_for_hcp(tmp_path):
+    pytest.importorskip("matcalc")
+    clamped = _matcalc_elasticity(_hcp_cu(), "clamped", tmp_path)
+    relaxed = _matcalc_elasticity(_hcp_cu(), "auto", tmp_path, elastic_fmax=1e-4)
+    assert clamped["ion_relaxation"] == "clamped" and clamped["deformed_relaxations"] is None
+    assert relaxed["ion_relaxation"] == "relaxed" and relaxed["ion_relaxation_selection"]["requested"] == "auto"
+    deformed = relaxed["deformed_relaxations"]
+    assert deformed["convergence_checked"] and deformed["converged"] and deformed["n_structures"] == 24
+    assert deformed["max_force"] <= 1e-4 and deformed["relax_cell"] is False
+    c_clamped, c_relaxed = np.asarray(clamped["elastic_tensor"]), np.asarray(relaxed["elastic_tensor"])
+    # EMT hcp Cu, like beta-Si3N4: internal relaxation softens C66 (69 -> 52 GPa) and raises C12 (95 -> 112 GPa).
+    assert c_relaxed[5, 5] < 0.85 * c_clamped[5, 5]
+    assert c_relaxed[0, 1] > 1.1 * c_clamped[0, 1]
+    assert relaxed["shear_modulus_vrh"] < clamped["shear_modulus_vrh"]
+    # By -6m2 site symmetry, axial strain and the xz/yz shears do not move the atoms.
+    assert c_relaxed[2, 2] == pytest.approx(c_clamped[2, 2], rel=0.01)
+    assert c_relaxed[3, 3] == pytest.approx(c_clamped[3, 3], rel=0.02)
+
+
+def test_matcalc_emt_relaxed_ion_equals_clamped_for_fcc(tmp_path):
+    pytest.importorskip("matcalc")
+    clamped = _matcalc_elasticity(_cu(), "clamped", tmp_path)
+    relaxed = _matcalc_elasticity(_cu(), "relaxed", tmp_path)
+    assert relaxed["deformed_relaxations"]["converged"]
+    assert np.allclose(relaxed["elastic_tensor"], clamped["elastic_tensor"], atol=0.5)
+
+
+def test_matcalc_deformed_relaxation_hook_is_restored(tmp_path):
+    pytest.importorskip("matcalc")
+    from matcalc import RelaxCalc, _elasticity
+
+    eq = matcalc_adapter.relax(_hcp_cu(), EMT(), fmax=1e-3, max_steps=500, optimizer="FIRE",
+                               member_dir=tmp_path)["atoms"]
+    strains = (-0.01, 0.01)
+    result = matcalc_adapter.elasticity(eq, EMT(), fmax=0.005, norm_strains=strains, shear_strains=strains,
+                                        ion_relaxation="relaxed", max_steps=1)
+    assert _elasticity.RelaxCalc is RelaxCalc
+    deformed = result["deformed_relaxations"]
+    assert deformed["n_structures"] == 12 and deformed["max_steps"] == 1
+    assert deformed["converged"] is False and deformed["n_converged"] < 12
+    with pytest.raises(ValueError, match="ion_relaxation"):
+        matcalc_adapter.elasticity(eq, EMT(), fmax=0.005, ion_relaxation="auto")
+    assert _elasticity.RelaxCalc is RelaxCalc

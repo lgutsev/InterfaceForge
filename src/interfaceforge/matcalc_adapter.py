@@ -27,6 +27,15 @@ Behaviour of MatCalc 0.5.1 that shapes this adapter:
   up the nonlinear stress response of soft-shear solids (on a MACE rocksalt
   TiN it put C44 ~15 GPa above the finite-difference elastic limit), so the
   adapter always passes the strain windows explicitly and records them.
+* ``ElasticityCalc`` also defaults to ``relax_deformed_structures=False``:
+  CLAMPED-ION constants, with the atoms moved affinely with the cell. That is
+  only right when no atom has a free internal coordinate. For beta-Si3N4 it
+  made C44/C66/G about 45 % too stiff, and C12/C13 too low, in every model.
+  So the adapter always passes the ion treatment explicitly. With relaxed
+  ions MatCalc relaxes each deformed cell at fixed shape and keeps only the
+  final structure. The adapter records each of those relaxations (converged
+  or not, final max force) by swapping in a recording ``RelaxCalc`` for the
+  duration of the call.
 * ``PhononCalc`` writes ``phonon.yaml`` into the current directory by
   default; the adapter always points it at the member directory.
 * Every downstream calc is run with ``relax_structure=False`` on the
@@ -37,6 +46,8 @@ Behaviour of MatCalc 0.5.1 that shapes this adapter:
 from __future__ import annotations
 
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -288,6 +299,63 @@ def eos(
     }
 
 
+@contextmanager
+def _recorded_deformed_relaxations() -> Iterator[list[dict[str, Any]] | None]:
+    """Record every fixed-cell ``RelaxCalc`` that ``ElasticityCalc`` runs on a deformed structure.
+
+    MatCalc 0.5.1 builds that relaxer from the ``RelaxCalc`` name in ``matcalc._elasticity`` and keeps only
+    ``final_structure``. Yields ``None`` when that hook is missing, so the convergence is then reported as unchecked.
+    """
+
+    from matcalc import _elasticity
+
+    base = getattr(_elasticity, "RelaxCalc", None)
+    if not isinstance(base, type):
+        yield None
+        return
+    records: list[dict[str, Any]] = []
+
+    class RecordingRelaxCalc(base):  # type: ignore[misc, valid-type]
+        def calc(self, structure: Any) -> dict[str, Any]:
+            result = super().calc(structure)
+            records.append({"is_converged": bool(result["is_converged"]), "max_force": float(result["max_force"])})
+            return result
+
+    _elasticity.RelaxCalc = RecordingRelaxCalc
+    try:
+        yield records
+    finally:
+        _elasticity.RelaxCalc = base
+
+
+def _deformed_relaxation_record(
+    records: list[dict[str, Any]] | None, n_structures: int, *, fmax: float, max_steps: int, optimizer: str
+) -> dict[str, Any]:
+    base = {"n_structures": int(n_structures), "fmax": float(fmax), "max_steps": int(max_steps),
+            "optimizer": str(optimizer), "relax_cell": False}
+    if records is None or len(records) != n_structures:
+        return {
+            **base,
+            "convergence_checked": False,
+            "converged": None,
+            "reason": "this MatCalc version does not expose the deformed-structure relaxations"
+            if records is None
+            else f"recorded {len(records)} relaxations for {n_structures} deformed structures",
+        }
+    forces = [item["max_force"] for item in records]
+    n_converged = sum(item["is_converged"] for item in records)
+    return {
+        **base,
+        "convergence_checked": True,
+        "converged": n_converged == n_structures,
+        "n_converged": int(n_converged),
+        "max_force": float(max(forces)) if forces else None,
+        "per_structure_max_force": forces,
+        # With the cell fixed, RelaxCalc's is_converged (max|F| <= fmax) is the complete criterion.
+        "criterion": "max|F| <= fmax at fixed deformed cell (RelaxCalc.is_converged)",
+    }
+
+
 def elasticity(
     atoms: Any,
     calculator: Any,
@@ -295,29 +363,49 @@ def elasticity(
     fmax: float,
     norm_strains: tuple[float, ...] = (-0.01, -0.005, 0.005, 0.01),
     shear_strains: tuple[float, ...] = (-0.06, -0.03, 0.03, 0.06),
+    ion_relaxation: str = "relaxed",
+    max_steps: int = 500,
+    optimizer: str = "FIRE",
 ) -> dict[str, Any]:
+    """Elastic tensor; ``ion_relaxation`` is ``"relaxed"`` (relax each deformed cell to ``fmax``) or ``"clamped"``."""
+
     from matcalc import ElasticityCalc
 
+    if ion_relaxation not in ("relaxed", "clamped"):
+        raise ValueError(f"ion_relaxation must be 'relaxed' or 'clamped', not {ion_relaxation!r}")
+    relax_ions = ion_relaxation == "relaxed"
     calc = ElasticityCalc(
         calculator,
         norm_strains=tuple(float(value) for value in norm_strains),
         shear_strains=tuple(float(value) for value in shear_strains),
         fmax=fmax,
         relax_structure=False,
+        relax_deformed_structures=relax_ions,
+        relax_calc_kwargs={"max_steps": int(max_steps), "optimizer": optimizer} if relax_ions else None,
         units_GPa=True,
     )
-    with warnings.catch_warnings(record=True) as record:
+    # symmetry=False (the default) deforms along every Voigt component: 6 x (normal or shear) strains.
+    n_deformed = 3 * len(calc.norm_strains) + 3 * len(calc.shear_strains)
+    with warnings.catch_warnings(record=True) as record, _recorded_deformed_relaxations() as relaxations:
         warnings.simplefilter("always")
         result = calc.calc(atoms.copy())
     tensor = result["elastic_tensor"]
     voigt = np.asarray(getattr(tensor, "voigt", tensor), dtype=float)
+    deformed = (
+        _deformed_relaxation_record(relaxations, n_deformed, fmax=fmax, max_steps=max_steps, optimizer=optimizer)
+        if relax_ions
+        else None
+    )
     return {
         "elastic_tensor": voigt,
         "tensor_convention": "voigt_6x6_pymatgen_order_xx_yy_zz_yz_xz_xy",
+        "ion_relaxation": ion_relaxation,
+        "deformed_relaxations": deformed,
         "bulk_modulus_vrh": float(result["bulk_modulus_vrh"]),
         "shear_modulus_vrh": float(result["shear_modulus_vrh"]),
         "youngs_modulus": float(result["youngs_modulus"]),
         "residuals_sum": float(result["residuals_sum"]),
+        "r2_score_mean": float(result["r2_score_mean"]) if "r2_score_mean" in result else None,
         "strains": {
             "norm_strains": [float(value) for value in calc.norm_strains],
             "shear_strains": [float(value) for value in calc.shear_strains],
@@ -327,6 +415,10 @@ def elasticity(
         "warnings": _caught(record),
         "units": {
             "strains": "dimensionless",
+            "r2_score_mean": "dimensionless",
+            "deformed_relaxations.fmax": "eV/A",
+            "deformed_relaxations.max_force": "eV/A",
+            "deformed_relaxations.per_structure_max_force": "eV/A",
             "elastic_tensor": "GPa",
             "bulk_modulus_vrh": "GPa",
             "shear_modulus_vrh": "GPa",
