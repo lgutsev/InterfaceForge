@@ -1,3 +1,4 @@
+# ruff: noqa: I001
 """CLI entry point with named, scientifically reviewed workflow profiles.
 
 The core :mod:`interfaceforge.cli` remains the generic command surface.  This

@@ -394,6 +394,49 @@ class DeepMDCommitteeCollectTests(unittest.TestCase):
             self.assertTrue(verify_committee_bundle(bundle)["valid"])
             self.assertTrue(verify_committee_bundle(Path(result["archive"]))["valid"])
 
+
+    def test_collects_and_packages_dpa4_pt2_models(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = write_deepmd_committee(root, architecture="dpa4")
+            for path in source.glob("model_*/frozen_model.pth"):
+                path.rename(path.with_name("frozen_model.pt2"))
+
+            result = collect_committee(
+                source,
+                root / "stored" / "dpa4_v1",
+                engine="deepmd",
+                label="SiN/TiN DPA-4 v1",
+            )
+            bundle = Path(result["bundle"])
+            manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(manifest["architecture"], "dpa4")
+            self.assertEqual(manifest["backend"], "pytorch")
+            self.assertEqual(manifest["frozen_model_formats"], ["pt2"])
+            self.assertEqual(
+                [m["stored_model"] for m in manifest["members"]],
+                [f"models/model_{i:03d}.pt2" for i in range(4)],
+            )
+            self.assertTrue(all(m["frozen_format"] == "pt2" for m in manifest["members"]))
+            self.assertTrue((bundle / "models" / "model_000.pt2").is_file())
+            self.assertTrue(verify_committee_bundle(bundle)["valid"])
+            self.assertTrue(verify_committee_bundle(Path(result["archive"]))["valid"])
+
+            hf = Path(
+                pack_huggingface(
+                    bundle,
+                    root / "hf" / "dpa4_v1",
+                    repo_id="myorg/sintin-dpa4",
+                )["output"]
+            )
+            self.assertTrue((hf / "models" / "model_000.pt2").is_file())
+            self.assertIn(
+                "*.pt2 filter=lfs diff=lfs merge=lfs -text",
+                (hf / ".gitattributes").read_text(encoding="utf-8"),
+            )
+            self.assertTrue(verify_package(hf)["valid"])
+
     def test_missing_frozen_model_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

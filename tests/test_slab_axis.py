@@ -1,4 +1,5 @@
 """Regression tests for axis-aware LOCPOT analysis."""
+
 import json
 import tempfile
 import unittest
@@ -106,7 +107,7 @@ class AxisTests(unittest.TestCase):
                 self.assertFalse((root/'slab_big'/'LOCPOT_AUDIT_FAILED').exists())
 
             config.write_text(json.dumps({**settings, 'tilt_warn_degrees': 2.0, 'tilt_fail_degrees': 1.0}))
-            with self.assertRaisesRegex(Exception, 'tilt_warn_degrees'):
+            with self.assertRaisesRegex(SafetyError, 'tilt_warn_degrees'):
                 load_alignment_config(config)
 
     def test_wrong_recorded_axis_flagged(self):
@@ -119,11 +120,17 @@ class AxisTests(unittest.TestCase):
             (calc/'OUTCAR').write_text('IDIPOL = 3\n E-fermi : 1.0\n')
             config = root/'config.json'
             config.write_text(
-                json.dumps({'axis': 'x', 'side': 'high-x', 'references': [{'prefix': 'slab', 'reference': 'slab'}]})
+                json.dumps(
+                    {
+                        "axis": "x",
+                        "side": "high-x",
+                        "references": [{"prefix": "slab", "reference": "slab"}],
+                    }
+                )
             )
             with (
-                patch('interfaceforge.slab_alignment._plot_profile'),
-                patch('interfaceforge.slab_alignment._plot_workfunction_profile'),
+                patch("interfaceforge.slab_alignment._plot_profile"),
+                patch("interfaceforge.slab_alignment._plot_workfunction_profile"),
             ):
                 result = analyze_slab_alignment(root, config='config.json')
             row = result['rows'][0]

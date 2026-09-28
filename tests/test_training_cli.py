@@ -250,8 +250,15 @@ class TrainingTests(unittest.TestCase):
             ensemble = (root / "models/deepmd/run_ensemble.slurm").read_text(encoding="utf-8")
             evaluation = (root / "models/deepmd/run_evaluate.slurm").read_text(encoding="utf-8")
             self.assertEqual(manifest["evaluation_model_name"], "model.ckpt.pt")
+            self.assertEqual(manifest["frozen_model_names"], {"dpa4": "frozen_model.pt2"})
             self.assertIn("freeze failed", ensemble)
             self.assertIn("DPA-4 freeze failed", ensemble)
+            self.assertIn("freeze -c model.ckpt.pt -o frozen_model", ensemble)
+            self.assertIn("[[ -s frozen_model.pt2 ]]", ensemble)
+            self.assertNotIn(
+                'if [[ "$ARCH" == "dpa4" ]]; then dp_exec --pt freeze -c model.ckpt.pt -o frozen_model.pth',
+                ensemble,
+            )
             self.assertIn("exit 3", ensemble)
             self.assertIn("MODEL_FILE=model.ckpt.pt", ensemble)
             self.assertIn("model_${MODEL_ID}/model.ckpt.pt", evaluation)

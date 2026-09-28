@@ -20,8 +20,9 @@ from .state import sha256_file, utc_now
 _SEED_NAME = re.compile(r"^seed[_-](?P<seed>-?\d+)$")
 _DEEPMD_MODEL_DIR = re.compile(r"^model_(?P<index>\d+)$")
 # Frozen (deployable) DeePMD models, in preference order. ``dp freeze`` writes
-# ``frozen_model.pth`` (PyTorch) or ``frozen_model.pb`` (TensorFlow); ``.pt`` /
-# ``.pt2`` appear with some backend/version combinations.
+# ``frozen_model.pth`` for ordinary PyTorch models and ``frozen_model.pb``
+# for TensorFlow; DeePMD 3.2 DPA-4 uses the AOTInductor
+# ``frozen_model.pt2`` deployment archive.
 _FROZEN_MODEL_NAMES = ("frozen_model.pth", "frozen_model.pt", "frozen_model.pt2", "frozen_model.pb")
 _RUN_ARTIFACTS = {
     "mace": ("results", "mace_model", "checkpoints", "logs"),

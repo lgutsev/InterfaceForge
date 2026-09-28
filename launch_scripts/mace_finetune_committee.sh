@@ -53,6 +53,27 @@ fi
 MODEL_PREFIX="${MACE_MODEL_PREFIX:-SiN_TiN_TiO_periodic_mace}"
 ENERGY_KEY="${MACE_ENERGY_KEY:-REF_energy}"
 FORCES_KEY="${MACE_FORCES_KEY:-REF_forces}"
+LOSS="${MACE_LOSS:-weighted}"
+VIRIALS_KEY="${MACE_VIRIALS_KEY:-}"
+VIRIALS_WEIGHT="${MACE_VIRIALS_WEIGHT:-1.0}"
+STRESS_KEY="${MACE_STRESS_KEY:-}"
+STRESS_WEIGHT="${MACE_STRESS_WEIGHT:-1.0}"
+ENERGY_WEIGHT="${MACE_ENERGY_WEIGHT:-}"
+FORCES_WEIGHT="${MACE_FORCES_WEIGHT:-}"
+ERROR_TABLE="${MACE_ERROR_TABLE:-PerAtomRMSE}"
+
+if [[ -n "$VIRIALS_KEY" && -n "$STRESS_KEY" ]]; then
+    echo "ERROR: set only one of MACE_VIRIALS_KEY or MACE_STRESS_KEY." >&2
+    exit 1
+fi
+if [[ -n "$VIRIALS_KEY" && "$LOSS" != "virials" ]]; then
+    echo "ERROR: MACE_VIRIALS_KEY requires MACE_LOSS=virials so the label enters the loss." >&2
+    exit 1
+fi
+if [[ -n "$STRESS_KEY" && "$LOSS" != "stress" ]]; then
+    echo "ERROR: MACE_STRESS_KEY requires MACE_LOSS=stress so the label enters the loss." >&2
+    exit 1
+fi
 # "foundation" reuses the foundation model's atomic reference energies and is
 # correct only for MP-compatible DFT (PBE / PBE+U on the MP settings). Use
 # "average" if the reference DFT differs.
@@ -136,15 +157,6 @@ CHECKPOINTS_DIR="$RUN_DIR/checkpoints"
 RESULTS_DIR="$RUN_DIR/results"
 LOG_DIR="$RUN_DIR/logs"
 
-if [[ "${MACE_PREFLIGHT_ONLY:-False}" == "True" ]]; then
-    echo "MACE fine-tune preflight succeeded"
-    echo "  submit dir:  $SUBMIT_DIR"
-    echo "  dataset dir: $DATASET_DIR"
-    echo "  output root: $OUTPUT_ROOT"
-    echo "  run dir:     $RUN_DIR"
-    exit 0
-fi
-
 mkdir -p "$MODEL_DIR" "$CHECKPOINTS_DIR" "$RESULTS_DIR" "$LOG_DIR"
 
 if command -v flock >/dev/null 2>&1; then
@@ -191,6 +203,30 @@ for f in "$TRAIN_FILE" "$VALID_FILE" "$TEST_FILE"; do
     [[ -s "$f" ]] || { echo "ERROR: missing or empty file: $f"; exit 1; }
 done
 
+if [[ -n "$VIRIALS_KEY" || -n "$STRESS_KEY" ]]; then
+    DATASET_FILES="$TRAIN_FILE:$VALID_FILE:$TEST_FILE" \
+    TENSOR_KEY="${VIRIALS_KEY:-$STRESS_KEY}" \
+    python - <<'PY'
+import os
+
+import numpy as np
+from ase.io import read
+
+key = os.environ["TENSOR_KEY"]
+for fname in os.environ["DATASET_FILES"].split(os.pathsep):
+    atoms = read(fname, index=0)
+    if key not in atoms.info:
+        raise RuntimeError(f"{fname}: missing tensor label {key!r} in atoms.info")
+    value = np.asarray(atoms.info[key], dtype=float)
+    if value.size not in {6, 9} or not np.isfinite(value).all():
+        raise RuntimeError(
+            f"{fname}: {key!r} must contain 6 or 9 finite tensor components; "
+            f"got shape {value.shape}"
+        )
+    print(f"{fname}: {key} shape={value.shape}")
+PY
+fi
+
 if [[ "$MULTIHEADS" == "True" && "$FOUNDATION_MODEL" == */* && -z "$PT_TRAIN_FILE" ]]; then
     echo "ERROR: MACE_MULTIHEADS=True with a local foundation model requires"
     echo "       MACE_PT_TRAIN_FILE (the pretraining replay data)."
@@ -205,6 +241,9 @@ echo "  foundation model: $FOUNDATION_MODEL"
 echo "  default dtype:    $DEFAULT_DTYPE"
 echo "  E0s:              $E0S"
 echo "  multiheads:       $MULTIHEADS"
+echo "  loss:             $LOSS"
+echo "  virials key:      ${VIRIALS_KEY:-disabled}"
+echo "  stress key:       ${STRESS_KEY:-disabled}"
 echo "  dataset dir:      $DATASET_DIR"
 echo "  output root:      $OUTPUT_ROOT"
 echo "  run dir:          $RUN_DIR"
@@ -222,6 +261,45 @@ elif grep -q -- "--swa" <<< "$HELP_TXT"; then
     STAGE_TWO_ARGS+=(--swa --start_swa "$START_STAGE_TWO")
 fi
 
+LABEL_ARGS=()
+if [[ -n "$VIRIALS_KEY" ]]; then
+    grep -q -- "--virials_key" <<< "$HELP_TXT" || {
+        echo "ERROR: installed MACE lacks --virials_key; refusing an E/F-only fallback." >&2
+        exit 2
+    }
+    grep -q -- "--virials_weight" <<< "$HELP_TXT" || {
+        echo "ERROR: installed MACE lacks --virials_weight; refusing an E/F-only fallback." >&2
+        exit 2
+    }
+    LABEL_ARGS+=(--virials_key "$VIRIALS_KEY" --virials_weight "$VIRIALS_WEIGHT")
+elif [[ -n "$STRESS_KEY" ]]; then
+    grep -q -- "--stress_key" <<< "$HELP_TXT" || {
+        echo "ERROR: installed MACE lacks --stress_key; refusing an E/F-only fallback." >&2
+        exit 2
+    }
+    grep -q -- "--stress_weight" <<< "$HELP_TXT" || {
+        echo "ERROR: installed MACE lacks --stress_weight; refusing an E/F-only fallback." >&2
+        exit 2
+    }
+    LABEL_ARGS+=(--stress_key "$STRESS_KEY" --stress_weight "$STRESS_WEIGHT")
+fi
+
+WEIGHT_ARGS=()
+if [[ -n "$ENERGY_WEIGHT" ]]; then
+    grep -q -- "--energy_weight" <<< "$HELP_TXT" || {
+        echo "ERROR: installed MACE lacks --energy_weight." >&2
+        exit 2
+    }
+    WEIGHT_ARGS+=(--energy_weight "$ENERGY_WEIGHT")
+fi
+if [[ -n "$FORCES_WEIGHT" ]]; then
+    grep -q -- "--forces_weight" <<< "$HELP_TXT" || {
+        echo "ERROR: installed MACE lacks --forces_weight." >&2
+        exit 2
+    }
+    WEIGHT_ARGS+=(--forces_weight "$FORCES_WEIGHT")
+fi
+
 FT_ARGS=(--foundation_model "$FOUNDATION_MODEL")
 if grep -q -- "--multiheads_finetuning" <<< "$HELP_TXT"; then
     FT_ARGS+=(--multiheads_finetuning "$MULTIHEADS")
@@ -229,6 +307,22 @@ fi
 [[ -n "$LR" ]] && FT_ARGS+=(--lr "$LR")
 if [[ -n "$PT_TRAIN_FILE" ]] && grep -q -- "--pt_train_file" <<< "$HELP_TXT"; then
     FT_ARGS+=(--pt_train_file "$PT_TRAIN_FILE")
+fi
+
+if [[ "${MACE_PREFLIGHT_ONLY:-False}" == "True" ]]; then
+    echo "MACE fine-tune preflight succeeded"
+    echo "  submit dir:      $SUBMIT_DIR"
+    echo "  dataset dir:     $DATASET_DIR"
+    echo "  output root:     $OUTPUT_ROOT"
+    echo "  run dir:         $RUN_DIR"
+    echo "  loss:            $LOSS"
+    echo "  virials key:     ${VIRIALS_KEY:-disabled}"
+    echo "  stress key:      ${STRESS_KEY:-disabled}"
+    echo "  energy weight:   ${ENERGY_WEIGHT:-MACE default}"
+    echo "  forces weight:   ${FORCES_WEIGHT:-MACE default}"
+    echo "  virials weight:  $VIRIALS_WEIGHT"
+    echo "  stress weight:   $STRESS_WEIGHT"
+    exit 0
 fi
 
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
@@ -261,13 +355,15 @@ echo
     --valid_batch_size "$VALID_BATCH_SIZE" \
     --max_num_epochs "$MAX_EPOCHS" \
     --patience "$PATIENCE" \
-    --loss "weighted" \
-    --error_table "PerAtomRMSE" \
+    --loss "$LOSS" \
+    --error_table "$ERROR_TABLE" \
     --default_dtype "$DEFAULT_DTYPE" \
     --ema --ema_decay 0.99 \
     --amsgrad \
     --device cuda \
     --restart_latest \
+    "${LABEL_ARGS[@]}" \
+    "${WEIGHT_ARGS[@]}" \
     "${FT_ARGS[@]}" \
     "${STAGE_TWO_ARGS[@]}" \
     "${EXTRA_ARGS[@]}"
