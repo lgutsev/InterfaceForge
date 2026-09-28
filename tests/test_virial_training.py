@@ -16,7 +16,6 @@ from interfaceforge.training import (
     validate_deepmd_dataset,
 )
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MACE_FINETUNE = ROOT / "launch_scripts" / "mace_finetune_committee.sh"
 MACE_TRAIN = ROOT / "launch_scripts" / "mace_train_committee.sh"
