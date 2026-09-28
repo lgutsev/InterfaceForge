@@ -511,7 +511,7 @@ offset per fixed composition, because the campaign VASP settings and OMat
 reference level need not have identical elemental energy zeros, pseudopotentials,
 or dispersion treatment.
 
-The default LONI environment path is `/project/lgutsev/env/uma`. It needs
+The default LONI environment path is `/project/lgutsev/env/lgutsev_dev`. It needs
 `fairchem-core`, ASE, NumPy, PyTorch/CUDA, and access to the gated
 `facebook/UMA` checkpoints. A local checkpoint path can be supplied through
 `UMA_MODEL`; otherwise the default is `uma-s-1p2p1`.
