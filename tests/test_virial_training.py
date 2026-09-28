@@ -6,7 +6,6 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-from test_config_scheduler import write_campaign
 
 from interfaceforge.config import load_campaign
 from interfaceforge.errors import SafetyError
@@ -15,6 +14,7 @@ from interfaceforge.training import (
     generate_deepmd_training,
     validate_deepmd_dataset,
 )
+from test_config_scheduler import write_campaign
 
 
 ROOT = Path(__file__).resolve().parents[1]
