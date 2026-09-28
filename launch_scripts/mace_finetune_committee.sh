@@ -92,9 +92,18 @@ DEFAULT_DTYPE="${MACE_DEFAULT_DTYPE:-float64}"
 LR="${MACE_LR:-}"
 MAX_EPOCHS="${MACE_MAX_EPOCHS:-20}"
 START_STAGE_TWO="${MACE_START_STAGE_TWO:-16}"
+USE_STAGE_TWO="${MACE_USE_STAGE_TWO:-True}"
 PATIENCE="${MACE_PATIENCE:-10}"
 BATCH_SIZE="${MACE_BATCH_SIZE:-8}"
 VALID_BATCH_SIZE="${MACE_VALID_BATCH_SIZE:-4}"
+EMA_DECAY="${MACE_EMA_DECAY:-0.99}"
+WEIGHT_DECAY="${MACE_WEIGHT_DECAY:-}"
+CLIP_GRAD="${MACE_CLIP_GRAD:-}"
+
+if [[ "$USE_STAGE_TWO" != "True" && "$USE_STAGE_TWO" != "False" ]]; then
+    echo "ERROR: MACE_USE_STAGE_TWO must be True or False." >&2
+    exit 1
+fi
 
 # Resolve both the current campaign layout and the legacy layout used by the
 # original standalone committee scripts. Explicit overrides may be absolute or
@@ -255,10 +264,28 @@ grep -q -- "--save_cpu" <<< "$HELP_TXT" && EXTRA_ARGS+=(--save_cpu)
 grep -q -- "--keep_checkpoints" <<< "$HELP_TXT" && EXTRA_ARGS+=(--keep_checkpoints)
 
 STAGE_TWO_ARGS=()
-if grep -q -- "--stage_two" <<< "$HELP_TXT"; then
-    STAGE_TWO_ARGS+=(--stage_two --start_stage_two "$START_STAGE_TWO")
-elif grep -q -- "--swa" <<< "$HELP_TXT"; then
-    STAGE_TWO_ARGS+=(--swa --start_swa "$START_STAGE_TWO")
+if [[ "$USE_STAGE_TWO" == "True" ]]; then
+    if grep -q -- "--stage_two" <<< "$HELP_TXT"; then
+        STAGE_TWO_ARGS+=(--stage_two --start_stage_two "$START_STAGE_TWO")
+    elif grep -q -- "--swa" <<< "$HELP_TXT"; then
+        STAGE_TWO_ARGS+=(--swa --start_swa "$START_STAGE_TWO")
+    fi
+fi
+
+OPTIM_ARGS=(--ema --ema_decay "$EMA_DECAY")
+if [[ -n "$WEIGHT_DECAY" ]]; then
+    grep -q -- "--weight_decay" <<< "$HELP_TXT" || {
+        echo "ERROR: installed MACE lacks --weight_decay." >&2
+        exit 2
+    }
+    OPTIM_ARGS+=(--weight_decay "$WEIGHT_DECAY")
+fi
+if [[ -n "$CLIP_GRAD" ]]; then
+    grep -q -- "--clip_grad" <<< "$HELP_TXT" || {
+        echo "ERROR: installed MACE lacks --clip_grad." >&2
+        exit 2
+    }
+    OPTIM_ARGS+=(--clip_grad "$CLIP_GRAD")
 fi
 
 LABEL_ARGS=()
@@ -322,6 +349,10 @@ if [[ "${MACE_PREFLIGHT_ONLY:-False}" == "True" ]]; then
     echo "  forces weight:   ${FORCES_WEIGHT:-MACE default}"
     echo "  virials weight:  $VIRIALS_WEIGHT"
     echo "  stress weight:   $STRESS_WEIGHT"
+    echo "  stage two:       $USE_STAGE_TWO"
+    echo "  ema decay:       $EMA_DECAY"
+    echo "  weight decay:    ${WEIGHT_DECAY:-MACE default}"
+    echo "  clip grad:       ${CLIP_GRAD:-MACE default}"
     exit 0
 fi
 
@@ -358,12 +389,12 @@ echo
     --loss "$LOSS" \
     --error_table "$ERROR_TABLE" \
     --default_dtype "$DEFAULT_DTYPE" \
-    --ema --ema_decay 0.99 \
     --amsgrad \
     --device cuda \
     --restart_latest \
     "${LABEL_ARGS[@]}" \
     "${WEIGHT_ARGS[@]}" \
+    "${OPTIM_ARGS[@]}" \
     "${FT_ARGS[@]}" \
     "${STAGE_TWO_ARGS[@]}" \
     "${EXTRA_ARGS[@]}"
