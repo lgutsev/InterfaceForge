@@ -56,6 +56,7 @@ def audit_leaf_manifests(
     deepmd_manifest: str | Path,
     *,
     reference_audit: dict[str, Any] | str | Path | None = None,
+    require_balanced_frames: bool = True,
 ) -> dict[str, Any]:
     """Require identical leaf/split membership, frame counts, and frame indices."""
     mace = _read_manifest(Path(mace_manifest))
@@ -161,7 +162,7 @@ def audit_leaf_manifests(
         for leaf in unique_leaves
     }
     sampled_counts = sorted(set(per_leaf_sampled.values()))
-    if len(sampled_counts) > 1:
+    if require_balanced_frames and len(sampled_counts) > 1:
         problems.append(
             {
                 "relative_leaf": "__dataset__",

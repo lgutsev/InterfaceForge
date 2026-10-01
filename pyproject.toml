@@ -66,6 +66,7 @@ iface-mace-leaf-collect = "interfaceforge.leaf_collect:main_mace"
 iface-deepmd-leaf-collect = "interfaceforge.leaf_collect:main_deepmd"
 iface-leaf-audit = "interfaceforge.leaf_audit:main"
 iface-mapped-collect = "interfaceforge.mapped_collect:main"
+iface-source-audit = "interfaceforge.source_audit:main"
 
 [project.urls]
 Homepage = "https://github.com/lgutsev/InterfaceForge"

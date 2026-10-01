@@ -11,6 +11,12 @@ backup/restart subdirectories cannot make a valid VASP run appear non-terminal.
 
 ## Periodic SiN/TiN/TiO campaign
 
+**October 2026 rescue:** the default map now excludes both TiO-Ideal trajectories,
+writes to `Periodic_MLIPs_rescue`, and requires a reviewed source-audit report
+before staging/export. A2 is explicitly planned but disabled until its training
+roles and numerical compatibility are qualified. Run the [source rescue procedure](../../docs/source-rescue.md)
+first; the older collection examples below are not a bypass for that gate.
+
 From the repository root:
 
 ```bash
@@ -70,7 +76,7 @@ Every sufficiently populated leaf therefore contributes to train, validation,
 and test. MACE and DeePMD receive identical source-frame indices, verified by
 membership digests in the audit manifests.
 
-This is the required policy for the periodic SiN/TiN/TiO campaign. With 48
+This is the historical policy for the periodic SiN/TiN/TiO campaign. With 48
 OUTCARs containing 600 retained frames each, it produces approximately 480/60/60
 frames per leaf and totals of 23,040 train, 2,880 validation, and 2,880 test
 frames. This avoids the earlier failure mode where complete termination branches
@@ -149,7 +155,9 @@ Exact identity is informative rather than mandatory because temperature and
 thermostat settings can differ intentionally. Tags under
 `provenance.consistent_incar_tags` are mandatory and fail the run when mixed.
 
-`collection.balance_frames_per_leaf: true` is the default. After stride, the
+`collection.balance_frames_per_leaf: true` is the generic default. The rescue map
+uses false so A2 single-frame labels cannot collapse all MD trajectories to one
+frame. After stride, the
 shortest usable trajectory defines the common count. Longer leaves are
 deterministically randomly subsampled to that count before the split, so a
 longer trajectory cannot silently dominate training.

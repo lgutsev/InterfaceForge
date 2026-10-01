@@ -49,6 +49,9 @@ environment paths, wall time, job name, executable, and resource counts before r
   directories into MACE `train.extxyz`, `valid.extxyz`, and `test.extxyz` files.
 - `collect_leaf_deepmd.py`: collects the same leaf trajectories into native DeePMD
   systems while physically retaining the source directory hierarchy.
+- `audit_vasp_sources_single.sbatch`: read-only source inventory and E/F/stress,
+  SCF, temperature and geometry review on an allocated `single` node. Exit 2
+  means unresolved findings; see the [source rescue procedure](../docs/source-rescue.md).
 - `separation_energy_mace.sbatch` and `separation_energy_deepmd.sbatch`:
   evaluate the N- and Ti-terminated adhesion trees in isolated GPU environments
   and write backend-neutral JSON partials. The DeePMD job prefers each member's

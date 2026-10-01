@@ -229,6 +229,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
         campaign,
         source_root=args.source,
         output_root=args.output,
+        source_audit=args.source_audit,
         force=args.force,
         seed=args.seed,
     )
@@ -1495,6 +1496,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--output")
     collect.add_argument("--seed", type=int, default=20260730)
     collect.add_argument("--force", action="store_true")
+    collect.add_argument("--source-audit", help="Require source qualification JSON before export")
     collect.add_argument(
         "--archive",
         metavar="OUT.zip",

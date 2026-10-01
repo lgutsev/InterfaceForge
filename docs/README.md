@@ -29,6 +29,7 @@ configuration and Slurm launch pattern.
 
 | Guide | Use it for |
 |---|---|
+| [Source rescue and qualification](source-rescue.md) | SiN/TiN quarantine, original-source audit, clean recollection and A2 checkpoint recovery |
 | [DeePMD campaigns](deepmd.md) | DPA architectures, backends, fine-tuning, preflight/smoke/training/evaluation, and runtime gates |
 | [MACE committees](mace-committee.md) | Committee collection, checksums, verification, and restoration |
 | [MACE-ROI](mace-roi.md) | Interface-local force weighting and thermodynamic-cycle loss |

@@ -2,8 +2,12 @@ schema_version: 1
 
 # Override this location without editing the template:
 #   export CER_INTERFACE_BASE=/new/path/Cer_Interface
-campaign_root: ${CER_INTERFACE_BASE}/MD_Period/Periodic_MLIPs
+# Never rebuild the legacy dataset in place. Install a reviewed release by changing this path.
+campaign_root: ${CER_INTERFACE_BASE}/MD_Period/Periodic_MLIPs_rescue
 staging_root: reference_runs
+
+# Source qualification is required before any staging/export, including --force-datasets.
+source_audit: ${CER_INTERFACE_BASE}/MD_Period/audit/source_rescue_current/source_audit.json
 initialize_campaign: true
 
 # Only files required by the collectors and constraint provenance are staged.
@@ -12,8 +16,9 @@ include_files: [OUTCAR, INCAR, POSCAR, CONTCAR, KPOINTS]
 
 # Fail before collection if the DFT label definition is incomplete or mixed.
 provenance:
-  required_incar_tags: [ENCUT, IVDW, POTIM]
-  consistent_incar_tags: [ENCUT, IVDW, POTIM]
+  # POTIM is MD-only; selected A2 single points may legitimately omit it.
+  required_incar_tags: [ENCUT, IVDW]
+  consistent_incar_tags: [ENCUT, IVDW]
   # POTCAR is fingerprinted locally but is not copied into portable datasets.
   hash_files: [OUTCAR, INCAR, POSCAR, CONTCAR, KPOINTS, POTCAR]
 
@@ -41,8 +46,20 @@ sources:
     target: bulk/TiO-Bulk-Real_450K
   - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/TiO-Bulk-Ideal_300K
     target: bulk/TiO-Bulk-Ideal_300K
+    enabled: false
+    reason: "Quarantined: pathological original MD and unconverged electronic sampling"
   - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/TiO-Bulk-Ideal_450K
     target: bulk/TiO-Bulk-Ideal_450K
+    enabled: false
+    reason: "Quarantined: pathological original MD and unconverged electronic sampling"
+
+  # Enable only after all A2 train labels pass and role-qualified single-frame sources exist.
+  # Raw 14/15/17/21 package trees must never be harvested wholesale.
+  - source: ${CER_INTERFACE_BASE}/MD_Period/A2_DFT/training_sources
+    target: a2/train
+    enabled: false
+    reason: "A2 pending labels, numerical bridge and role-qualified single-frame staging"
+    train_role_manifest: ${CER_INTERFACE_BASE}/MD_Period/A2_DFT/training_sources/roles.json
 
 collection:
   # Every trajectory contributes frames to train, validation, and test. This
@@ -52,7 +69,8 @@ collection:
   ratios: [0.8, 0.1, 0.1]
   seed: 20260730
   stride: 5
-  balance_frames_per_leaf: true
+  # A2 single-frame labels must not reduce every MD trajectory to one frame.
+  balance_frames_per_leaf: false
   include_virial: true
   type_map: [Si, N, Ti, O]
   mace_output: datasets/canonical

@@ -507,15 +507,21 @@ def collect_dataset(
     output_root: str | Path | None = None,
     force: bool = False,
     seed: int = 20260730,
+    source_audit: str | Path | None = None,
 ) -> dict[str, Any]:
     """Create synchronized canonical extxyz and native DeePMD datasets."""
 
     source = Path(source_root).resolve() if source_root else campaign.root / "runs" / "vasp"
     output = Path(output_root).resolve() if output_root else campaign.root / "datasets" / "canonical"
-    _prepare_output(output, force=force)
     sources = discover_outcars(source)
     if not sources:
         raise SafetyError(f"No VASP OUTCAR trajectories found below {source}")
+
+    admission = None
+    if source_audit is not None:
+        from .source_audit import require_source_admission
+        admission = require_source_admission(source_audit, [item.path for item in sources])
+    _prepare_output(output, force=force)
 
     settings = campaign.dataset
     ratios = settings["ratios"]
@@ -697,6 +703,10 @@ def collect_dataset(
             "systems[].run_glob in campaign.yaml to enable geometry-class stratified "
             "reporting (iface validate stratified) for them."
         ]
+    if admission is not None:
+        if require_source_admission(source_audit, [item.path for item in sources]) != admission:
+            raise SafetyError("Source admission report changed during collection; discard this export")
+        payload["source_admission"] = admission
     manifest_json = output / "manifest.json"
     manifest_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     state = StateStore(campaign.root)

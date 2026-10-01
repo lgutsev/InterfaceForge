@@ -498,6 +498,7 @@ def collect_leaf_dataset(
     split_mode: str = "heritage",
     frames_per_leaf: int | None = None,
     reference_provenance: str | Path | None = None,
+    source_audit: str | Path | None = None,
     force: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -554,6 +555,10 @@ def collect_leaf_dataset(
             "sources": preview_rows,
         }
 
+    admission = None
+    if source_audit is not None:
+        from .source_audit import require_source_admission
+        admission = require_source_admission(source_audit, [source.outcar for source in sources])
     _prepare_output(output_root, force=force)
     split_roots = {name: output_root / name for name in SPLITS}
     if engine == "deepmd":
@@ -708,6 +713,10 @@ def collect_leaf_dataset(
         "failed_leaves": len(failed_sources),
         "manifest_csv": str(manifest_csv),
     }
+    if admission is not None:
+        if require_source_admission(source_audit, [source.outcar for source in sources]) != admission:
+            raise SafetyError("Source admission report changed during collection; discard this export")
+        payload["source_admission"] = admission
     if reference_provenance is not None:
         provenance_path = Path(reference_provenance).expanduser().resolve()
         if not provenance_path.is_file():
@@ -786,6 +795,7 @@ def build_parser(default_engine: str | None = None) -> argparse.ArgumentParser:
         "--reference-provenance",
         help="Reference-provenance JSON to hash into the dataset manifest",
     )
+    parser.add_argument("--source-audit", help="Require content-bound source qualification JSON before export")
     parser.add_argument("--include-virial", action="store_true")
     parser.add_argument(
         "--type-map",
@@ -815,6 +825,7 @@ def main(argv: Sequence[str] | None = None, *, default_engine: str | None = None
         split_mode=args.split_mode,
         frames_per_leaf=args.frames_per_leaf,
         reference_provenance=args.reference_provenance,
+        source_audit=args.source_audit,
         force=args.force,
         dry_run=args.dry_run,
     )

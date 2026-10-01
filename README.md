@@ -18,7 +18,7 @@ questionable outputs are flagged instead of silently repaired or relaunched.
 | Area | What InterfaceForge provides |
 |---|---|
 | VASP campaigns | Input preparation, OPT → Step1 → Step2 AIMD staging, guarded Slurm launch, live status, failed-run repair, VASP-MLFF audit/recovery, slab vacuum and band-alignment analysis |
-| Datasets | Streaming OUTCAR collection, synchronized MACE extxyz and DeePMD NPY layouts, provenance, leakage-aware splitting, mapped multi-root campaigns |
+| Datasets | Source-quality audit with quarantine and hash-bound admission, streaming OUTCAR collection, synchronized MACE extxyz and DeePMD NPY layouts, provenance, leakage-aware splitting, mapped multi-root campaigns |
 | MLIPs | MACE and DeePMD committee generation/evaluation, live progress summaries, matched-frame cross-backend comparison, Allegro scaffolding, optional MACE-ROI training |
 | Interface validation | Work of adhesion, rigid separation curves, separation energy, stratified errors, committee uncertainty and publication-oriented summaries |
 | Chemical ordering | Fixed-composition N/O swap Monte Carlo over MLIP-relaxed interfaces, provenance archive, DFT-verification shortlist and VASP export (after PAIPAI) |
@@ -117,3 +117,6 @@ python -m compileall -q src
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution expectations.
+
+For the SiN/TiN cleanup, source qualification and A2 warm-start handoff, see
+[Source rescue and routine qualification](docs/source-rescue.md).

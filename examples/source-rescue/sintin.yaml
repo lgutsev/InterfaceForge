@@ -1,0 +1,56 @@
+schema_version: 1
+# Directory map remains the single source of truth, including disabled sources.
+mapped_config: ../mapped-leaf-campaign/periodic_nitride.yaml
+roots:
+  # Supplement mapped roots with discovery across the whole original bulk tree.
+  # Aliased runs already in the map are scanned once; newly found runs remain visible.
+  - id: bulk_inventory
+    path: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk
+    role: train
+  - id: wadh
+    path: ${CER_INTERFACE_BASE}/MD_Period/Wadh
+    role: reference
+  - id: a2_references
+    path: ${CER_INTERFACE_BASE}/MD_Period/A2_DFT/14_references
+    role: reference
+  - id: a2_pilot
+    path: ${CER_INTERFACE_BASE}/MD_Period/A2_DFT/15_pilot
+    role: audit  # Requalify only the selected train frames through training_sources.
+  - id: a2_tin_audit
+    path: ${CER_INTERFACE_BASE}/MD_Period/A2_DFT/17_audit
+    role: audit
+  - id: a2_stratified_audit
+    path: ${CER_INTERFACE_BASE}/MD_Period/A2_DFT/21_stratified_audit
+    role: audit
+    required: false  # Delivery location may still be in the dispatch/results tree.
+quarantine:
+  - pattern: TiO-Bulk-Ideal_300K
+    reason: "Exclude original TiO-Ideal MD from every active split; preserve raw files"
+  - pattern: TiO-Bulk-Ideal_450K
+    reason: "Exclude original TiO-Ideal MD from every active split; preserve raw files"
+  - pattern: X*
+    reason: "Disabled original branch; inventory retained, not eligible for recollection"
+  - pattern: '*backup*'
+    reason: "Backup branch; preserve and inventory, do not mix into active labels"
+  - pattern: '*archive*'
+    reason: "Historical restart archive; preserve and inventory, not a new trajectory"
+thresholds:
+  # Review triggers, not universal physical acceptance limits.
+  scf_residual_limit: 0.001
+  scf_jump_factor: 100
+  temperature_burn_in: 1000
+  temperature_std_ratio: 0.75
+  temperature_median_fraction: 0.5
+  force_max_ev_a: 20
+  stress_max_gpa: 30
+  energy_jump_ev_atom: 0.1
+  min_distance_a: 0.6
+  contact_stride: 50  # E/F/stress checked at every frame; expensive contact checks sampled.
+reviews: {}
+# After reviewing output, add entries keyed by source_id. Never accept by path alone:
+# mapped/interface/300K/Real/<leaf>:
+#   fingerprint: <exact fingerprint from source_audit.json>
+#   decision: accept
+#   reviewer: <name>
+#   evidence: <report/run IDs for SCF, thermostat, geometry and converged-k checks>
+#   acknowledged_codes: [KPOINT_CONVERGENCE_UNVERIFIED, ...]
