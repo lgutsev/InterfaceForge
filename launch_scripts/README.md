@@ -501,3 +501,47 @@ launch_scripts/prepare_periodic_nitride_mlips.sh --execute --collect
 
 See [`examples/mapped-leaf-campaign/README.md`](../examples/mapped-leaf-campaign/README.md)
 for output locations, path overrides, and instructions for copying the generic template.
+
+
+## Stock UMA zero-shot audit for SiN/TiN/TiO
+
+`uma_zero_shot_audit.sbatch` runs stock FAIR-Chem UMA with the `omat` task on
+the existing held-out canonical `test.extxyz`. It does not train or modify a
+model. The audit compares `REF_forces` directly and converts InterfaceForge's
+`REF_virial = -V * stress` convention back to ASE stress before comparison.
+Energy is reported both raw and after removing one constant model-reference
+offset per fixed composition, because the campaign VASP settings and OMat
+reference level need not have identical elemental energy zeros, pseudopotentials,
+or dispersion treatment.
+
+The default LONI environment path is `/project/lgutsev/env/uma`. It needs
+`fairchem-core`, ASE, NumPy, PyTorch/CUDA, and access to the gated
+`facebook/UMA` checkpoints. A local checkpoint path can be supplied through
+`UMA_MODEL`; otherwise the default is `uma-s-1p2p1`.
+
+From the `Periodic_MLIPs` campaign root, run a 32-frame smoke first:
+
+```bash
+sbatch --export=ALL,UMA_MAX_FRAMES=32 \
+  /project/lgutsev/git_develop/InterfaceForge/launch_scripts/uma_zero_shot_audit.sbatch
+```
+
+If that succeeds, run the complete held-out test split:
+
+```bash
+sbatch /project/lgutsev/git_develop/InterfaceForge/launch_scripts/uma_zero_shot_audit.sbatch
+```
+
+The launcher resumes safely by default. Results are written under
+`audit/uma_zero_shot/<model>/` as `frames.csv`, `summary_by_group.csv`,
+`metrics.json`, and `summary.md`. The summary includes diagnostic smoke
+gates for composition-centered energy RMSE, force RMSE, and stress RMSE; these
+gates are convenience thresholds, not publication acceptance criteria.
+
+If the checkpoint is already stored locally on LONI, avoid any Hugging Face
+download on the compute node:
+
+```bash
+sbatch --export=ALL,UMA_MODEL=/project/lgutsev/models/UMA/uma-s-1p2p1.pt \
+  /project/lgutsev/git_develop/InterfaceForge/launch_scripts/uma_zero_shot_audit.sbatch
+```
