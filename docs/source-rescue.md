@@ -126,6 +126,14 @@ finding: accepted with documented evidence; quarantine; relabel; or targeted
 rerun. Acceptance requires a source_id, exact fingerprint, reviewer, evidence
 and acknowledgement of every review code in the YAML. Hard failures such as
 nonfinite labels, parse/count errors or unfinished outputs cannot be waived.
+OUTCAR can echo `LREAL=T` for a saved `LREAL=Auto` or `On`. This lossy logical
+echo raises `LREAL_MODE_UNVERIFIED`, not a hard settings mismatch: the different
+optimization modes must still be established from original provenance or
+reproduction evidence. `Auto` and `.TRUE.` are not equivalent INCAR settings.
+For `MALFORMED_SCF`, inspect the original electronic line before judging the
+calculation. The scanner accepts signed numeric fields without separating
+spaces and a spaced algorithm colon; remaining parse failures retain the line
+and error text. Never waive nonfinite values or unexplained corrupt columns.
 Update decisions in a campaign copy of the YAML and audit into a new directory.
 The collector may admit the explicitly accepted train subset even while
 reference/audit findings remain unresolved. Missing required roots block it.

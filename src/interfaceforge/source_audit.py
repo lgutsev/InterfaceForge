@@ -47,6 +47,12 @@ TRACKED = (
     "ISIF",
 )
 INPUTS = ("INCAR", "POSCAR", "CONTCAR", "KPOINTS", "POTCAR", "OSZICAR", "OUTCAR", "OUTCAR.gz")
+SCF_NUMBER = r"[+-]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][+-]?\d+)?|nan|inf(?:inity)?)"
+SCF_FIELDS = re.compile(
+    rf"(?P<energy>{SCF_NUMBER})\s*(?P<de>{SCF_NUMBER})\s*(?P<deps>{SCF_NUMBER})\s+"
+    rf"(?P<ncg>\d+)\s+(?P<rms>{SCF_NUMBER})(?:\s*(?P<rmsc>{SCF_NUMBER}))?\s*",
+    re.I,
+)
 
 
 def _number(value: str) -> float:
@@ -64,16 +70,24 @@ def parse_oszicar(
     frames, issues, electronic = [], [], []
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line_number, line in enumerate(handle, 1):
-            if re.match(r"\s*(?:DAV|RMM|CG|DMP):", line):
-                tokens = line.split()
+            scf = re.match(r"\s*(?:DAV|RMM|CG|DMP)\s*:\s*(\d+)\s+(.*)", line)
+            if scf:
                 try:
-                    values = [_number(token) for token in tokens[2:5]]
-                    residual = _number(tokens[7]) if len(tokens) > 7 else None
+                    fields = SCF_FIELDS.fullmatch(scf.group(2))
+                    if fields is None:
+                        raise ValueError("unrecognized electronic column layout")
+                    values = [_number(fields[key]) for key in ("energy", "de", "deps", "rms")]
+                    residual = _number(fields["rmsc"]) if fields["rmsc"] is not None else None
                     if not all(math.isfinite(v) for v in values + ([] if residual is None else [residual])):
                         raise ValueError("nonfinite electronic values")
-                    electronic.append((int(tokens[1]), residual))
-                except (ValueError, IndexError):
-                    issues.append(issue("MALFORMED_SCF", f"OSZICAR line {line_number}", hard=True))
+                    electronic.append((int(scf.group(1)), residual))
+                except ValueError as exc:
+                    issues.append(
+                        issue("MALFORMED_SCF", f"OSZICAR line {line_number}: {exc}; {line.strip()[:240]}", hard=True)
+                    )
+                continue
+            if re.match(r"\s*(?:DAV|RMM|CG|DMP)\s*:", line):
+                issues.append(issue("MALFORMED_SCF", f"OSZICAR line {line_number}: {line.strip()[:240]}", hard=True))
                 continue
             match = re.match(r"\s*(\d+)\s+(?:T=|F=)", line)
             if not match:
@@ -431,7 +445,19 @@ def _audit_run(
                 and tag in metadata["executed"]
                 and not equivalent(tags[tag], metadata["executed"][tag], tag)
             ):
-                issues.append(issue("EXECUTED_INPUT_MISMATCH", tag, hard=True))
+                # OUTCAR's logical T says real-space projection is enabled; it
+                # cannot distinguish Auto, On, and true's different optimizers.
+                # Do not equate these modes globally or mislabel a lossy echo.
+                if (
+                    tag == "LREAL"
+                    and tags[tag].upper() in {"AUTO", "AUTOMATIC", "A", "ON", "O"}
+                    and equivalent(metadata["executed"][tag], "T")
+                ):
+                    issues.append(
+                        issue("LREAL_MODE_UNVERIFIED", f"Saved {tags[tag]}, OUTCAR T reports real-space only")
+                    )
+                else:
+                    issues.append(issue("EXECUTED_INPUT_MISMATCH", tag, hard=True))
     effective = {**tags, **metadata.get("executed", {})}
     for tag, expected in spec.get("expected_incar", {}).items():
         if not equivalent(str(expected), effective.get(tag, ""), tag):

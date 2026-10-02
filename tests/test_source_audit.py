@@ -98,6 +98,46 @@ def test_nan_does_not_silently_pass(tmp_path):
     assert any(i["hard"] for i in issues)
 
 
+def test_oszicar_signed_columns_can_touch_and_algorithm_colon_can_be_spaced(tmp_path):
+    path = tmp_path / "OSZICAR"
+    path.write_text(
+        "CG :  1   -.13238703E+04-.132E+04-.934E+02  56  .28E+02\n"
+        "CG :  2   -.13391360D+04-.152D+02-.982D+01  82  .54D+01 .00001\n"
+        "1 F= -.13391360E+04 E0= -.13391360E+04\n"
+    )
+    frames, issues = parse_oszicar(path)
+    assert frames[0]["scf_steps"] == 2 and frames[0]["last_rms_c"] == 0.00001
+    assert not any(i["hard"] for i in issues)
+
+
+@pytest.mark.parametrize("payload", ["-1 .1 .1 10 nan", "-1 .1 .1 10 *****", "-1 .1 .1 10 .01 garbage"])
+def test_bad_scf_columns_remain_hard_and_report_original_line(tmp_path, payload):
+    path = tmp_path / "OSZICAR"
+    path.write_text(f"DAV: 1 {payload}\n1 F= -1 E0= -1\n")
+    _, issues = parse_oszicar(path)
+    malformed = next(i for i in issues if i["code"] == "MALFORMED_SCF")
+    assert malformed["hard"] and payload in malformed["detail"]
+
+
+def test_outcar_logical_lreal_echo_is_review_but_false_is_real_mismatch(tmp_path):
+    from interfaceforge.source_audit import equivalent
+
+    assert not equivalent("Auto", ".TRUE.", "LREAL")
+    run, policy = fixture(tmp_path)
+    (run / "INCAR").write_text((run / "INCAR").read_text() + "LREAL=Auto\n")
+    original = (run / "OUTCAR").read_text()
+    (run / "OUTCAR").write_text(original + "LREAL = T\n")
+    with patch("interfaceforge.source_audit.scan_labels", labels_mock):
+        row = audit_sources(policy, tmp_path / "logical")["rows"][0]
+    assert row["status"] == "REVIEW"
+    assert any(i["code"] == "LREAL_MODE_UNVERIFIED" for i in row["issues"])
+    (run / "OUTCAR").write_text(original + "LREAL = F\n")
+    with patch("interfaceforge.source_audit.scan_labels", labels_mock):
+        row = audit_sources(policy, tmp_path / "false")["rows"][0]
+    assert row["status"] == "FAILED"
+    assert any(i["code"] == "EXECUTED_INPUT_MISMATCH" for i in row["issues"])
+
+
 def test_completed_run_still_requires_scientific_review(tmp_path):
     _, policy = fixture(tmp_path)
     with patch("interfaceforge.source_audit.scan_labels", labels_mock):
