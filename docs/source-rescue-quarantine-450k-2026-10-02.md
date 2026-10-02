@@ -51,12 +51,10 @@ identities; do not randomly redistribute the survivors.
 1. Update the local InterfaceForge checkout and use the changed directory map
    and audit policy. Earlier audit reports remain valid historical evidence,
    but their policy/map hashes no longer authorize collection with this profile.
-   Package 21's observed current location is
-   `/work/lgutsev/loni_smoke_tests/batch06_2026-09-30/21_vasp_a2_stratified_audit`;
-   the policy now requires that root. Resettlement is still pending. Inspect its
-   manifests and qualification evidence and rerun the audit into a fresh output
-   directory. After verified resettlement, update the policy to its permanent
-   `MD_Period/A2_DFT/21_stratified_audit` home before the next scan.
+   The owner reported that dispatch resettled package 21 on 2026-10-02; the
+   policy now requires `MD_Period/A2_DFT/21_stratified_audit`. Inspect its
+   manifests, resettlement audit and qualification evidence and rerun the audit
+   into a fresh output directory under the updated policy.
 2. Preserve the four quarantined original sources and exclude all matching
    frames from active train, validation and test. Check frozen membership IDs
    and both MACE/DeePMD exports, not only filenames. Keep diagnostic results

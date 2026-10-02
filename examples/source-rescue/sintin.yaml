@@ -20,8 +20,8 @@ roots:
     path: ${CER_INTERFACE_BASE}/MD_Period/A2_DFT/17_audit
     role: audit
   - id: a2_stratified_audit
-    # Observed home on 2026-10-02; update to the permanent A2 home after resettlement.
-    path: /work/lgutsev/loni_smoke_tests/batch06_2026-09-30/21_vasp_a2_stratified_audit
+    # Dispatcher resettlement reported on 2026-10-02; require the permanent home.
+    path: ${CER_INTERFACE_BASE}/MD_Period/A2_DFT/21_stratified_audit
     role: audit
     required: true
 quarantine:

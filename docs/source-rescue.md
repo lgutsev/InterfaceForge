@@ -46,20 +46,21 @@ reasons and requires source qualification before staging/export. It writes into
 - `/ddnB/work/lgutsev/LATech_PROJS/Cer_Interface/MD_Period/Wadh`, as references;
 - the resettled `MD_Period/A2_DFT/14_references`, `15_pilot` and `17_audit`
   directories, with non-training roles;
-- package 21 at its observed current dispatch home,
-  `/work/lgutsev/loni_smoke_tests/batch06_2026-09-30/21_vasp_a2_stratified_audit`,
-  as a required audit root until resettlement.
+- the resettled package 21 at `MD_Period/A2_DFT/21_stratified_audit`,
+  as a required audit root.
 
 Wadh must be audited even if it contributes no training frames. It does not
 replace auditing the original interface MD roots. Inventory backups and disabled
 branches as quarantined; do not silently treat them as new independent runs.
 Resolve any missing resettled package against `dispatch/resettled.tsv` and
 `dispatch/manifest.jsonl`. Update the map/policy to the verified permanent home;
-do not copy it back into smoke. The campaign owner confirmed package 21's
-current dispatch home on 2026-10-02; that root is now required. After its verified
-resettlement, update the audit root to `MD_Period/A2_DFT/21_stratified_audit`
-before scanning again. Its reviewed results are required for the A2 label-policy
-decision. Packages 14/17/21 and BBVO never enter training.
+do not copy it back into smoke. On 2026-10-02 the campaign owner reported that
+dispatch moved package 21 to its permanent home; the policy now requires
+`MD_Period/A2_DFT/21_stratified_audit`. Inspect its manifest and RESETTLE_AUDIT.tsv
+along with the dispatch ledger when consuming it. Reports created before the
+policy/path change remain historical evidence; scan into a fresh directory
+under the current policy before collection. Its reviewed results are required
+for the A2 label-policy decision. Packages 14/17/21 and BBVO never enter training.
 
 Morning command, from the LONI InterfaceForge checkout:
 

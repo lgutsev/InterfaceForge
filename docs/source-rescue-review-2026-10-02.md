@@ -7,6 +7,11 @@ The counts and candidate table below describe the unchanged earlier audit
 snapshot. Its 450 K candidates remain diagnostic only and are not eligible for
 training merely because a same-geometry relabel converges.
 
+**Location follow-up:** the owner reported that dispatch subsequently moved
+package 21 to `MD_Period/A2_DFT/21_stratified_audit` on `/ddnB`. The current
+profile requires that permanent home. Package 21 was absent from the historical
+snapshot reviewed below; a fresh scan must establish coverage at the new home.
+
 ## Evidence and decision
 
 Reviewed the uploaded `review_evidence.tar.gz` from
@@ -50,11 +55,11 @@ establish a canonical calculation before curated export. Do not train both
 copies or admit a reference/audit copy through a train counterpart.
 
 Package 21 was optional in the policy because its resettlement was uncertain.
-Its absence was therefore not reported as a required-root error. Resolve its
-current location through the dispatch ledger, verify its archive and intake,
-and add that verified root to the campaign policy. Require it for this rescue's
-final scientific review. Do not assume the previously delivered 24 tasks were
-covered by this audit, or move them back into the smoke tree.
+Its absence was therefore not reported as a required-root error. Following the
+reported resettlement, the policy requires its permanent A2 home. Verify its
+archive, intake and ledger, and include it in the next scan and final scientific
+review. Do not assume the previously delivered 24 tasks were covered by this
+historical audit, or move them back into the smoke tree.
 
 ## Active MD findings
 
@@ -145,7 +150,7 @@ intermediate-step warnings are not automatically endpoint failures.
 
 ## Concrete next worker assignment
 
-1. Locate and qualify package 21; link its actual paired results and manifest
+1. Qualify package 21 at its recorded permanent A2 home; link its actual paired results and manifest
    to this source review. Preserve the already verified permanent 14/15/17
    homes. Resolve A2 `runs/outputs` copies through manifests and input hashes.
 2. Add tighter-SCF controls to the pending staged numerical checks. Use the same
