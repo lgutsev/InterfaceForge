@@ -23,6 +23,11 @@ accuracy without converged DFT reference checks.
 
 ## 1. Use the directory map; discover the entire origin tree
 
+The [2026-10-02 corrected-audit review](source-rescue-review-2026-10-02.md)
+records the actual coverage, missing package 21, duplicated A2 outputs,
+thermal-history findings and targeted SCF controls. It is an evidence review,
+not a blanket source-acceptance decision.
+
 `examples/mapped-leaf-campaign/periodic_nitride.yaml` remains the source of truth
 for the four interface MD roots (Step2_300K/450K × Real/Ideal), all eight bulk
 origins, and the planned A2 train sources. It now records disabled sources with

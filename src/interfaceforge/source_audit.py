@@ -81,7 +81,12 @@ def issue(code: str, detail: str, *, hard: bool = False) -> dict[str, Any]:
 
 
 def parse_oszicar(
-    path: Path, *, nelm: int = 60, residual_limit: float = 1e-3, jump_factor: float = 100.0
+    path: Path,
+    *,
+    nelm: int = 60,
+    residual_limit: float = 1e-3,
+    jump_factor: float = 100.0,
+    ediff: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Inspect every ionic frame. Missing rms(c) on the last step is not zero."""
     frames, issues, electronic = [], [], []
@@ -95,7 +100,7 @@ def parse_oszicar(
                     residual = _number(fields["rmsc"]) if fields["rmsc"] is not None else None
                     if not all(math.isfinite(v) for v in values + ([] if residual is None else [residual])):
                         raise ValueError("nonfinite electronic values")
-                    electronic.append((int(scf.group(1)), residual))
+                    electronic.append((int(scf.group(1)), residual, values[1], values[2], values[3]))
                 except ValueError as exc:
                     issues.append(
                         issue("MALFORMED_SCF", f"OSZICAR line {line_number}: {exc}; {line.strip()[:240]}", hard=True)
@@ -118,7 +123,9 @@ def parse_oszicar(
                         fields[key] = None
             if fields.get("F") is None or fields.get("E0") is None or ("T" in fields and fields["T"] is None):
                 issues.append(issue("INVALID_IONIC", f"OSZICAR step {match.group(1)}", hard=True))
-            residuals = [value for _, value in electronic if value is not None]
+            residual_records = [(record[0], record[1]) for record in electronic if record[1] is not None]
+            residuals = [value for _, value in residual_records]
+            final = electronic[-1] if electronic else None
             jumps = sum(
                 b > max(a, 1e-15) * jump_factor and b > residual_limit
                 for a, b in zip(residuals, residuals[1:], strict=False)
@@ -130,6 +137,19 @@ def parse_oszicar(
                     "scf_steps": len(electronic),
                     "last_iteration": electronic[-1][0] if electronic else 0,
                     "last_rms_c": residuals[-1] if residuals else None,
+                    "last_rms_c_iteration": residual_records[-1][0] if residual_records else None,
+                    "final_rms_c": final[1] if final else None,
+                    "last_de_ev": final[2] if final else None,
+                    "last_deps_ev": final[3] if final else None,
+                    "last_rms": final[4] if final else None,
+                    "ediff_ev": ediff,
+                    # Report the energy criterion separately from the density
+                    # residual. Neither alone certifies label accuracy.
+                    "energy_criterion_met": (
+                        abs(final[2]) < ediff and abs(final[3]) < ediff
+                        if final and ediff is not None and ediff > 0
+                        else None
+                    ),
                     "residual_jumps": jumps,
                     "temperature_k": fields.get("T"),
                     "free_energy_ev": fields.get("F"),
@@ -343,13 +363,15 @@ def audit_sources(config_path: str | Path, output: str | Path, *, labels: bool =
         raise SafetyError(f"Use a new audit output directory: {output}")
     output.mkdir(parents=True, exist_ok=True)
     (output / "frames").mkdir()
-    rows, root_errors = [], []
+    rows, root_errors, missing_optional_roots = [], [], []
     seen_runs: set[Path] = set()
     thresholds = config.get("thresholds", {})
     for spec, root in roots:
         if not root.is_dir():
             if spec.get("required", True):
                 root_errors.append(f"Missing source root: {spec['id']} {root}")
+            else:
+                missing_optional_roots.append({"id": spec["id"], "path": str(root), "role": spec["role"]})
             continue
         runs = {
             p.parent for name in ("INCAR", "OUTCAR", "OUTCAR.gz", "OSZICAR") for p in root.rglob(name) if p.is_file()
@@ -399,6 +421,16 @@ def audit_sources(config_path: str | Path, output: str | Path, *, labels: bool =
     ):
         raise SafetyError("Audit policy or source directory map changed during scanning; repeat audit")
     counts = dict(Counter(row["status"] for row in rows))
+    output_copies: dict[str, list[str]] = {}
+    for row in rows:
+        label_file = row["files"].get("OUTCAR", row["files"].get("OUTCAR.gz"))
+        if label_file:
+            output_copies.setdefault(label_file["sha256"], []).append(row["source_id"])
+    duplicate_outputs = [
+        {"sha256": digest, "source_ids": sources}
+        for digest, sources in sorted(output_copies.items())
+        if len(sources) > 1
+    ]
     report = {
         "schema_version": 1,
         "config": str(config_path),
@@ -406,6 +438,10 @@ def audit_sources(config_path: str | Path, output: str | Path, *, labels: bool =
         "mapped_config": ({"path": str(mapped_path), "sha256": mapped_hash} if config.get("mapped_config") else None),
         "labels_scanned": labels,
         "root_errors": root_errors,
+        "missing_optional_roots": missing_optional_roots,
+        # Inventory byte-identical copies without changing roles, fingerprints,
+        # admission or scientific decisions for any source.
+        "duplicate_outputs": duplicate_outputs,
         "counts": counts,
         "status": "READY"
         if not root_errors and rows and all(r["status"] in {"ACCEPTED", "QUARANTINED"} for r in rows)
@@ -429,6 +465,8 @@ def audit_sources(config_path: str | Path, output: str | Path, *, labels: bool =
             )
     (output / "SUMMARY.md").write_text(
         f"# VASP source qualification: {report['status']}\n\nCounts: {counts}\n\nRoot errors: {root_errors}\n\n"
+        f"Missing optional roots (not scanned): {missing_optional_roots}\n\n"
+        f"Byte-identical output groups: {len(duplicate_outputs)} (see source_audit.json; no copies merged)\n\n"
         "No raw sources were changed. REVIEW is not permission to train. Inspect per-frame evidence, "
         "record fingerprint-bound scientific decisions in the YAML, and rerun into a fresh directory. "
         "ACCEPTED applies only to the recorded role.\n"
@@ -488,6 +526,7 @@ def _audit_run(
             nelm=int(float(effective.get("NELM", 60))),
             residual_limit=thresholds.get("scf_residual_limit", 1e-3),
             jump_factor=thresholds.get("scf_jump_factor", 100.0),
+            ediff=_number(effective["EDIFF"]) if "EDIFF" in effective else None,
         )
         issues.extend(electronic_issues)
         temps = [f["temperature_k"] for f in ionic if f["temperature_k"] is not None]

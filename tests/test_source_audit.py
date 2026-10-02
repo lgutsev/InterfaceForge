@@ -84,6 +84,53 @@ def test_false_scf_convergence_detected_with_missing_last_residual(tmp_path):
     assert {i["code"] for i in issues} >= {"SCF_RESIDUAL", "SCF_RESIDUAL_JUMP"}
 
 
+@pytest.mark.parametrize("ediff,met", [(1e-4, True), (1e-7, False), (0, None), (None, None)])
+def test_energy_stopping_evidence_does_not_erase_stale_density_residual(tmp_path, ediff, met):
+    path = tmp_path / "OSZICAR"
+    path.write_text("RMM: 4 -1 -.01 -.02 10 .01 .032\nRMM: 5 -1 -2D-6 -3D-6 10 .00004\n1 F= -1 E0= -1\n")
+    frames, issues = parse_oszicar(path, ediff=ediff)
+    frame = frames[0]
+    assert frame["energy_criterion_met"] is met
+    assert frame["last_de_ev"] == -2e-6 and frame["last_deps_ev"] == -3e-6
+    assert frame["last_rms"] == 4e-5 and frame["final_rms_c"] is None
+    assert frame["last_rms_c"] == 0.032 and frame["last_rms_c_iteration"] == 4
+    assert any(i["code"] == "SCF_RESIDUAL" for i in issues)
+
+
+def test_missing_optional_root_is_visible_without_becoming_required(tmp_path):
+    _, policy = fixture(tmp_path)
+    config = yaml.safe_load(policy.read_text())
+    config["roots"].append(
+        {"id": "delivered_audit", "path": str(tmp_path / "missing"), "role": "audit", "required": False}
+    )
+    policy.write_text(yaml.safe_dump(config))
+    with patch("interfaceforge.source_audit.scan_labels", labels_mock):
+        report = audit_sources(policy, tmp_path / "audit")
+    assert not report["root_errors"]
+    assert report["missing_optional_roots"] == [
+        {"id": "delivered_audit", "path": str(tmp_path / "missing"), "role": "audit"}
+    ]
+    assert "delivered_audit" in (tmp_path / "audit" / "SUMMARY.md").read_text()
+
+
+def test_identical_output_inventory_preserves_independent_source_roles(tmp_path):
+    import shutil
+
+    run, policy = fixture(tmp_path)
+    copy = tmp_path / "reference" / "copy"
+    shutil.copytree(run, copy)
+    config = yaml.safe_load(policy.read_text())
+    config["roots"].append({"id": "reference", "path": str(copy.parent), "role": "reference"})
+    policy.write_text(yaml.safe_dump(config))
+    with patch("interfaceforge.source_audit.scan_labels", labels_mock):
+        report = audit_sources(policy, tmp_path / "audit")
+    assert len(report["rows"]) == 2 and len(report["duplicate_outputs"]) == 1
+    assert report["duplicate_outputs"][0]["source_ids"] == ["bulk/run", "reference/copy"]
+    assert {r["role"] for r in report["rows"]} == {"train", "reference"}
+    assert len({r["fingerprint"] for r in report["rows"]}) == 2
+    assert all(r["status"] == "REVIEW" for r in report["rows"])
+
+
 def test_nelm_and_unfinished_scf(tmp_path):
     path = tmp_path / "OSZICAR"
     path.write_text("DAV: 60 -1 .1 .1 10 .01 .01\n1 F= -1 E0= -1\nDAV: 1 -1 .1 .1 10 .01 .01\n")
