@@ -30,7 +30,18 @@ if [[ ! -f "$CONFIG" ]]; then
     exit 2
 fi
 
-REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${INTERFACEFORGE_ROOT:-}" ]]; then
+    REPO_ROOT="$INTERFACEFORGE_ROOT"
+elif [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    # Slurm executes a spool copy; BASH_SOURCE no longer points into the checkout.
+    REPO_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
+else
+    REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+if [[ ! -f "$REPO_ROOT/src/interfaceforge/mapped_collect.py" ]]; then
+    echo "Submit from the InterfaceForge checkout or export INTERFACEFORGE_ROOT=/absolute/checkout" >&2
+    exit 2
+fi
 IFACE_PYTHON="${INTERFACEFORGE_PYTHON:-/project/lgutsev/env/lgutsev_dev/bin/python}"
 
 if [[ ! -x "$IFACE_PYTHON" ]]; then

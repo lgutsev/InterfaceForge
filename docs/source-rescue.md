@@ -59,8 +59,40 @@ Use an allocated node, not the head node, for scans and recollection. Use the
 existing `lgutsev_dev` environment; do not duplicate models or create a new
 environment unnecessarily. The launcher follows QB4's existing single-node
 convention without `--mem`. Run paths and time limit can be overridden normally.
+Submit from the checkout, or export `INTERFACEFORGE_ROOT` to its absolute path:
+Slurm executes a copied script whose location cannot identify the repository.
 The initial audit is expected to exit **2** with reports: this means unresolved
 REVIEW/FAILED records, not that every run failed to execute.
+
+If the cluster checkout has diverged, inspect `git status --short --branch` and
+`git log --oneline --left-right HEAD...origin/main` after fetching. When the
+working tree is clean and the local commits belong on local `main`, use
+`git switch main` followed by `git merge --no-edit origin/main`. A normal merge
+preserves both histories. Resolve any reported conflicts before submitting;
+do not reset the checkout or push its local commits without reviewing them.
+
+Alternatively, a detached worktree allows immediate submission without merging.
+It creates a small source-only checkout while keeping existing commits and
+uncommitted work intact:
+
+```bash
+(
+set -e
+REPO=/project/lgutsev/git_develop/InterfaceForge
+git -C "$REPO" fetch origin main
+AUDIT_CHECKOUT=$(mktemp -d /project/lgutsev/git_develop/InterfaceForge-source-audit.XXXXXX)
+git -C "$REPO" worktree add --detach "$AUDIT_CHECKOUT" origin/main
+export INTERFACEFORGE_ROOT="$AUDIT_CHECKOUT"
+export CER_INTERFACE_BASE=/ddnB/work/lgutsev/LATech_PROJS/Cer_Interface
+cd "$AUDIT_CHECKOUT"
+sbatch "$AUDIT_CHECKOUT/launch_scripts/audit_vasp_sources_single.sbatch" \
+  "$AUDIT_CHECKOUT/examples/source-rescue/sintin.yaml" \
+  "$CER_INTERFACE_BASE/MD_Period/audit/source_rescue_initial"
+)
+```
+
+Keep the worktree until the job has finished. If the report directory already
+contains a prior audit, choose a new report name rather than overwriting it.
 
 ## 2. Audit every source before selecting frames
 
