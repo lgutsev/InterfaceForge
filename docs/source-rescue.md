@@ -133,7 +133,10 @@ reproduction evidence. `Auto` and `.TRUE.` are not equivalent INCAR settings.
 For `MALFORMED_SCF`, inspect the original electronic line before judging the
 calculation. The scanner accepts signed numeric fields without separating
 spaces and a spaced algorithm colon; remaining parse failures retain the line
-and error text. Never waive nonfinite values or unexplained corrupt columns.
+and error text. It also decodes the observed A2 layout where a two-digit `d eps`
+exponent touches a six-digit `ncg` count (for example `E+04110112` is `E+04`
+followed by `110112`). Other unexplained widths remain blocked rather than
+guessing an exponent boundary. Never waive nonfinite values or corrupt columns.
 Update decisions in a campaign copy of the YAML and audit into a new directory.
 The collector may admit the explicitly accepted train subset even while
 reference/audit findings remain unresolved. Missing required roots block it.

@@ -110,6 +110,46 @@ def test_oszicar_signed_columns_can_touch_and_algorithm_colon_can_be_spaced(tmp_
     assert not any(i["hard"] for i in issues)
 
 
+def test_a2_actual_oszicar_joined_deps_ncg_columns(tmp_path):
+    # Exact first 15 electronic lines supplied from package 14's TiN static.
+    electronic = """DAV:   1     0.979736804929E+03    0.97974E+03   -0.33823E+04110112   0.215E+03
+DAV:   2     0.822521314546E+02   -0.89748E+03   -0.87882E+03110264   0.645E+02
+DAV:   3    -0.847494426992E+02   -0.16700E+03   -0.16377E+03162968   0.228E+02
+DAV:   4    -0.985404598519E+02   -0.13791E+02   -0.13497E+02155640   0.665E+01
+DAV:   5    -0.991526902688E+02   -0.61223E+00   -0.60991E+00175056   0.133E+01    0.369E+01
+DAV:   6    -0.792062463104E+02    0.19946E+02   -0.15925E+02147048   0.862E+01    0.133E+01
+DAV:   7    -0.785584226552E+02    0.64782E+00   -0.18653E+01154744   0.265E+01    0.858E+00
+DAV:   8    -0.785230195755E+02    0.35403E-01   -0.12591E+00141784   0.833E+00    0.140E+00
+DAV:   9    -0.785271374409E+02   -0.41179E-02   -0.19765E-01152624   0.352E+00    0.120E+00
+DAV:  10    -0.785353775141E+02   -0.82401E-02   -0.35344E-02143424   0.204E+00    0.340E-01
+DAV:  11    -0.785346314284E+02    0.74609E-03   -0.11522E-02158344   0.121E+00    0.131E-01
+DAV:  12    -0.785343409926E+02    0.29044E-03   -0.21757E-03152296   0.421E-01    0.786E-02
+DAV:  13    -0.785343557180E+02   -0.14725E-04   -0.31026E-04152672   0.153E-01    0.283E-02
+DAV:  14    -0.785343531758E+02    0.25422E-05   -0.54657E-05156280   0.815E-02    0.166E-02
+DAV:  15    -0.785343526864E+02    0.48942E-06   -0.99096E-06148432   0.249E-02    0.101E-02
+"""
+    from interfaceforge.source_audit import _scf_columns
+
+    first = _scf_columns(electronic.splitlines()[0].split(":", 1)[1].split(None, 1)[1])
+    assert float(first["deps"]) == -3382.3 and int(first["ncg"]) == 110112
+    last = _scf_columns(electronic.splitlines()[-1].split(":", 1)[1].split(None, 1)[1])
+    assert float(last["deps"]) == -0.99096e-6 and int(last["ncg"]) == 148432
+    path = tmp_path / "OSZICAR"
+    # Synthetic summary terminates the truncated excerpt for parser testing.
+    path.write_text(electronic + "1 F= -78.5343526864 E0= -78.5343526864\n")
+    frames, issues = parse_oszicar(path)
+    assert frames[0]["scf_steps"] == 15 and frames[0]["last_rms_c"] == 0.00101
+    assert not any(i["hard"] for i in issues)
+
+
+@pytest.mark.parametrize("bad", ["-0.33823E+0411011", "-0.33823E+041101123", "-0.33823E+04******"])
+def test_unknown_joined_ncg_widths_stay_hard_failures(tmp_path, bad):
+    path = tmp_path / "OSZICAR"
+    path.write_text(f"DAV: 1 0.979736E+03 0.97974E+03 {bad} 0.215E+03\n1 F= -1 E0= -1\n")
+    _, issues = parse_oszicar(path)
+    assert any(i["code"] == "MALFORMED_SCF" and i["hard"] for i in issues)
+
+
 @pytest.mark.parametrize("payload", ["-1 .1 .1 10 nan", "-1 .1 .1 10 *****", "-1 .1 .1 10 .01 garbage"])
 def test_bad_scf_columns_remain_hard_and_report_original_line(tmp_path, payload):
     path = tmp_path / "OSZICAR"

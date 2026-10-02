@@ -53,6 +53,23 @@ SCF_FIELDS = re.compile(
     rf"(?P<ncg>\d+)\s+(?P<rms>{SCF_NUMBER})(?:\s*(?P<rmsc>{SCF_NUMBER}))?\s*",
     re.I,
 )
+# VASP's two-digit E/D exponent can touch a full six-column integer ncg.
+# Decode only this observed fixed-width layout; do not truncate arbitrary
+# exponents or reinterpret an overflowing/nonfinite floating-point value.
+SCF_FIXED_EXPONENT = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)[EeDd][+-]\d{2}"
+SCF_FIELDS_JOINED_NCG = re.compile(
+    rf"(?P<energy>{SCF_NUMBER})\s*(?P<de>{SCF_NUMBER})\s*"
+    rf"(?P<deps>{SCF_FIXED_EXPONENT})(?P<ncg>\d{{6}})\s+"
+    rf"(?P<rms>{SCF_NUMBER})(?:\s*(?P<rmsc>{SCF_NUMBER}))?\s*",
+    re.I,
+)
+
+
+def _scf_columns(payload: str) -> dict[str, str | None]:
+    fields = SCF_FIELDS.fullmatch(payload) or SCF_FIELDS_JOINED_NCG.fullmatch(payload)
+    if fields is None:
+        raise ValueError("unrecognized electronic column layout")
+    return fields.groupdict()
 
 
 def _number(value: str) -> float:
@@ -73,9 +90,7 @@ def parse_oszicar(
             scf = re.match(r"\s*(?:DAV|RMM|CG|DMP)\s*:\s*(\d+)\s+(.*)", line)
             if scf:
                 try:
-                    fields = SCF_FIELDS.fullmatch(scf.group(2))
-                    if fields is None:
-                        raise ValueError("unrecognized electronic column layout")
+                    fields = _scf_columns(scf.group(2))
                     values = [_number(fields[key]) for key in ("energy", "de", "deps", "rms")]
                     residual = _number(fields["rmsc"]) if fields["rmsc"] is not None else None
                     if not all(math.isfinite(v) for v in values + ([] if residual is None else [residual])):
