@@ -1,5 +1,12 @@
 # SiN/TiN source rescue: review of the corrected LONI audit
 
+**Follow-up decision:** the campaign owner subsequently identified both original
+SiN-Bulk_450K and TiN-Bulk_450K sampling as flawed. The active rescue profile now
+quarantines them; see the [450 K decision](source-rescue-quarantine-450k-2026-10-02.md).
+The counts and candidate table below describe the unchanged earlier audit
+snapshot. Its 450 K candidates remain diagnostic only and are not eligible for
+training merely because a same-geometry relabel converges.
+
 ## Evidence and decision
 
 Reviewed the uploaded `review_evidence.tar.gz` from

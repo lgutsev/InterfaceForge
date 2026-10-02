@@ -36,10 +36,14 @@ sources:
     target: bulk/SiN-Bulk_300K
   - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/SiN-Bulk_450K
     target: bulk/SiN-Bulk_450K
+    enabled: false
+    reason: "Quarantined: persistent large temperature cycles in original 450 K MD; sampling unqualified"
   - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/TiN-Bulk_300K
     target: bulk/TiN-Bulk_300K
   - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/TiN-Bulk_450K
     target: bulk/TiN-Bulk_450K
+    enabled: false
+    reason: "Quarantined: original 450 K MD temperature cycling reported by campaign owner; sampling unqualified"
   - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/TiO-Bulk-Real_300K
     target: bulk/TiO-Bulk-Real_300K
   - source: ${CER_INTERFACE_BASE}/MD_Vac/Step2_Bulk/TiO-Bulk-Real_450K

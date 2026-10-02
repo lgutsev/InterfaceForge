@@ -9,8 +9,13 @@ results immutable; create a new dataset release and a new training output tree.
 
 Quarantine **both TiO-Bulk-Ideal_300K and TiO-Bulk-Ideal_450K** from train,
 validation and test. The 1,200 retained frames include 960 training, 120 validation
-and 120 test frames. Excluding them leaves 27,600 original frames, nominally
-22,080/2,760/2,760, before other exclusions, subset replacements or A2 additions.
+and 120 test frames. Following the 2026-10-02 temperature review, also quarantine
+**SiN-Bulk_450K and TiN-Bulk_450K** from every active split, 600 retained frames
+each. Together the four excluded trajectories remove 2,400 original frames:
+1,920 train, 240 validation and 240 test. This leaves 26,400 original frames,
+nominally 21,120/2,640/2,640, before further exclusions, subset replacements or
+A2 additions. Keep SiN/TiN 300 K and both TiO-Real sources subject to their
+remaining numerical qualification. See the [450 K quarantine decision](source-rescue-quarantine-450k-2026-10-02.md).
 Do not confuse TiO-Ideal with TiO-Real. Retain the original files for diagnosis;
 these temperature histories are not representative 300/450 K sampling. No new
 TiO-Ideal AIMD is required for this rescue. Use validated targeted statics only
@@ -39,17 +44,22 @@ reasons and requires source qualification before staging/export. It writes into
 - `/ddnB/work/lgutsev/LATech_PROJS/Cer_Interface/MD_Vac/Step2_Bulk` in full,
   to find newly added or unmapped runs;
 - `/ddnB/work/lgutsev/LATech_PROJS/Cer_Interface/MD_Period/Wadh`, as references;
-- the resettled `MD_Period/A2_DFT/14_references`, `15_pilot`, `17_audit` and
-  `21_stratified_audit` directories, with non-training roles.
+- the resettled `MD_Period/A2_DFT/14_references`, `15_pilot` and `17_audit`
+  directories, with non-training roles;
+- package 21 at its observed current dispatch home,
+  `/work/lgutsev/loni_smoke_tests/batch06_2026-09-30/21_vasp_a2_stratified_audit`,
+  as a required audit root until resettlement.
 
 Wadh must be audited even if it contributes no training frames. It does not
 replace auditing the original interface MD roots. Inventory backups and disabled
 branches as quarantined; do not silently treat them as new independent runs.
 Resolve any missing resettled package against `dispatch/resettled.tsv` and
 `dispatch/manifest.jsonl`. Update the map/policy to the verified permanent home;
-do not copy it back into smoke. Package 21's root is optional only because its
-move may not have happened yet. Its reviewed results are still required for the
-A2 label-policy decision. Packages 14/17/21 and BBVO never enter training.
+do not copy it back into smoke. The campaign owner confirmed package 21's
+current dispatch home on 2026-10-02; that root is now required. After its verified
+resettlement, update the audit root to `MD_Period/A2_DFT/21_stratified_audit`
+before scanning again. Its reviewed results are required for the A2 label-policy
+decision. Packages 14/17/21 and BBVO never enter training.
 
 Morning command, from the LONI InterfaceForge checkout:
 
@@ -153,10 +163,13 @@ Use package 23's staged checks and the existing dispatch/resettlement workflow:
 1. Re-run the interface outlier with independent electronic starts; inspect
    residual history. Check the previously unaudited interface families. Keep
    Gamma interface labels only for families supported by E/F/stress comparisons.
-2. Confirm Si3N4 at both temperatures and denser k; then replace all 1,200
-   bulk labels with same-geometry E/F/stress from qualified calculations.
+2. Qualify Si3N4 at denser k and replace the 600 active 300 K bulk labels with
+   same-geometry E/F/stress. Original 450 K geometries may be diagnostic controls;
+   relabeling them alone does not requalify their sampling. Obtain any needed
+   additional coverage from independently qualified sources.
 3. Run the 48-frame TiN first stage and denser-k checks; expand to the remaining
-   frames if it passes. Replace all channels rather than applying a mean stress
+   active 300 K frames if it passes. Keep original 450 K selections diagnostic
+   only. Replace all channels rather than applying a mean stress
    offset. That offset does not correct frame-specific force errors.
 4. Qualify the TiO-Real mesh and relabel the selected 240-frame subset first.
    Exclude superseded Gamma frames from active training; preserve source splits.

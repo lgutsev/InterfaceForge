@@ -20,10 +20,15 @@ roots:
     path: ${CER_INTERFACE_BASE}/MD_Period/A2_DFT/17_audit
     role: audit
   - id: a2_stratified_audit
-    path: ${CER_INTERFACE_BASE}/MD_Period/A2_DFT/21_stratified_audit
+    # Observed home on 2026-10-02; update to the permanent A2 home after resettlement.
+    path: /work/lgutsev/loni_smoke_tests/batch06_2026-09-30/21_vasp_a2_stratified_audit
     role: audit
-    required: false  # Delivery location may still be in the dispatch/results tree.
+    required: true
 quarantine:
+  - pattern: SiN-Bulk_450K
+    reason: "Exclude unqualified original SiN 450 K sampling from every active split; preserve raw files"
+  - pattern: TiN-Bulk_450K
+    reason: "Exclude unqualified original TiN 450 K sampling from every active split; preserve raw files"
   - pattern: TiO-Bulk-Ideal_300K
     reason: "Exclude original TiO-Ideal MD from every active split; preserve raw files"
   - pattern: TiO-Bulk-Ideal_450K
