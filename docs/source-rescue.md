@@ -2,6 +2,13 @@
 
 ## Objective and current decision
 
+Execution ownership: the laptop worker has no LONI access. It reviews verified
+D: data, prepares/tests code, manifests and job packages, and reviews returned
+reports. Lavrenty runs all LONI inspection, submission, final audit, collection
+and training commands; package/result transport and ledger updates use the
+existing dispatch workflow. Every remote step in this plan is an operator
+handoff. See the [worker assignment](source-rescue-worker-2026-10-05.md).
+
 Continue training from the existing model checkpoints after cleaning and
 correcting the data. A restart from foundation weights is not a prerequisite.
 Keep the original raw calculations, old exports, checkpoints and benchmark
