@@ -28,8 +28,14 @@ accuracy without converged DFT reference checks.
 
 ## 1. Use the directory map; discover the entire origin tree
 
+The [2026-10-05 resettled audit review](source-rescue-review-2026-10-05.md)
+supersedes the earlier missing-package-21 coverage finding. The full scan is
+complete; its 245 REVIEW and 12 QUARANTINED rows require scientific decisions,
+not another identical scan. Follow the [current worker assignment](source-rescue-worker-2026-10-05.md)
+for the interface SCF outlier, targeted numerical repair and final collection.
+
 The [2026-10-02 corrected-audit review](source-rescue-review-2026-10-02.md)
-records the actual coverage, missing package 21, duplicated A2 outputs,
+records the earlier coverage, missing package 21, duplicated A2 outputs,
 thermal-history findings and targeted SCF controls. It is an evidence review,
 not a blanket source-acceptance decision.
 
