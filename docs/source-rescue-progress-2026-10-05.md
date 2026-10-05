@@ -10,7 +10,7 @@ checkpoints are unchanged. Nothing was run on LONI and nothing was pushed.
 | Step | State | Evidence |
 | --- | --- | --- |
 | 1.1 Update InterfaceForge | Done: branch `source-rescue-2026-10-05` from `origin/main` (289c21f) in a separate worktree; the uncommitted work on `matcalc-property-validation` is untouched | `git worktree list` |
-| 1.2 Delivered resettled21 bundle | **Blocked**: not on this laptop (see Blockers) | Only the older 2026-10-02 bundle exists locally |
+| 1.2 Delivered resettled21 bundle | Done: report, policy and map hashes match the review; all 910 A2 files it fingerprints match the D: copies | Section 1, "Resettled21 bundle" |
 | 1.3 Local A2 copies and RESETTLE_AUDIT | Done: 3,259/3,259 audited members of 14, 15, 17, 21 verified by size and SHA256; nothing missing or unlisted | `intake.tsv` |
 | 1.4 91 `runs/outputs` duplicates | Done: 91/91 OUTCAR and OSZICAR identical; one canonical record each (`runs/`, which holds the inputs); roles kept from the manifests | `intake.tsv` |
 | 1.5 Package-21 source join and paired comparison | Done from full outputs | `pairs.tsv`, table below |
@@ -45,6 +45,39 @@ Outputs are on `D:\MLIP_Work_Folder\sin_tin_a2\rescue_2026-10-05\`; the small ta
 | `probe_selection.tsv` | `4aba055e572007a203b71a9f660faee5d692f900a5b470ee9c268d2f956bf441` |
 
 ## 1. Intake
+
+### Resettled21 bundle
+
+`D:\MLIP_Work_Folder\sin_tin_a2\REVIEW\review_evidence.tar.gz` (sha256
+`8ac4b43ee2b5b11a8e09a69be2cea5434402657d57a2ac8b1cad918841235589`, 16,237,135 bytes) was
+delivered on 2026-10-05. It replaced the 2026-10-02 snapshot at the same path, whose recorded hashes
+were archive `e3367fab…` and `source_audit.json` `09837fa5…`. An immutable copy of the new bundle is
+`D:\MLIP_Work_Folder\sin_tin_a2\rescue_2026-10-05\review_evidence_resettled21_8ac4b43e.tar.gz`.
+
+| Item | In the bundle | Review / repository |
+| --- | --- | --- |
+| `source_audit.json` | `5f3d110edf9a1e7b3d8ad5dc6c76ae124da7b24e708c25781e8e056c07a2f35f` | equal to the review |
+| Policy (`examples/source-rescue/sintin.yaml`) | `16b63bc75332e177efc8553e8d086aebc26566792cfa4fc5d7a62639a1dc5933` | equal to the review and to `origin/main` |
+| Map (`periodic_nitride.yaml`) | `ac711703c00311d64454456750a77ad70115e42969751fd4ad98da85f7e14bfe` | equal to the review and to `origin/main` |
+| Status | BLOCKED, 245 REVIEW, 12 QUARANTINED, no root errors | equal to the review |
+
+Its rows are:
+
+| Rows | Status | Role |
+| --- | --- | --- |
+| 44 mapped | REVIEW | train |
+| 4 mapped | QUARANTINED | train |
+| 8 bulk_inventory | QUARANTINED | train |
+| 19 Wadh | REVIEW | reference |
+| 76 package 14 | REVIEW | reference |
+| 48 package 15 | REVIEW | audit |
+| 10 package 17 | REVIEW | audit |
+| 48 package 21 | REVIEW | audit |
+
+All 910 A2 input and output files it fingerprints (INCAR, KPOINTS, POSCAR, POTCAR, CONTCAR, OSZICAR,
+OUTCAR) match the local D: copies by SHA256, with none missing. So the laptop intake below works on
+exactly the files the LONI report audited.
+
 
 Local copies are `D:\MLIP_Work_Folder\sin_tin_a2\{14_references,15_pilot,17_audit,21_stratified_audit}`.
 The 21 archive `resettle_20261002_1736_21_vasp_a2_stratified_audit.tar.gz` matches the desk ledger
@@ -217,9 +250,8 @@ the worst retained-residual frame from the 2026-10-02 review table and a typical
 (rms(c) nearest the source's retained median). It does the same for the 4 active bulk trajectories:
 SiN 300 K, TiN 300 K and TiO-Real 300/450 K. Every worst pick is the per-source maximum, none
 overlaps package 21, and all are present in the frozen ledger with their splits. SiN 300 K's worst
-frame is OUTCAR index 0, the first MD step. The per-frame residuals come from the older bundle; the
-original MD files are unchanged between the two scans, but recheck against the resettled21 report
-once it is local.
+frame is OUTCAR index 0, the first MD step. Rechecked against the resettled21 report: for all 12
+sources the per-frame SCF records are identical to the 2026-10-02 scan, and the selection is unchanged.
 
 The rungs are proposed per geometry: the stored-label reproduction at EDIFF 1E-6, then kconv (3x3x3
 interfaces/TiO, 3x3x5 TiN, 3x3x7 SiN), then kconv at EDIFF 1E-7, then PREC Accurate/LREAL .FALSE.,
@@ -261,17 +293,10 @@ historical membership and same-geometry replacement on top of it.
 
 ## Blockers and owner decisions
 
-1. **Resettled21 review bundle.** Only `D:\MLIP_Work_Folder\sin_tin_a2\REVIEW\review_evidence.tar.gz` is
-   local: the 2026-10-02 snapshot, `source_audit.json` `09837fa5…`, 199 REVIEW / 10 QUARANTINED.
-   The bundle from `MD_Period/audit/source_rescue_resettled21` (report `5f3d110e…`, policy `16b63bc7…`,
-   map `ac711703…`) is not on this laptop. The file the review calls `review_evidence.tar(1).gz` is in
-   none of the local Downloads, Desktop, D: or user folders (searched to depth 7). Ask dispatch to place
-   that one file, with its SHA256, in `D:\MLIP_Work_Folder\sin_tin_a2\REVIEW\`. Until then its hashes
-   are unverified locally.
-2. **Tolerances:** approve or edit `numerical_tolerances.yaml` before package 23 returns.
-3. **Package 23:** push the desk and generator, then submit (commands above). Also report the owner's
+1. **Tolerances:** approve or edit `numerical_tolerances.yaml` before package 23 returns.
+2. **Package 23:** push the desk and generator, then submit (commands above). Also report the owner's
    Normal-run directory and job ID.
-4. **Probe package:** approve the cost of the 24-geometry stage, after the tolerances.
-5. Then come the relabel stages (SiN 300 K 600 frames, TiN 300 K stage of 48, TiO-Real 240-frame
+3. **Probe package:** approve the cost of the 24-geometry stage, after the tolerances.
+4. Then come the relabel stages (SiN 300 K 600 frames, TiN 300 K stage of 48, TiO-Real 240-frame
    subsets), the 20 train + 16 holdout A2 labels, endpoint curation of `A2_DFT/training_sources`
    (44 + 16) and the final LONI audit. None is started; each needs DFT that has not run.
