@@ -1,0 +1,55 @@
+# SiN/TiN rescue: numerical acceptance tolerances for fixed-geometry label controls.
+#
+# Recorded 2026-10-05, BEFORE any package-23 or stage-3 probe output exists, as required by the
+# worker assignment (docs/source-rescue-worker-2026-10-05.md, step 3). Status: proposed by the
+# laptop worker; the owner signs off (or edits) before the first evaluation. Never edit a value
+# after seeing the results it would judge; a change needs a new dated entry and its reason.
+#
+# These are acceptance tolerances for label quality, distinct from the source scanner's
+# generic review triggers (examples/source-rescue/sintin.yaml `thresholds`).
+#
+# Every comparison is `candidate - reference` at the identical geometry, species order and cell,
+# from one SCF per label. E is E_sigma->0 (the deck convention); the free energy (TOTEN) is reported
+# beside it but judged with the same tolerance. Stress: all nine components, GPa, tensile positive.
+schema_version: 1
+recorded: 2026-10-05
+status: proposed  # -> approved by <owner> on <date>
+classes:
+  reproducibility:
+    # Same numerics and binary, independent electronic start (e.g. package 23 repro rungs,
+    # 21 orig vs stored). Anything larger means the SCF endpoint itself is not reproducible.
+    energy_mev_atom: 0.1
+    force_rmse_ev_a: 0.005
+    force_max_component_ev_a: 0.03
+    stress_component_gpa: 0.03
+  convergence:
+    # A numerical setting changed (EDIFF 1e-6 -> 1e-7, denser k, PREC/LREAL, 6.5.1 -> 6.6.1):
+    # the label is converged in that setting when the change stays inside these.
+    # Basis: well below the A1 model errors this rescue targets (stress ~1 GPa after A1,
+    # forces ~0.05-0.1 eV/A); package 17's 4x4x7 step moved TiN stress <= 0.17 GPa.
+    energy_mev_atom: 1.0
+    force_rmse_ev_a: 0.02
+    force_max_component_ev_a: 0.10
+    stress_component_gpa: 0.10
+  gamma_label_use:
+    # Keeping an existing Gamma-only label instead of relabeling: candidate = converged-k
+    # label, reference = the stored Gamma label. Same values as `convergence`, stated
+    # separately so a family can be admitted or relabeled on its own evidence.
+    energy_mev_atom: 1.0
+    force_rmse_ev_a: 0.02
+    force_max_component_ev_a: 0.10
+    stress_component_gpa: 0.10
+  phonon_displacement:
+    # Small-displacement frames (q-half, finite-difference): the force error relative to the
+    # force response to the displacement, RMS over atoms and components:
+    #   rms(F_candidate - F_reference) / rms(F_displaced - F_undisplaced) <= ratio
+    force_response_ratio: 0.05
+    stress_component_gpa: 0.10
+scf_qualification:
+  # Required of every new label in addition to the class tolerances; the scanner's flags
+  # alone are review triggers, not acceptance.
+  nelm_reached: false
+  residual_jumps: 0
+  max_energy_rise_after_settled_ev: 0.001  # rescue_intake scf_summary: frame_0009 rose 2.79 eV
+  eddrmm_zhegv_warnings: 0  # any occurrence holds the label for review
+  energy_criterion_met: true

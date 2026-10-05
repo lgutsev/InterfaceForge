@@ -1,0 +1,43 @@
+# SiN/TiN rescue release policy (production). Used by
+#   python -m interfaceforge.rescue_release assemble --ledger <frozen split_ledger.tsv> \
+#     --policy examples/source-rescue/release_policy.yaml --deck <admission-gated recollection> --output <new release>
+# The ledger is frozen from the historical deck; every kept or replaced frame keeps its split.
+# Every source needs a rule (exact name or glob). Replacements are reviewed same-geometry relabels
+# (one VASP run each: E_sigma->0, forces and virial = -V sigma), listed with their sha256.
+# It deliberately fails until the relabels exist: SiN 300 K is replace_all with no replacements yet.
+schema_version: 1
+type_map: [Si, N, Ti, O]  # the historical DeePMD order
+sources:
+  bulk_SiN-Bulk_450K:
+    action: exclude
+    reason: "Unqualified 450 K sampling (2026-10-02 quarantine); diagnostics only"
+  bulk_TiN-Bulk_450K:
+    action: exclude
+    reason: "Unqualified 450 K sampling (2026-10-02 quarantine); diagnostics only"
+  bulk_TiO-Bulk-Ideal_300K:
+    action: exclude
+    reason: "TiO-Ideal (8-atom, -84 GPa uniaxial) excluded from every split"
+  bulk_TiO-Bulk-Ideal_450K:
+    action: exclude
+    reason: "TiO-Ideal (8-atom, -84 GPa uniaxial) excluded from every split"
+  bulk_SiN-Bulk_300K:
+    action: replace_all  # Gamma label -137.5 meV/atom and 8.2 GPa off (package 21); all 600 geometries
+  bulk_TiN-Bulk_300K:
+    action: replace_all  # after the 48-frame stage passes; the stage alone does not qualify the rest
+  bulk_TiO-Bulk-Real_300K:
+    action: replace_subset
+    unreplaced: hold
+    reason: "Gamma labels off by 0.08 eV/A force RMSE (package 21); 240-frame relabel subset first, rest held"
+  bulk_TiO-Bulk-Real_450K:
+    action: replace_subset
+    unreplaced: hold
+    reason: "Gamma labels off by 0.08 eV/A force RMSE (package 21); 240-frame relabel subset first, rest held"
+  interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term:
+    action: exclude
+    reason: "HOLD: package 21 frame_0009 comparison unresolved (package 23 and the owner's ALGO=Normal control)"
+  interface_*:
+    action: keep  # admitted only through the source audit; Gamma use still needs per-family qualification
+replacements: []
+# - id: sin300_k337_v661
+#   path: <reviewed relabel extxyz with source_run, source_frame, label_source, REF_energy/forces/virial>
+#   sha256: <exact>

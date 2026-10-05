@@ -1,0 +1,25 @@
+group	source_run	role	source_frame	last_rms_c	retained_median_rms_c	worst_matches_table	split	overlaps_pkg21
+interface/300K/Ideal/N_Term/SiN_TiN_N-term	interface_300K_Ideal_N_Term_SiN_TiN_N-term	worst	740	0.017	0.0101	True	train	False
+interface/300K/Ideal/N_Term/SiN_TiN_N-term	interface_300K_Ideal_N_Term_SiN_TiN_N-term	typical	235	0.0101	0.0101		train	False
+interface/300K/Ideal/Ti_Term/SiN-TiN-Ti-term_O_x0.25	interface_300K_Ideal_Ti_Term_SiN-TiN-Ti-term_O_x0.25	worst	2810	0.0127	0.007645	True	train	False
+interface/300K/Ideal/Ti_Term/SiN-TiN-Ti-term_O_x0.25	interface_300K_Ideal_Ti_Term_SiN-TiN-Ti-term_O_x0.25	typical	265	0.00764	0.007645		train	False
+interface/300K/Real/N_Term/SiN_TiN_N-term_O_x1.00	interface_300K_Real_N_Term_SiN_TiN_N-term_O_x1.00	worst	2210	0.0285	0.008285	True	train	False
+interface/300K/Real/N_Term/SiN_TiN_N-term_O_x1.00	interface_300K_Real_N_Term_SiN_TiN_N-term_O_x1.00	typical	1830	0.00829	0.008285		train	False
+interface/300K/Real/Ti_Term/SiN-TiN-Ti-term_O_x0.25	interface_300K_Real_Ti_Term_SiN-TiN-Ti-term_O_x0.25	worst	2670	0.0117	0.008165	True	train	False
+interface/300K/Real/Ti_Term/SiN-TiN-Ti-term_O_x0.25	interface_300K_Real_Ti_Term_SiN-TiN-Ti-term_O_x0.25	typical	490	0.00816	0.008165		test	False
+interface/450K/Ideal/N_Term/SiN_TiN_N-term	interface_450K_Ideal_N_Term_SiN_TiN_N-term	worst	1565	0.0202	0.0111	True	train	False
+interface/450K/Ideal/N_Term/SiN_TiN_N-term	interface_450K_Ideal_N_Term_SiN_TiN_N-term	typical	5	0.0111	0.0111		train	False
+interface/450K/Ideal/Ti_Term/SiN-TiN-Ti-term	interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term	worst	235	0.0132	0.0093	True	train	False
+interface/450K/Ideal/Ti_Term/SiN-TiN-Ti-term	interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term	typical	245	0.0093	0.0093		train	False
+interface/450K/Real/N_Term/SiN_TiN_N-term	interface_450K_Real_N_Term_SiN_TiN_N-term	worst	1510	0.0206	0.00836	True	train	False
+interface/450K/Real/N_Term/SiN_TiN_N-term	interface_450K_Real_N_Term_SiN_TiN_N-term	typical	1470	0.00833	0.00836		test	False
+interface/450K/Real/Ti_Term/SiN-TiN-Ti-term_O_x1.0	interface_450K_Real_Ti_Term_SiN-TiN-Ti-term_O_x1.0	worst	2900	0.0177	0.00893	True	valid	False
+interface/450K/Real/Ti_Term/SiN-TiN-Ti-term_O_x1.0	interface_450K_Real_Ti_Term_SiN-TiN-Ti-term_O_x1.0	typical	400	0.00895	0.00893		train	False
+bulk/SiN-Bulk_300K	bulk_SiN-Bulk_300K	worst	0	0.00724	0.00321	True	test	False
+bulk/SiN-Bulk_300K	bulk_SiN-Bulk_300K	typical	395	0.00321	0.00321		train	False
+bulk/TiN-Bulk_300K	bulk_TiN-Bulk_300K	worst	2670	0.00786	0.00525	True	test	False
+bulk/TiN-Bulk_300K	bulk_TiN-Bulk_300K	typical	1015	0.00525	0.00525		train	False
+bulk/TiO-Bulk-Real_300K	bulk_TiO-Bulk-Real_300K	worst	195	0.00622	0.00304	True	valid	False
+bulk/TiO-Bulk-Real_300K	bulk_TiO-Bulk-Real_300K	typical	545	0.00304	0.00304		train	False
+bulk/TiO-Bulk-Real_450K	bulk_TiO-Bulk-Real_450K	worst	935	0.00507	0.0023	True	train	False
+bulk/TiO-Bulk-Real_450K	bulk_TiO-Bulk-Real_450K	typical	595	0.0023	0.0023		train	False

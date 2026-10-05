@@ -1,0 +1,12 @@
+# DIAGNOSTIC ONLY, never a production release: the four excluded sources removed, every other
+# source kept with its original Gamma labels. Isolates the effect of the exclusions and checks the
+# adapter end to end on the historical deck (nominal 26,400 frames: 21,120/2,640/2,640).
+schema_version: 1
+type_map: [Si, N, Ti, O]
+sources:
+  bulk_SiN-Bulk_450K: {action: exclude, reason: "450 K sampling quarantine"}
+  bulk_TiN-Bulk_450K: {action: exclude, reason: "450 K sampling quarantine"}
+  bulk_TiO-Bulk-Ideal_300K: {action: exclude, reason: "TiO-Ideal excluded"}
+  bulk_TiO-Bulk-Ideal_450K: {action: exclude, reason: "TiO-Ideal excluded"}
+  "*": {action: keep}
+replacements: []

@@ -214,3 +214,5 @@ commits on the laptop; it supplies executable handoffs instead of claiming
 remote execution. Production training starts only when the concrete release
 passes its recorded gates. Do not send another generic request for the same
 audit bundle.
+
+Progress against this assignment: [2026-10-05 worker progress](source-rescue-progress-2026-10-05.md).

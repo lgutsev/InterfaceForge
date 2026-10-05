@@ -8,6 +8,7 @@ reports. Lavrenty runs all LONI inspection, submission, final audit, collection
 and training commands; package/result transport and ledger updates use the
 existing dispatch workflow. Every remote step in this plan is an operator
 handoff. See the [worker assignment](source-rescue-worker-2026-10-05.md).
+Progress, evidence tables and pending handoffs: [2026-10-05 worker progress](source-rescue-progress-2026-10-05.md).
 
 Continue training from the existing model checkpoints after cleaning and
 correcting the data. A restart from foundation weights is not a prerequisite.
