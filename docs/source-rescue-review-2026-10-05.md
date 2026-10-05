@@ -139,6 +139,59 @@ stored-label reproduction can still be correct, but verify it through manifest
 source IDs, geometry/order and full E/F/stress comparisons. Never infer source
 identity from a nearest energy match.
 
+## Follow-up: original MD plot and the actual suspect OUTCAR
+
+The owner subsequently supplied `MD_TempPlot(1).png`, `vasp_md_FINAL.dat` and
+`OUTCAR(4)`. The DAT temperature and E0 series match all 3,000 frames of
+`mapped/interface/450K/Ideal/Ti_Term/SiN-TiN-Ti-term` exactly at the recorded
+OSZICAR precision. After the first 1,000 steps its temperature is 448.543 K
+with standard deviation 29.647 K; the last 1,000 steps give 448.863 +/- 23.420 K.
+This history does not justify a sampling quarantine analogous to the flawed
+bulk trajectories. It does not independently qualify the static labels either.
+
+The DAT's `Total_energy` equals E0 + Ekin; it omits the Nose thermostat terms
+and uses E0 rather than F. Therefore its oscillations are not a check of the
+conserved extended-system energy. See the MD definitions in
+[OSZICAR](https://vasp.at/wiki/OSZICAR).
+
+The uploaded OUTCAR SHA256 is
+`d5eb657d10083f871e7e206f575e64015931fefbfb1c13af5d7127449e298b8e`,
+exactly matching package 21 frame 0009 in the reviewed report. It confirms a
+static calculation, Gamma-centered 3x3x3 mesh, ALGO=Fast, ISTART=0 and ICHARG=2.
+There are 16 `WARNING in EDDRMM: call to ZHEGV failed` messages, including at the
+final electronic step. These warnings alone would not prove an incorrect label;
+the simultaneous late energy/density behavior is the reason to hold this result.
+
+| Electronic iteration | TOTEN before the final D3 addition (eV) | Charge rms(total) |
+| --- | ---: | ---: |
+| 41 | -2646.75895436 | 0.000045734 |
+| 42 | -2643.97340488 | 0.046227 |
+| 43 | -2641.84863615 | 0.032171 |
+| 57 | -2641.84863890 | 0.032072 |
+| 58 | -2641.84863896 | Not printed |
+
+The charge residual increases about 1,011-fold at iteration 42. Across
+iterations 41 to 43 the electronic free energy increases by 4.91031821 eV,
+while E0 increases by 4.91034680 eV. This accounts for most of the 5.09507048 eV
+final E0 discrepancy with Gamma. It is strong evidence that the audit comparison
+is contaminated by electronic optimization behavior, but does not establish the
+pre-jump iterate as the correct ground-state label or prove a unique cause.
+Do not rescue the energy by copying that intermediate value: it was not a
+qualified E/F/stress endpoint.
+
+The final D3 energy addition is -75.00675999 eV, consistent with the printed
+Edisp=-75.00676 eV. This normal final correction is separate from the earlier
+4.91 eV SCF increase; do not compare pre-D3 electronic energies directly with
+the final dataset energy and call the 75 eV difference an anomaly.
+
+Prioritize an independent-start, same-geometry, same-3x3x3-mesh
+`ALGO=Normal` control, followed by tighter-SCF verification and denser k if
+needed. VASP documents Normal as blocked Davidson and more robust than the
+RMM-DIIS phase of Fast: [ALGO](https://vasp.at/wiki/ALGO),
+[RMM-DIIS](https://vasp.at/wiki/RMM-DIIS). Keep other numerical and binary changes
+separate. No whole-trajectory sampling quarantine is added by this follow-up;
+the static comparison and source numerical qualification remain on hold.
+
 ## Remaining gates
 
 1. Resolve frame 0009 and validate package-21 source provenance and force errors.

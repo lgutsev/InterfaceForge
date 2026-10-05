@@ -56,19 +56,28 @@ cat "$P21/runs/frame_0009/static/INCAR"
 cat "$P21/runs/frame_0009/static/KPOINTS"
 ```
 
+The owner supplied the exact frame-0009 OUTCAR. It confirms a Gamma-centered
+3x3x3 mesh, 16 EDDRMM/ZHEGV warnings and a late 4.91 eV electronic-energy
+increase at iterations 42/43. Its original MD temperature history is reasonable
+after equilibration; no sampling quarantine is justified from that plot.
+The static label remains unqualified. Read the detailed follow-up in the review.
+
 Compare frame 0008 and 0009 geometry, POTCAR order, NELECT, occupations and the
 complete SCF trace. Check that the independent-start jobs use no unintended
 WAVECAR/CHGCAR. Generate controls in new directories through the campaign and
 dispatch workflow:
 
 - First reproduce the same fixed geometry, actual KPOINTS, POTCARs and other
-  numerics. Read KPOINTS; the reported NKPTS=14 is an irreducible count, not a
-  mesh specification. Keep VASP-version effects separate with a 6.5.1-to-6.6.1
+  numerics. Verify KPOINTS against the echoed 3x3x3 mesh; NKPTS=14 is its
+  irreducible count. Keep VASP-version effects separate with a 6.5.1-to-6.6.1
   bridge where the licensed binaries are available.
-- Test EDIFF=1e-7 with independent electronic starts and inspect both energy
-  changes and density history. Review ALGO/mixing or NELMIN if the raw trace
-  warrants it; record each intervention as a distinct control. NELM is already
-  150, so increasing the limit alone is not the proposed cure.
+- Prioritize an independent-start `ALGO=Normal`, EDIFF=1e-6 control at the same
+  geometry and 3x3x3 mesh to isolate the electronic algorithm. Then tighten
+  EDIFF to 1e-7 and compare full E/F/stress. Inspect diagonalization warnings,
+  both energy changes and density history. Record mixing/NELMIN interventions
+  separately if still needed. NELM is already 150, so increasing the limit alone
+  is not the proposed cure. Do not substitute an intermediate pre-jump SCF
+  energy for a qualified final endpoint.
 - Once the SCF state is reproducible, test the next denser mesh. Compare full
   forces/stress as well as both energies. Apply the same checks to the Gamma
   counterpart if the independent results disagree.
