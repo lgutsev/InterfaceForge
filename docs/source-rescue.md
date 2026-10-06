@@ -321,3 +321,12 @@ LONI preflight and warm-start commands, and paired evaluation plan. State exact
 remaining blockers. The repository implements the scanner/admission mechanism;
 the full LONI audit, numerical repairs, recollection and training still need to
 run on the user's machines.
+
+## Preparation while numerical controls run
+
+Use the [offline preparation workflow](source-rescue-parallel-preparation.md)
+to inventory the checked audit snapshot, preserve exclusions, select retained
+probe indices and validate a recovered historical split ledger. This does not
+qualify data or replace the final LONI admission audit. The checked
+[October 6 preparation](rescue-preparation-2026-10-06/SUMMARY.md) records 44
+candidate original trajectories and 26,400 retained frames; all remain REVIEW.
