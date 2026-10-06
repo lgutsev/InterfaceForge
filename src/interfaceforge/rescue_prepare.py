@@ -199,7 +199,7 @@ def write_preparation(plan: dict, output: Path) -> None:
     for name, records in (("source_inventory.csv", plan["inventory"]), ("probe_selection.csv", plan["probes"])):
         if records:
             with (output / name).open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=list(records[0]))
+                writer = csv.DictWriter(handle, fieldnames=list(records[0]), lineterminator="\n")
                 writer.writeheader()
                 writer.writerows(records)
     counts = plan["counts"]

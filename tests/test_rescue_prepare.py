@@ -67,6 +67,7 @@ def test_offline_selection_and_quarantine(tmp_path):
     write_preparation(plan, output)
     assert (output / "source_inventory.csv").is_file()
     assert (output / "probe_selection.csv").is_file()
+    assert b"\r\n" not in (output / "source_inventory.csv").read_bytes()
     with pytest.raises(FileExistsError):
         write_preparation(plan, output)
 
