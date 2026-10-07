@@ -19,11 +19,19 @@
 # Fine-tune one member of a MACE committee from a foundation model, on the same
 # fixed canonical split used by mace_train_committee.sh. Submit four seeds:
 #
-#   FM=/project/lgutsev/foundational_models/mace/mace-mpa-0-medium.model
 #   for seed in 11 23 37 53; do
-#       sbatch --export=ALL,MACE_SEED="$seed",MACE_FOUNDATION_MODEL="$FM" \
+#       sbatch --export=ALL,MACE_SEED="$seed",MACE_FOUNDATION_MODEL=mace-mpa-0-medium.model \
 #           mace_finetune_committee.sh
 #   done
+#
+# Foundation checkpoints live in the shared store
+#   $MLIP_FOUNDATION_ROOT (default
+#   /ddnB/project/ramu/lgutsev/MLIP_PROJECT_STORAGE/MLIP_Foundational_Models)
+# with one subdirectory per model family (mace/, DPA-2.4-7M/, DPA-3.1-3M/, UMA/).
+# MACE_FOUNDATION_MODEL may be an absolute .model path, a file name inside
+# $MLIP_FOUNDATION_ROOT/mace, a directory holding exactly one .model, or a bare
+# small|medium|large name. Unset, it is $MLIP_FOUNDATION_ROOT/mace, which must
+# then hold exactly one .model.
 #
 # The architecture (r_max, channels, max_L, correlation, interactions) is
 # inherited from the foundation model and cannot be set here. Output lands in
@@ -34,21 +42,39 @@ set -eo pipefail
 
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:?This script must be submitted with sbatch}"
 SEED="${MACE_SEED:?Set MACE_SEED when submitting this job}"
-FOUNDATION_MODEL="${MACE_FOUNDATION_MODEL:?Set MACE_FOUNDATION_MODEL (a .model path, or small|medium|large)}"
+FOUNDATION_ROOT="${MLIP_FOUNDATION_ROOT:-/ddnB/project/ramu/lgutsev/MLIP_PROJECT_STORAGE/MLIP_Foundational_Models}"
+FOUNDATION_MODEL="${MACE_FOUNDATION_MODEL:-$FOUNDATION_ROOT/mace}"
 
 if [[ ! "$SEED" =~ ^[0-9]+$ ]]; then
     echo "ERROR: MACE_SEED must be a non-negative integer. Received: $SEED"
     exit 1
 fi
 
-# A path must exist; a bare small|medium|large name is downloaded by MACE and
-# only works on a node with outbound network access.
-if [[ "$FOUNDATION_MODEL" == */* || "$FOUNDATION_MODEL" == *.model ]]; then
-    if [[ ! -s "$FOUNDATION_MODEL" ]]; then
-        echo "ERROR: foundation model not found: $FOUNDATION_MODEL"
-        exit 1
-    fi
-fi
+# A bare small|medium|large name is downloaded by MACE and only works on a node
+# with outbound network access; anything else must resolve to a local file.
+case "$FOUNDATION_MODEL" in
+    small|medium|large) ;;
+    *)
+        if [[ "$FOUNDATION_MODEL" != */* ]]; then
+            FOUNDATION_MODEL="$FOUNDATION_ROOT/mace/$FOUNDATION_MODEL"
+        fi
+        if [[ -d "$FOUNDATION_MODEL" ]]; then
+            mapfile -t FOUNDATION_CANDIDATES < <(find "$FOUNDATION_MODEL" -maxdepth 1 -type f \
+                -name '*.model' ! -name '*_compiled.model' | sort)
+            if [[ "${#FOUNDATION_CANDIDATES[@]}" -ne 1 ]]; then
+                echo "ERROR: $FOUNDATION_MODEL holds ${#FOUNDATION_CANDIDATES[@]} .model files;"
+                echo "       set MACE_FOUNDATION_MODEL to one of:"
+                printf '         %s\n' "${FOUNDATION_CANDIDATES[@]##*/}"
+                exit 1
+            fi
+            FOUNDATION_MODEL="${FOUNDATION_CANDIDATES[0]}"
+        fi
+        if [[ ! -s "$FOUNDATION_MODEL" ]]; then
+            echo "ERROR: foundation model not found: $FOUNDATION_MODEL"
+            exit 1
+        fi
+        ;;
+esac
 
 MODEL_PREFIX="${MACE_MODEL_PREFIX:-SiN_TiN_TiO_periodic_mace}"
 ENERGY_KEY="${MACE_ENERGY_KEY:-REF_energy}"
@@ -315,6 +341,7 @@ if [[ "${MACE_PREFLIGHT_ONLY:-False}" == "True" ]]; then
     echo "  dataset dir:     $DATASET_DIR"
     echo "  output root:     $OUTPUT_ROOT"
     echo "  run dir:         $RUN_DIR"
+    echo "  foundation:      $FOUNDATION_MODEL"
     echo "  loss:            $LOSS"
     echo "  virials key:     ${VIRIALS_KEY:-disabled}"
     echo "  stress key:      ${STRESS_KEY:-disabled}"

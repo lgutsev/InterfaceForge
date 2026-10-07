@@ -710,26 +710,52 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
         # --use-pretrain-script: take the descriptor and fitting-net architecture
         # from the pretrained checkpoint instead of the generated input.json,
         # which only carries InterfaceForge's small default dpa2/dpa3 shapes.
-        def _ft_flags(arch: str) -> str:
+        def _ft_select(arch: str) -> str:
             entry = finetune[arch]
             pretrained = shlex.quote(str(entry["pretrained"]))
             branch = shlex.quote(str(entry.get("model_branch", "RANDOM")))
-            return f"--finetune {pretrained} --model-branch {branch} --use-pretrain-script"
+            return f"{arch}) PRETRAINED={pretrained}; MODEL_BRANCH={branch} ;;"
 
-        train_cases = " ".join(f"{arch}) TRAIN_ARGS+=({_ft_flags(arch)}) ;;" for arch in ft_archs)
+        # `pretrained` may name a foundation-store directory that was not
+        # visible when the campaign was prepared; resolve it on the node.
+        ft_setup = "\n".join(
+            [
+                "resolve_pretrained() {",
+                '  local path="$1"',
+                '  if [[ -d "$path" ]]; then',
+                "    local -a found",
+                "    mapfile -t found < <(find \"$path\" -maxdepth 1 -type f "
+                "\\( -name '*.pt' -o -name '*.pth' \\) | sort)",
+                '    if [[ "${#found[@]}" -ne 1 ]]; then',
+                '      echo "ERROR: $path must hold exactly one .pt/.pth checkpoint '
+                '(found ${#found[@]}); set finetune.pretrained to the file." >&2',
+                "      return 2",
+                "    fi",
+                '    path="${found[0]}"',
+                "  fi",
+                '  [[ -s "$path" ]] || { echo "ERROR: missing pretrained checkpoint $path" >&2; return 2; }',
+                "  printf '%s\\n' \"$path\"",
+                "}",
+                'PRETRAINED=""',
+                'MODEL_BRANCH=""',
+                f'case "$ARCH" in {" ".join(_ft_select(arch) for arch in ft_archs)} esac',
+                "FT_ARGS=()",
+                'if [[ -n "$PRETRAINED" ]]; then',
+                '  PRETRAINED="$(resolve_pretrained "$PRETRAINED")" || exit 2',
+                '  echo "Fine-tuning $ARCH from $PRETRAINED (branch $MODEL_BRANCH)"',
+                '  FT_ARGS=(--finetune "$PRETRAINED" --model-branch "$MODEL_BRANCH" '
+                "--use-pretrain-script)",
+                "fi",
+            ]
+        )
+        ft_expand = '${FT_ARGS[@]+"${FT_ARGS[@]}"}'
         train_dispatch = (
             f'if [[ -s {restart_marker} ]]; then TRAIN_ARGS+=(--restart {checkpoint}); '
-            f'else case "$ARCH" in {train_cases} esac; fi'
+            f"else TRAIN_ARGS+=({ft_expand}); fi"
         )
-        smoke_cases = " ".join(
-            f"{arch}) dp_exec {backend_flag} train input.json {_ft_flags(arch)} ;;"
-            for arch in ft_archs
-        )
-        smoke_train_line = (
-            f'case "$ARCH" in {smoke_cases} '
-            f"*) dp_exec {backend_flag} train input.json ;; esac"
-        )
+        smoke_train_line = f"dp_exec {backend_flag} train input.json {ft_expand}"
     else:
+        ft_setup = ""
         train_dispatch = (
             f'if [[ -s {restart_marker} ]]; then TRAIN_ARGS+=(--restart {checkpoint}); fi'
         )
@@ -746,6 +772,7 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
             'MODEL_ID="$(printf \'%03d\' "${MODEL_INDEX}")"',
             f'RUN_DIR={shlex.quote(str(root))}/${{ARCH}}/model_${{MODEL_ID}}',
             'cd "${RUN_DIR}"',
+            *([ft_setup] if ft_setup else []),
             f"TRAIN_ARGS=({backend_flag} train input.json)",
             train_dispatch,
             'dp_exec "${TRAIN_ARGS[@]}"',
@@ -816,6 +843,7 @@ def generate_deepmd_training(campaign: Campaign, *, force: bool = False) -> dict
             'target.write_text(json.dumps(data, indent=2) + "\\n")',
             "PY",
             'cd "$SMOKE_DIR"',
+            *([ft_setup] if ft_setup else []),
             smoke_train_line,
             freeze_command,
             "mkdir -p test_results",

@@ -30,7 +30,21 @@ editable after generation.
 `dpa2_ft` / `dpa3_ft` are fine-tuning runs of the `dpa2` / `dpa3` architecture.
 Each coexists with its from-scratch counterpart in the same committee (own
 `models/deepmd/dpa<N>_ft/` tree and evaluation), so the two can be compared
-directly. They require a `finetune` block.
+directly.
+
+Pretrained checkpoints come from the shared LONI foundation store
+`/ddnB/project/ramu/lgutsev/MLIP_PROJECT_STORAGE/MLIP_Foundational_Models`
+(override with `models.deepmd.foundation_root` or the
+`IFACE_FOUNDATION_MODELS_ROOT` environment variable), one subdirectory per
+model. With no `finetune` block at all, `dpa2_ft` fine-tunes `DPA-2.4-7M/` and
+`dpa3_ft` fine-tunes `DPA-3.1-3M/` with `model_branch: RANDOM`.
+
+`pretrained` may be a checkpoint file or a directory holding exactly one
+`.pt`/`.pth` checkpoint; a relative value is taken under the foundation root.
+A directory that is visible when the campaign is loaded is resolved to its
+checkpoint immediately (and recorded as such in the manifest); otherwise the
+generated launchers resolve it on the compute node and stop if the directory
+holds zero or several checkpoints.
 
 **One `*_ft` architecture** — the flat form:
 
@@ -42,7 +56,7 @@ models:
     committee: 4
     seeds: [11, 23, 37, 53]
     finetune:
-      pretrained: /project/lgutsev/models/dpa3_openlam.pt   # a DPA-3 checkpoint
+      pretrained: DPA-3.1-3M   # under foundation_root; or an absolute .pt path
       model_branch: RANDOM     # a named multi-task head, or RANDOM to reinit fitting
 ```
 
@@ -52,8 +66,8 @@ by architecture:
 ```yaml
     architectures: [dpa2_ft, dpa3_ft]
     finetune:
-      dpa2_ft: {pretrained: /.../dpa2_openlam.pt, model_branch: RANDOM}
-      dpa3_ft: {pretrained: /.../dpa3_openlam.pt, model_branch: Omat24}
+      dpa2_ft: {pretrained: DPA-2.4-7M, model_branch: RANDOM}
+      dpa3_ft: {pretrained: DPA-3.1-3M, model_branch: Omat24}
 ```
 
 The generated `run_ensemble.slurm` runs, per matching `$ARCH` and only on the
