@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from importlib import resources
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -134,8 +135,56 @@ def _validate_dataset(dataset: dict[str, Any]) -> None:
 
 _FINETUNE_ARCHS = {"dpa2_ft": "dpa2", "dpa3_ft": "dpa3"}
 
+# Shared LONI store of foundation checkpoints, one subdirectory per model
+# (DPA-2.4-7M/, DPA-3.1-3M/, mace/, UMA/). Override per campaign with
+# models.deepmd.foundation_root or per shell with IFACE_FOUNDATION_MODELS_ROOT.
+DEFAULT_FOUNDATION_ROOT = (
+    "/ddnB/project/ramu/lgutsev/MLIP_PROJECT_STORAGE/MLIP_Foundational_Models"
+)
+# Foundation model each *_ft architecture fine-tunes when `pretrained` is unset.
+_FINETUNE_DEFAULT_MODELS = {"dpa2_ft": "DPA-2.4-7M", "dpa3_ft": "DPA-3.1-3M"}
+_CHECKPOINT_SUFFIXES = (".pt", ".pth")
 
-def _normalize_finetune(raw: Any, architectures: list[str]) -> dict[str, dict[str, str]]:
+
+def _foundation_root(deepmd: dict[str, Any]) -> str:
+    root = str(
+        deepmd.get("foundation_root")
+        or os.environ.get("IFACE_FOUNDATION_MODELS_ROOT")
+        or DEFAULT_FOUNDATION_ROOT
+    ).strip()
+    return root.rstrip("/\\") or DEFAULT_FOUNDATION_ROOT
+
+
+def _resolve_pretrained(pretrained: str, foundation_root: str, where: str) -> str:
+    """Anchor a relative ``pretrained`` under the foundation root and, when it
+    names a directory visible from here, pick the one checkpoint inside it.
+
+    A path that does not exist locally (a LONI path while preparing
+    elsewhere) is kept as given; the generated launcher repeats the directory
+    resolution at run time.
+    """
+
+    if not (Path(pretrained).is_absolute() or PurePosixPath(pretrained).is_absolute()):
+        pretrained = f"{foundation_root}/{pretrained}"
+    candidate = Path(pretrained)
+    if not candidate.is_dir():
+        return pretrained
+    checkpoints = sorted(
+        path for path in candidate.iterdir()
+        if path.is_file() and path.suffix in _CHECKPOINT_SUFFIXES
+    )
+    if len(checkpoints) != 1:
+        found = ", ".join(path.name for path in checkpoints) or "none"
+        raise ConfigurationError(
+            f"{where}.pretrained is the directory {pretrained}, which must hold exactly "
+            f"one .pt/.pth checkpoint (found: {found}); name the file instead"
+        )
+    return str(checkpoints[0])
+
+
+def _normalize_finetune(
+    raw: Any, architectures: list[str], foundation_root: str = DEFAULT_FOUNDATION_ROOT
+) -> dict[str, dict[str, str]]:
     """Return ``{ft_arch: {pretrained, model_branch}}`` for every ``*_ft``
     architecture present.
 
@@ -143,7 +192,11 @@ def _normalize_finetune(raw: Any, architectures: list[str]) -> dict[str, dict[st
     ``{pretrained: ..., model_branch: ...}`` (applied to whichever single
     ``*_ft`` architecture is present) or a per-architecture form
     ``{dpa3_ft: {pretrained: ..., model_branch: ...}, ...}`` when a committee
-    fine-tunes more than one foundation model.
+    fine-tunes more than one foundation model. ``pretrained`` may be a
+    checkpoint file or a directory holding exactly one; a relative path is
+    taken under ``foundation_root``. When omitted it defaults to that
+    architecture's model directory in the foundation store (DPA-2.4-7M for
+    ``dpa2_ft``, DPA-3.1-3M for ``dpa3_ft``).
     """
 
     ft_archs = [arch for arch in architectures if arch in _FINETUNE_ARCHS]
@@ -151,27 +204,25 @@ def _normalize_finetune(raw: Any, architectures: list[str]) -> dict[str, dict[st
         return {}
     mapping = _mapping(raw, "models.deepmd.finetune")
 
-    def _entry(value: Any, where: str) -> dict[str, str]:
+    def _entry(value: Any, arch: str, where: str) -> dict[str, str]:
         entry = _mapping(value, where)
-        pretrained = str(entry.get("pretrained", "")).strip()
-        if not pretrained:
-            raise ConfigurationError(f"{where}.pretrained is required")
+        pretrained = str(entry.get("pretrained", "")).strip() or _FINETUNE_DEFAULT_MODELS[arch]
         return {
-            "pretrained": pretrained,
+            "pretrained": _resolve_pretrained(pretrained, foundation_root, where),
             "model_branch": str(entry.get("model_branch", "RANDOM")).strip() or "RANDOM",
         }
 
-    if "pretrained" in mapping:
+    if "pretrained" in mapping or "model_branch" in mapping:
         if len(ft_archs) != 1:
             raise ConfigurationError(
                 "models.deepmd.finetune must be keyed by architecture "
                 f"({', '.join(ft_archs)}) when more than one *_ft architecture is trained"
             )
-        return {ft_archs[0]: _entry(mapping, "models.deepmd.finetune")}
+        return {ft_archs[0]: _entry(mapping, ft_archs[0], "models.deepmd.finetune")}
 
     finetune: dict[str, dict[str, str]] = {}
     for arch in ft_archs:
-        finetune[arch] = _entry(mapping.get(arch, {}), f"models.deepmd.finetune.{arch}")
+        finetune[arch] = _entry(mapping.get(arch, {}), arch, f"models.deepmd.finetune.{arch}")
     return finetune
 
 
@@ -209,7 +260,9 @@ def _validate_models(models: dict[str, Any]) -> None:
             and backend == "tensorflow"
         ):
             raise ConfigurationError("DPA-2/3/4 campaigns require a PyTorch backend")
-        finetune = _normalize_finetune(deepmd.get("finetune"), architectures)
+        finetune = _normalize_finetune(
+            deepmd.get("finetune"), architectures, _foundation_root(deepmd)
+        )
         deepmd.update(
             {
                 "committee": committee,

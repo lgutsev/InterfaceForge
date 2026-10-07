@@ -265,12 +265,15 @@ seeds, but every member starts from a foundation model instead of random
 initialization. Output goes to `mace_finetune_committee/seed_<seed>/` so it
 never collides with the from-scratch committee.
 
-First download a foundation model to a compute-node-readable path (a bare
-`small|medium|large` name only works with outbound network access):
+Foundation checkpoints live in the shared LONI store
+`/ddnB/project/ramu/lgutsev/MLIP_PROJECT_STORAGE/MLIP_Foundational_Models`
+(override with `MLIP_FOUNDATION_ROOT`), one subdirectory per family:
+`mace/`, `DPA-2.4-7M/`, `DPA-3.1-3M/`, `UMA/`. Put MACE checkpoints in `mace/`
+(a bare `small|medium|large` name only works with outbound network access):
 
 ```bash
 # MACE-MPA-0 medium (MPtrj + sAlex, PBE(+U)) — recommended, needs mace >= 0.3.10
-wget -P /project/lgutsev/foundational_models/mace/ \
+wget -P /ddnB/project/ramu/lgutsev/MLIP_PROJECT_STORAGE/MLIP_Foundational_Models/mace/ \
   https://github.com/ACEsuit/mace-foundations/releases/download/mace_mpa_0/mace-mpa-0-medium.model
 # older mace: MACE-MP-0 medium instead
 #   .../mace_mp_0/2023-12-03-mace-128-L1_epoch-199.model
@@ -278,15 +281,19 @@ wget -P /project/lgutsev/foundational_models/mace/ \
 
 Check `python -c "import mace; print(mace.__version__)"` in `mace_env` first.
 
-Then submit four seeds from the campaign root:
+Then submit four seeds from the campaign root. `MACE_FOUNDATION_MODEL` accepts
+a file name inside `mace/`, an absolute `.model` path, or a directory holding
+exactly one `.model`; left unset it uses `mace/` itself, which then must hold a
+single checkpoint (the job lists the candidates and stops otherwise):
 
 ```bash
-FM=/project/lgutsev/foundational_models/mace/mace-mpa-0-medium.model
 for seed in 11 23 37 53; do
-    sbatch --export=ALL,MACE_SEED="$seed",MACE_FOUNDATION_MODEL="$FM" \
+    sbatch --export=ALL,MACE_SEED="$seed",MACE_FOUNDATION_MODEL=mace-mpa-0-medium.model \
         mace_finetune_committee.sh
 done
 ```
+
+`MACE_PREFLIGHT_ONLY=True` prints the resolved foundation checkpoint.
 
 Both MACE committee launchers retain compatibility with the older flat layout
 where the submission directory directly contains the three `.extxyz` files.
