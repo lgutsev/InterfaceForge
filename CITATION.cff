@@ -5,6 +5,8 @@ type: software
 authors:
   - family-names: Gutsev
     given-names: Lavrenty G.
+    orcid: "https://orcid.org/0000-0002-9679-9093"
+    affiliation: "Louisiana Tech University"
 repository-code: "https://github.com/lgutsev/InterfaceForge"
 license: MIT
 version: 0.1.0
