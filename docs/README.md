@@ -18,6 +18,7 @@ quick start, and maturity boundaries.
 | Guide | Use it for |
 |---|---|
 | [VASP workflows](vasp.md) | Input utilities, OPT/Step1/Step2, launch/status/repair, VASP-MLFF audit/recovery, vacuum analysis, plotting and archives |
+| [Neural density initialization](density-init.md) | Opt-in `neural_paw_dft` starting CHGCAR, AFM-safe MAGMOM policy, launch-time HPC hook, and the paired standard-vs-neural benchmark |
 | [MLFF interface grid](mlff-interfaces.md) | Bulk/interface VASP-MLFF training grids and heat-flux recovery |
 | [Reference profiles](reference-profiles.md) | Bundled literature/reference configurations |
 
