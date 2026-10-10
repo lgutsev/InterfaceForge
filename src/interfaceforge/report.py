@@ -42,6 +42,8 @@ def _lcurve_final(path: Path) -> dict[str, Any] | None:
 
 
 def build_report(campaign: Campaign, output: str | Path | None = None) -> dict[str, Any]:
+    """Write the HTML dashboard (and a JSON summary beside it) for a campaign; return the summary."""
+
     destination = Path(output).resolve() if output else campaign.root / "reports" / "index.html"
     destination.parent.mkdir(parents=True, exist_ok=True)
     state = StateStore(campaign.root).load()

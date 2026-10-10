@@ -22,6 +22,8 @@ DEFAULT_REQUIRED_INCAR_TAGS = ("ENCUT", "IVDW", "POTIM")
 
 
 def sha256_file(path: Path, *, chunk_size: int = 8 * 1024 * 1024) -> str:
+    """Hex SHA-256 of a file, read in ``chunk_size`` blocks."""
+
     digest = sha256()
     with path.open("rb") as handle:
         while chunk := handle.read(chunk_size):
@@ -93,6 +95,8 @@ def build_vasp_reference_record(
     file_paths: Mapping[str, Path] | None = None,
     required_incar_tags: Sequence[str] = DEFAULT_REQUIRED_INCAR_TAGS,
 ) -> dict[str, Any]:
+    """Provenance record for one staged VASP leaf: parsed INCAR, OUTCAR identity and file digests."""
+
     resolved_paths = dict(file_paths or {})
     incar_path = resolved_paths.get("INCAR", source_leaf / "INCAR")
     incar_tags = parse_incar(incar_path)
@@ -133,6 +137,8 @@ def audit_vasp_reference_records(
     *,
     consistent_incar_tags: Sequence[str] = DEFAULT_REQUIRED_INCAR_TAGS,
 ) -> dict[str, Any]:
+    """Cross-check provenance records (INCAR vs OUTCAR, tag consistency, versions); status OK or FAILED."""
+
     consistent = [str(tag).upper() for tag in consistent_incar_tags]
     problems: list[dict[str, Any]] = []
     for record in records:
@@ -291,6 +297,8 @@ def write_vasp_reference_provenance(
     audit: dict[str, Any],
     output: Path,
 ) -> dict[str, str]:
+    """Write the records (JSON and CSV) and the audit (JSON) under ``output``; return the paths."""
+
     output.mkdir(parents=True, exist_ok=True)
     records_path = output / "reference_provenance.json"
     csv_path = output / "reference_provenance.csv"
