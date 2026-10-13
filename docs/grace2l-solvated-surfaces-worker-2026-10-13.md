@@ -4,7 +4,8 @@
 
 Repository: https://github.com/lgutsev/InterfaceForge
 Create branch feat/grace2l-solvated-surfaces from freshly fetched main, in an isolated worktree. Do not overwrite another worker's edits. Read repository instructions first.
-Audit snapshot inspected on 2026-10-13: main 380c14d4a5c37e230fa63d649cae1461396a50cd.
+Initial implementation audit on 2026-10-13: main 380c14d4a5c37e230fa63d649cae1461396a50cd (historical baseline, not a required branch base).
+Instruction reviewed and extended from main db121e2d19fa54569d564cbae09e8671b77ecc1d. Always fetch the latest main before creating the implementation branch.
 This assignment is to implement and test a usable optional integration, not just write a proposal. Keep integration correctness, DFT accuracy and production readiness as separate reported outcomes.
 
 Current main has reactive oxide states, hydroxylation/proton-transfer construction, VASP export/audit and matched-frame MACE/DeePMD evaluation. No GRACE implementation was found in this audit. Relevant entry points: src/interfaceforge/vasp.py, vasp_provenance.py, mlip_compare.py, validation.py, surface/, scheduler/config/CLI modules; docs/reactive-surfaces.md, docs/vasp.md, docs/mlip-comparison.md, docs/verification.md. Inspect these before choosing module boundaries. Reuse an existing calculator abstraction if present in your checkout.
@@ -274,3 +275,97 @@ Include this investigation in docs/grace-solvated-surfaces.md and the final
 worker report, with separate readiness states for neutral solvated surfaces
 and charged electrode/PZC systems. Missing recording, DFT labels, suitable
 binary, model support or charge prescription must remain explicit blockers.
+
+## 7. Review additions: execution gates and free-energy fidelity
+
+### Native VASP-MLFF versus GRACE lifecycle
+
+Keep the source study's reported workflow explicit: native VASP-MLFF
+on-the-fly DFT sampling/training, external GRACE refitting, then GRACE
+prediction-only sampling. These are distinct engines and stages. Do not
+implement an automatic native-MLFF-to-GRACE conversion unless exported
+DFT energies/forces, units, electronic settings and source identities have
+been verified. Native MLFF predictions must not be mistaken for DFT labels.
+Capture which engine supplied each frame and whether a DFT call occurred.
+
+Use separate preparation profiles and output directories for DFT labeling,
+native MLFF exploration (if actually used), GRACE inference and external
+GRACE fitting. Preserve the existing audited labeling/admission machinery.
+A GRACE inference output must never enter a canonical DFT dataset merely
+because it is formatted like OUTCAR.
+
+### Bounded implementation sequence
+
+1. Preflight, model manifest and offline preparation tests.
+2. One small frozen-geometry ASE/VASP parity case, followed by orthogonal
+   and skewed-cell cases, a constrained-slab case and a restart check.
+3. Foundation accuracy on an initial target of 20–50 existing audited,
+   diverse frames, stratified by solvent/interface/reactive state.
+4. One neutral wet-interface smoke trajectory of at most 1,000 steps,
+   followed by a matched timestep/NVE check if the preceding gates pass.
+5. Source-backed charged pilot preparation, with execution only within
+   the campaign's recorded labeling/sampling budget.
+6. Fine-tuning preparation only after the foundation benchmark identifies
+   a concrete deficit. Full PMF sampling is a later gated stage.
+
+These counts are initial pilot ceilings, not scientific convergence claims.
+Record the actual atom count, timestep, resources, walltime and DFT-call
+ceiling in configuration; permit explicit overrides. Missing audited target
+frames should produce a small labeling proposal rather than silently expand
+the job count. Failure of VASP build support should still allow the independent
+ASE integration and source audit to be completed and reported separately.
+
+### Bias application and label extraction test
+
+Before WHAM/metadynamics execution, establish which installed VASP mechanism
+actually supports each chosen collective variable and bias under GRACE.
+Generic "advanced sampling supported" documentation is not evidence for a
+particular CV implementation or version. Record software/plugin versions.
+
+On a small fixed geometry, test bias disabled and enabled. Verify the change
+in force equals the implemented bias gradient within a declared tolerance,
+and that any reported biased energy has the expected contribution. Exercise
+restart continuity of the bias/window state. Treat native energy, external
+bias energy, raw force, bias force and constrained force as distinct quantities.
+If output semantics cannot be established, block training export from biased
+runs rather than subtract a guessed term. Do not add dispersion, electrostatic
+or bias contributions twice across the ASE and VASP paths.
+
+### Accuracy needed for a shallow PMF
+
+The displayed approximately 0.1 eV wells motivate stronger tests than a
+pooled force RMSE. Report signed mean and RMS ion-force residuals along the
+surface-normal CV, resolved by distance and hydration state. Where bin coverage
+permits, integrate the signed mean residual over distance as a diagnostic
+energy-error scale with uncertainty; explicitly identify the ensemble used.
+This diagnostic is not a corrected PMF and cannot replace reweighting or
+independent reference sampling.
+
+For a feasible small validation subset, evaluate DFT-minus-ML energy differences
+on ML-sampled configurations. Report variation as well as any constant offset,
+and assess overlap/effective sample size before claiming thermodynamic
+reweighting works. Remove arbitrary energy zeros only within a fixed
+composition/electron-state Hamiltonian. Never use per-window fitted offsets
+to conceal a distance-dependent error. Predeclare accuracy targets relative
+to the intended observable, not only to total energy per atom.
+
+PMF uncertainty must reflect correlated samples: report equilibration removal,
+autocorrelation-aware or block uncertainty, adjacent-window overlap,
+independent-start checks and remaining hysteresis. For metadynamics document
+the bias/reweighting convention and convergence evidence separately from WHAM.
+
+### Frozen atoms, restarts and surface observables
+
+Store full reference forces and mobility masks separately. Frozen slab atoms
+may legitimately exert nonzero forces; NVE drift checks must account for fixed
+constraints and any time-dependent driving. Compare statistical observables
+across ASE/VASP trajectories rather than demand long trajectories remain
+pointwise identical.
+
+Require restart preservation of atom IDs/order, velocities where applicable,
+cell, constraints, model hash and thermostat/bias state. A restart that silently
+changes the model or electronic-state campaign must fail provenance checks.
+
+The final report must state whether the feature is only runnable, numerically
+consistent across engines, accurate on held-out target frames, or validated
+for the intended ensemble/free-energy observable. These are separate claims.
