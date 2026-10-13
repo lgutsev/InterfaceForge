@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import yaml
@@ -12,7 +14,7 @@ from test_config_scheduler import write_campaign
 
 from interfaceforge.campaign import prepare_campaign
 from interfaceforge.cli import build_parser, main
-from interfaceforge.config import load_campaign
+from interfaceforge.config import DEFAULT_FOUNDATION_ROOT, load_campaign
 from interfaceforge.errors import ConfigurationError, SafetyError
 from interfaceforge.training import (
     _deepmd_shell_prefix,
@@ -93,7 +95,7 @@ class TrainingTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_dpa2_finetune_requires_pretrained_checkpoint(self) -> None:
+    def test_finetune_defaults_to_the_foundation_store(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for split in ("train", "valid", "test"):
@@ -102,13 +104,50 @@ class TrainingTests(unittest.TestCase):
                 "enabled": True,
                 "profile": "deepmd_gpu",
                 "backend": "pt_expt",
-                "architectures": ["dpa2_ft"],
+                "architectures": ["dpa2_ft", "dpa3_ft"],
                 "committee": 1,
                 "seeds": [11],
             }
-            campaign_path = write_campaign(root, deepmd=deepmd)
-            with self.assertRaisesRegex(ConfigurationError, "pretrained is required"):
-                load_campaign(campaign_path)
+            with mock.patch.dict(os.environ):
+                os.environ.pop("IFACE_FOUNDATION_MODELS_ROOT", None)
+                campaign = load_campaign(write_campaign(root, deepmd=deepmd))
+            finetune = campaign.models["deepmd"]["finetune"]
+            self.assertEqual(
+                finetune["dpa2_ft"]["pretrained"], f"{DEFAULT_FOUNDATION_ROOT}/DPA-2.4-7M"
+            )
+            self.assertEqual(
+                finetune["dpa3_ft"]["pretrained"], f"{DEFAULT_FOUNDATION_ROOT}/DPA-3.1-3M"
+            )
+            self.assertEqual(finetune["dpa3_ft"]["model_branch"], "RANDOM")
+
+    def test_finetune_directory_resolves_to_its_single_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for split in ("train", "valid", "test"):
+                make_deepmd_system(root, split)
+            store = root / "MLIP_Foundational_Models"
+            model_dir = store / "DPA-3.1-3M"
+            model_dir.mkdir(parents=True)
+            (model_dir / "DPA-3.1-3M.pt").write_bytes(b"ckpt")
+            (model_dir / "README.md").write_text("notes", encoding="utf-8")
+            deepmd = {
+                "enabled": True,
+                "profile": "deepmd_gpu",
+                "backend": "pt_expt",
+                "architectures": ["dpa3_ft"],
+                "committee": 1,
+                "seeds": [11],
+                "foundation_root": str(store),
+                "finetune": {"model_branch": "Omat24"},
+            }
+            campaign = load_campaign(write_campaign(root, deepmd=deepmd))
+            self.assertEqual(
+                campaign.models["deepmd"]["finetune"]["dpa3_ft"],
+                {"pretrained": str(model_dir / "DPA-3.1-3M.pt"), "model_branch": "Omat24"},
+            )
+            (model_dir / "DPA-3.1-3M-older.pth").write_bytes(b"ckpt")
+            with self.assertRaisesRegex(ConfigurationError, "exactly one .pt/.pth"):
+                load_campaign(write_campaign(root, deepmd=deepmd))
 
     def test_dpa2_finetune_emits_gated_finetune_flags(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -145,8 +184,10 @@ class TrainingTests(unittest.TestCase):
             smoke = (root / "models/deepmd/run_smoke.slurm").read_text(encoding="utf-8")
             self.assertIn('case "$ARCH" in dpa2_ft)', ensemble)
             self.assertIn("--finetune", ensemble)
-            self.assertIn("--model-branch Domains_Anode --use-pretrain-script", ensemble)
-            self.assertIn("--model-branch Domains_Anode --use-pretrain-script", smoke)
+            for script in (ensemble, smoke):
+                self.assertIn("MODEL_BRANCH=Domains_Anode", script)
+                self.assertIn('--model-branch "$MODEL_BRANCH" --use-pretrain-script', script)
+                self.assertIn('resolve_pretrained "$PRETRAINED"', script)
             # scratch dpa2 must not pick up the finetune flag
             self.assertNotIn("dpa2/model_${MODEL_ID} --finetune", ensemble)
             ft_input = json.loads(
@@ -195,9 +236,9 @@ class TrainingTests(unittest.TestCase):
                 {"pretrained": str(dpa3_ckpt), "model_branch": "Omat24"},
             )
             ensemble = (root / "models/deepmd/run_ensemble.slurm").read_text(encoding="utf-8")
-            self.assertIn("dpa3_ft) TRAIN_ARGS+=(--finetune", ensemble)
-            self.assertIn("--model-branch Omat24 --use-pretrain-script", ensemble)
-            self.assertIn("--model-branch RANDOM --use-pretrain-script", ensemble)
+            self.assertIn("dpa3_ft) PRETRAINED=", ensemble)
+            self.assertIn("MODEL_BRANCH=Omat24 ;;", ensemble)
+            self.assertIn("MODEL_BRANCH=RANDOM ;;", ensemble)
             dpa3_input = json.loads(
                 (root / "models/deepmd/dpa3_ft/model_000/input.json").read_text(encoding="utf-8")
             )

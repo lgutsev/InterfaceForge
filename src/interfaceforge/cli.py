@@ -73,6 +73,7 @@ from .phase_diagram import hull_report, suggest_phases
 from .phase_diagram import write_reports as write_phases_reports
 from .progress import mlip_progress
 from .progress import render as render_progress
+from .properties import register_commands as register_properties_commands
 from .reference_import import (
     activate_reference_profile,
     expand_reference_profile,
@@ -2326,6 +2327,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fixed-composition N/O swap Monte Carlo over MLIP-relaxed interfaces (after PAIPAI)",
     )
     register_swap_mc_commands(swap_mc.add_subparsers(dest="swap_mc_command", required=True))
+
+    properties_parser = commands.add_parser(
+        "properties",
+        help="Optional MatCalc bulk-property validation of trained MACE/DeePMD models (Python>=3.11)",
+    )
+    register_properties_commands(properties_parser.add_subparsers(dest="properties_command", required=True))
 
     vasp = commands.add_parser("vasp", help="Safe VASP utilities")
     vasp_commands = vasp.add_subparsers(dest="vasp_command", required=True)
