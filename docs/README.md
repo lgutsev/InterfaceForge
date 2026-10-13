@@ -34,6 +34,7 @@ configuration and Slurm launch pattern.
 | [MACE committees](mace-committee.md) | Committee collection, checksums, verification, and restoration |
 | [MACE-ROI](mace-roi.md) | Interface-local force weighting and thermodynamic-cycle loss |
 | [Allegro](allegro.md) | Allegro job generation and LAMMPS-oriented preflight |
+| [GRACE-2L solvated-surface worker](grace2l-solvated-surfaces-worker-2026-10-13.md) | Implementation assignment, Kresse source investigation, density and charged-interface validation |
 | [Matched MLIP comparison](mlip-comparison.md) | Exact-frame MACE/DeePMD comparison, metrics, calibration, figures, and live progress |
 | [Packaging](packaging.md) | Committee archives, dataset backups, and upload-ready Hugging Face repositories |
 
