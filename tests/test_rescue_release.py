@@ -486,7 +486,7 @@ EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "source-rescue"
         ("bulk_TiO-Bulk-Real_450K", "replace_subset", "all"),
         ("interface_300K_Ideal_Ti_Term_SiN-TiN-Ti-term", "keep", "energy_forces"),
         ("interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term_O_x0.25", "keep", "energy_forces"),
-        ("interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term", "exclude", "all"),  # the stale HOLD, left for the PI
+        ("interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term", "keep", "energy_forces"),  # HOLD lifted 2026-10-21
         ("interface_300K_Real_Ti_Term_SiN-TiN-Ti-term_O_x1.0", "keep", "all"),
         ("interface_450K_Ideal_N_Term_SiN_TiN_N-term_O_x0.5", "keep", "all"),
     ],

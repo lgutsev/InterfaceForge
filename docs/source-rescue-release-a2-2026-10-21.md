@@ -128,7 +128,7 @@ the absence is a policy rule, recorded per frame and per system, and checked on 
 | `bulk_SiN-Bulk_300K` | `replace_subset`, unreplaced `hold`; SD004's 150 | all | SD004 accept (2026-10-16); SD016 3×3×7 converged |
 | `bulk_TiN-Bulk_300K` | `replace_subset`, unreplaced `hold`; SD005's 48 + SD011's 102 | energy_forces | decision 8 as revisited after SD014 |
 | `interface_*K_Ideal_Ti_Term_*` (10 sources) | keep | energy_forces | decision 4 (SD003 frame_0002 is a logged exception) |
-| `interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term` | exclude (HOLD, unchanged) | – | see the flag below |
+| `interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term` | under the Ideal Ti-term rule (HOLD lifted 2026-10-21) | energy_forces | item 1 below |
 | other `interface_*` | keep | all | B0 interface criteria |
 | 450 K bulk, TiO-Ideal | exclude, as before | – | |
 | TiO-Real 300/450 K | `replace_subset` hold, no relabels (as before): all 1,200 held | – | |
@@ -144,31 +144,35 @@ leaks.
 
 | | Frames |
 |---|---:|
-| Kept | 23,400 |
+| Kept | 24,000 |
 | Replaced | 300 |
 | Held | 2,100 |
-| Excluded | 3,000 |
+| Excluded | 2,400 |
 | Added to train | 44 |
 | Holdout | 16 |
 
-Release splits: 19,004 train, 2,370 valid and 2,370 test. By `label_use`:
+Release splits: 19,484 train, 2,430 valid and 2,430 test. By `label_use`:
 
 | Split | all | energy_forces | forces_virial |
 |---|---:|---:|---:|
-| train | 14,520 | 4,440 | 44 |
-| valid | 1,815 | 555 | 0 |
-| test | 1,815 | 555 | 0 |
+| train | 14,520 | 4,920 | 44 |
+| valid | 1,815 | 615 | 0 |
+| test | 1,815 | 615 | 0 |
 
 ## Open items for the PI
 
-1. **Stale HOLD on `interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term`** (package 23 era: "package 21 frame_0009
-   comparison unresolved"). It is left as it is: confirm or lift it. Two consequences:
-   - While it stands, A2 never sees that source (600 frames).
-   - One of SD015's 4 independent Ideal Ti-term test frames (450 K O 0, f2015) comes from it. A2 can still be
-     scored on SD015's own k-converged label for that frame, but its source is out of distribution for A2.
+1. **Stale HOLD on `interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term` (lifted by the PI 2026-10-21).** It was set
+   in the package 23 era because package 21's frame_0009 (the converged-k check of deck frame 2725) failed SCF
+   under ALGO=Fast. That question is answered:
+   - Package 23's Normal controls ran cleanly and the owner's control reproduced them.
+   - Against them, the Γ label is within energy (0.60 meV/atom) and stress (0.066 GPa); the force excess on Ti
+     is the family's bias, which decision 4 covers.
+   - SD003 frame_0010 reproduced the stored label of frame 2725 exactly.
+   - SD015 f2015, from the same source, meets decision 4.
 
-   Lifting the hold means deleting the exact rule. The source then falls under the Ideal Ti-term glob (keep,
-   energy_forces), and the glob must stay above `interface_*`; a test pins this order.
+   The exact rule is deleted, so the source falls under the Ideal Ti-term glob (keep, energy_forces). The glob
+   must stay above `interface_*`; a test pins this order. 600 frames return (480/60/60), and SD015 f2015's source
+   is now in distribution (it stays in the test split, which its leakage reference allows).
 2. **Package 15's labels file (resolved 2026-10-21).** Package 15's labels are its OUTCARs. I produced the
    extxyz with the desk's own collector:
 
@@ -180,7 +184,7 @@ Release splits: 19,004 train, 2,370 valid and 2,370 test. By `label_use`:
    - It is byte-for-byte reproducible, sha256 `75985ad7…`.
    - With the owner's go-ahead it is now written to
      `D:\SiN-TiN_Interface_Dispatch\results\pkg15_collect_2026-10-21\labeled.extxyz`, with the pinned sha256.
-   - `plan --deck` on the committed policy, unmodified, passes with the counts above and no leaks.
+   - `plan --deck` on the committed policy, unmodified, passes with no leaks.
 3. **Decision 4d against the 2026-10-20 review.** 4d (2026-10-19) said the 10 SD003/SD009 converged-k frames
    become A2's Ideal Ti-term test set. Those frames are in the deck's train split, and the 2026-10-20 review
    says A2 reports on SD015's 4 instead. So the 10 stay in training and are not leakage references. Listing

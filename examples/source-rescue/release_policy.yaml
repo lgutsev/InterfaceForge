@@ -49,14 +49,11 @@ sources:
     action: replace_subset
     unreplaced: hold
     reason: "Gamma labels off by 0.08 eV/A force RMSE (package 21); 240-frame relabel subset first, rest held"
-  interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term:
-    # STALE (package 23 era), left as it is for the PI to confirm or lift; see
-    # docs/source-rescue-release-a2-2026-10-21.md. Deleting this rule puts the source under the
-    # Ideal Ti-term glob below (keep, energy_forces).
-    action: exclude
-    reason: "HOLD: package 21 frame_0009 comparison unresolved (package 23 and the owner's ALGO=Normal control)"
   interface_*K_Ideal_Ti_Term_*:
     # The 10 Ideal Ti-terminated sources (300/450 K, O 0/0.25/0.5/0.75/1.0). Must stay above interface_*.
+    # The package 23-era HOLD on interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term was lifted by the PI
+    # 2026-10-21: package 23's Normal controls passed, SD003 frame_0010 reproduced the stored label of
+    # frame 2725, and SD015 f2015 from that source meets decision 4.
     action: keep
     label_use: energy_forces
     reason: >-
