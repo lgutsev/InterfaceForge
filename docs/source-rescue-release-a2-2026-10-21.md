@@ -191,9 +191,18 @@ Release splits: 19,484 train, 2,430 valid and 2,430 test. By `label_use`:
    2026-10-20 review made SD015's 4 frozen-test frames the test set. The 10 stay in training and are not
    leakage references; no policy change. A2's report may still show them as an in-sample diagnostic (A2
    against their converged-k labels), not as a test.
-4. **Sampling weights.** The 44 strain frames are 8–16-atom cells in their own small systems. With A1's
-   `auto_prob: prob_uniform`, each small system would be sampled as often as a 600-frame interface. This is a
-   training-input choice, not a release rule.
+4. **Sampling weights (agreed with the PI 2026-10-21; weights are a proposal for A2's input).** A2 trains on
+   40 interface systems (19,200 frames, 287–308 atoms), 2 bulk relabel systems (240 frames) and the strain
+   cells (44 frames, 8–16 atoms).
+   - A1's `prob_uniform` would give each strain system as much weight as a 480-frame interface: 10.6 % of
+     batches on 44 frames, one TiN system with only 2 frames.
+   - `prob_sys_size` alone would give the strain block 0.23 % and the 300 K relabels 1.2 %, too little for
+     the elastic and virial signal A2 is meant to fix.
+   - Done in the policy: both strain entries share `leaf: strain`, so the export writes 3 strain systems
+     instead of 5 (TiN 8-atom 14 frames, Si₃N₄ 14-atom 26, TiN 16-atom 4). Provenance stays per frame.
+   - Proposed for A2's training input: `prob_sys_size` with fixed block weights, interfaces 0.85, 300 K bulk
+     relabels 0.08, strain 0.07 (DeePMD `prob_sys_size;start:end:weight;…` over the systems in that order).
+     Per-block validation errors decide whether strain needs more.
 
 ## What the tool cannot express or does not check
 

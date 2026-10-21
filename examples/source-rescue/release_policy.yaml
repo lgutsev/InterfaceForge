@@ -93,7 +93,7 @@ added_frames:
     sha256: 75985ad7acf5d1dff31d207e6a6f1e8ed6dbfdf35ce65d1f9216e5d8deec88cf
     split: train
     label_use: forces_virial
-    leaf: strain/pkg15
+    leaf: strain  # one DeePMD system per formula across pkg15 and SD006; provenance stays per frame
     expected_frames: 24
     reason: "Decision 9: package 15 released for training as is (Accurate/.FALSE., meets B5 against Med/.FALSE.)"
   - id: SD006_strain_train
@@ -102,7 +102,7 @@ added_frames:
     select: {role: train}
     split: train
     label_use: forces_virial
-    leaf: strain/SD006
+    leaf: strain  # one DeePMD system per formula across pkg15 and SD006; provenance stays per frame
     expected_frames: 20
     reason: "SD006's 20 training strain frames (frame list confirmed by the PI 2026-10-20); decision 9"
   - id: SD006_strain_holdout

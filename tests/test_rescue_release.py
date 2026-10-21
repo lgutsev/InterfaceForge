@@ -504,6 +504,7 @@ def test_shipped_policy_lists_the_strain_frames_and_holdouts():
         "SD006_strain_train": ("train", "forces_virial", 20),
         "SD006_strain_holdout": ("holdout", "forces_virial", 16),
     }
+    assert {a.get("leaf") for a in shipped["added_frames"] if a["split"] == "train"} == {"strain"}
     assert sum(r["expected_frames"] for r in shipped["replacements"]) == 300
     assert {r["id"]: r["forbid"] for r in shipped["leakage_references"]} == {
         "pkg14_references": ["train", "valid", "test"],
