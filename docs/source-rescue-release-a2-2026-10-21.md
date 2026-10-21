@@ -169,7 +169,7 @@ Release splits: 19,004 train, 2,370 valid and 2,370 test. By `label_use`:
 
    Lifting the hold means deleting the exact rule. The source then falls under the Ideal Ti-term glob (keep,
    energy_forces), and the glob must stay above `interface_*`; a test pins this order.
-2. **Package 15's labels file does not exist on D: yet.** Package 15's labels are its OUTCARs. I produced the
+2. **Package 15's labels file (resolved 2026-10-21).** Package 15's labels are its OUTCARs. I produced the
    extxyz with the desk's own collector:
 
    ```
@@ -178,10 +178,9 @@ Release splits: 19,004 train, 2,370 valid and 2,370 test. By `label_use`:
 
    - The result is 24/24 ok, taking the final ionic step for the two relaxations.
    - It is byte-for-byte reproducible, sha256 `75985ad7…`.
-   - It is written only to my scratchpad, because D: is read-only for this work.
-   - The policy pins that sha256 at `D:\SiN-TiN_Interface_Dispatch\results\pkg15_collect_2026-10-21\labeled.extxyz`.
-     The desk must write it there before `plan` or `assemble` can run unmodified. The dry run used a copy of
-     the policy pointing at the scratch file.
+   - With the owner's go-ahead it is now written to
+     `D:\SiN-TiN_Interface_Dispatch\results\pkg15_collect_2026-10-21\labeled.extxyz`, with the pinned sha256.
+   - `plan --deck` on the committed policy, unmodified, passes with the counts above and no leaks.
 3. **Decision 4d against the 2026-10-20 review.** 4d (2026-10-19) said the 10 SD003/SD009 converged-k frames
    become A2's Ideal Ti-term test set. Those frames are in the deck's train split, and the 2026-10-20 review
    says A2 reports on SD015's 4 instead. So the 10 stay in training and are not leakage references. Listing

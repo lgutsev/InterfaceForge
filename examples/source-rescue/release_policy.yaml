@@ -91,7 +91,7 @@ added_frames:
     # Package 15's OUTCARs (final ionic step for the two relaxations, frames 0022-0023), collected with
     # sin-tin-a2-gen fa221a6: python campaigns/a2_pilot/a2_campaign.py collect
     #   D:\MLIP_Work_Folder\sin_tin_a2\15_pilot --output D:\SiN-TiN_Interface_Dispatch\results\pkg15_collect_2026-10-21
-    # (24/24 ok; reproducible byte for byte). Not yet on D:: the desk writes it there.
+    # (24/24 ok; reproducible byte for byte). Written there 2026-10-21 with the owner's go-ahead.
     path: D:\SiN-TiN_Interface_Dispatch\results\pkg15_collect_2026-10-21\labeled.extxyz
     sha256: 75985ad7acf5d1dff31d207e6a6f1e8ed6dbfdf35ce65d1f9216e5d8deec88cf
     split: train
