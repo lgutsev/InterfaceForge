@@ -113,9 +113,10 @@ the absence is a policy rule, recorded per frame and per system, and checked on 
 
 **Not verified:**
 
-- **Not run.** I did not run `dp train` or `dp test` on a masked system. Before the launch, a 10-step
-  `dp train` on two tiny systems (one without `virial.npy`, one without `energy.npy`) on the LONI module
-  would confirm the behaviour.
+- **Not run yet: SD018.** SiN-TiN Dispatch package SD018 (written 2026-10-21, awaiting the PI's approval) is the
+  run that confirms it. It trains on 9 systems that `assemble` wrote with this policy, on the LONI module A1 uses,
+  and probes the find flags and the installed loss directly. It runs from scratch and fine-tuned from A1, and its
+  `check_mask_smoke.py` gives the verdict. Until it passes, the masking rests on the source reading.
 - **Version.** I read the v3.2.0b0 tag, not the exact build in the container.
 - **TensorFlow backend.** Not checked. A1 is PyTorch.
 - **Fine-tuning from A1.** If A2 fine-tunes from A1 with a bias change (`change_bias` or finetune stats),
@@ -215,3 +216,6 @@ Release splits: 19,484 train, 2,430 valid and 2,430 test. By `label_use`:
   separate conversion of `holdout.extxyz`.
 - **Other trainers.** The extxyz files omit the masked keys. A trainer that requires every key, rather than
   weighting missing ones to zero, must read `label_use`.
+- **Line endings.** On Windows, `assemble` writes its text files (json, csv, `.raw`) with CRLF endings. DeePMD
+  reads them either way, but a release copied into git, or compared by hash on Linux, needs LF. SD018 normalized
+  its copy. Writing LF in the tool (`newline="\n"` on every text write) is a small follow-up.
