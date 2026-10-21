@@ -185,10 +185,12 @@ Release splits: 19,484 train, 2,430 valid and 2,430 test. By `label_use`:
    - With the owner's go-ahead it is now written to
      `D:\SiN-TiN_Interface_Dispatch\results\pkg15_collect_2026-10-21\labeled.extxyz`, with the pinned sha256.
    - `plan --deck` on the committed policy, unmodified, passes with no leaks.
-3. **Decision 4d against the 2026-10-20 review.** 4d (2026-10-19) said the 10 SD003/SD009 converged-k frames
-   become A2's Ideal Ti-term test set. Those frames are in the deck's train split, and the 2026-10-20 review
-   says A2 reports on SD015's 4 instead. So the 10 stay in training and are not leakage references. Listing
-   them would fail the plan, as it should. Please confirm.
+3. **Decision 4d against the 2026-10-20 review (confirmed by the PI 2026-10-21: 4d superseded).** 4d
+   (2026-10-19) said the 10 SD003/SD009 converged-k frames become A2's Ideal Ti-term test set. All 10 are in
+   the deck's train split, and their MD neighbours stay in train, so they cannot be an independent test. The
+   2026-10-20 review made SD015's 4 frozen-test frames the test set. The 10 stay in training and are not
+   leakage references; no policy change. A2's report may still show them as an in-sample diagnostic (A2
+   against their converged-k labels), not as a test.
 4. **Sampling weights.** The 44 strain frames are 8–16-atom cells in their own small systems. With A1's
    `auto_prob: prob_uniform`, each small system would be sampled as often as a 600-frame interface. This is a
    training-input choice, not a release rule.
