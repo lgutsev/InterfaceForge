@@ -426,6 +426,7 @@ def _write_deepmd_system(
     tebeg_k: float | None = None,
     high_temperature: bool = False,
     frame_metadata: Sequence[dict[str, Any]] | None = None,
+    include_energy: bool = True,
 ) -> Path:
     """Write one DeePMD system directory.
 
@@ -436,6 +437,10 @@ def _write_deepmd_system(
     metadata that would otherwise exist only in the synchronized extxyz files,
     so a DeePMD-only export is a complete, lossless record of the same frames
     and ``iface package materialize`` can regenerate the extxyz side from it.
+
+    ``include_energy=False`` omits ``energy.npy`` (and frames with ``virial=None``
+    omit ``virial.npy``): DeePMD-kit 3.x then sets ``find_energy`` /
+    ``find_virial`` to 0 for the system and drops that loss term for its batches.
     """
 
     system = root / source.run_id
@@ -450,9 +455,12 @@ def _write_deepmd_system(
     (system / "type_map.raw").write_text("\n".join(type_map) + "\n", encoding="utf-8")
     np.save(set_dir / "coord.npy", np.asarray([frame.atoms.positions.reshape(-1) for frame in frames]))
     np.save(set_dir / "box.npy", np.asarray([frame.atoms.cell.array.reshape(-1) for frame in frames]))
-    np.save(set_dir / "energy.npy", np.asarray([[frame.energy] for frame in frames]))
+    if include_energy:
+        np.save(set_dir / "energy.npy", np.asarray([[frame.energy] for frame in frames]))
     np.save(set_dir / "force.npy", np.asarray([frame.forces.reshape(-1) for frame in frames]))
     if any(frame.virial is not None for frame in frames):
+        if any(frame.virial is None for frame in frames):
+            raise SafetyError(f"Some but not all frames of {source.run_id} have a virial")
         np.save(set_dir / "virial.npy", np.asarray([frame.virial.reshape(-1) for frame in frames]))
     np.save(system / "move_mask.npy", np.asarray([frame.move_mask for frame in frames], dtype=np.int8))
     (system / "system_meta.json").write_text(

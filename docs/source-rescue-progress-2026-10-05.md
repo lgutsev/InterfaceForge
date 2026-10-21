@@ -29,7 +29,9 @@ New tools (both standalone, standard InterfaceForge dependencies):
   declared tolerances).
 - `iface-rescue-release` (`src/interfaceforge/rescue_release.py`): `freeze` (historical split
   ledger plus DeePMD cross-check) and `assemble` (same-geometry partial replacement under
-  `examples/source-rescue/release_policy.yaml`).
+  `examples/source-rescue/release_policy.yaml`). Since 2026-10-21 it also has `plan` (dry run), label
+  masks, added frames and leakage references; see
+  [`source-rescue-release-a2-2026-10-21.md`](source-rescue-release-a2-2026-10-21.md).
 
 Outputs are on `D:\MLIP_Work_Folder\sin_tin_a2\rescue_2026-10-05\`; the small tables are also in
 [`docs/source-rescue-2026-10-05/`](source-rescue-2026-10-05/).

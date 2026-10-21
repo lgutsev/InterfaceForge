@@ -1,10 +1,15 @@
-# SiN/TiN rescue release policy (production). Used by
-#   python -m interfaceforge.rescue_release assemble --ledger <frozen split_ledger.tsv> \
+# SiN/TiN rescue release policy for the first A2 (production). Checked with
+#   iface-rescue-release plan --ledger <frozen split_ledger.tsv> --policy examples/source-rescue/release_policy.yaml [--deck <deck>]
+# and used by
+#   iface-rescue-release assemble --ledger <frozen split_ledger.tsv> \
 #     --policy examples/source-rescue/release_policy.yaml --deck <admission-gated recollection> --output <new release>
-# The ledger is frozen from the historical deck; every kept or replaced frame keeps its split.
-# Every source needs a rule (exact name or glob). Replacements are reviewed same-geometry relabels
-# (one VASP run each: E_sigma->0, forces and virial = -V sigma), listed with their sha256.
-# It deliberately fails until the relabels exist: SiN 300 K is replace_all with no replacements yet.
+# The ledger is frozen from the historical deck (D:\MLIP_Work_Folder\sin_tin_a2\rescue_2026-10-05\freeze,
+# sha256 ed7ff1b9...); every kept or replaced frame keeps its split. Every source needs a rule (exact name,
+# then the first matching glob in file order). Replacements are reviewed same-geometry relabels (one VASP run
+# each: E_sigma->0, forces and virial = -V sigma), pinned by sha256 and mapped to deck frames by their
+# package manifest. label_use: all | energy_forces (virial not trained) | forces_virial (energy not trained).
+# Original labels are never edited. Decisions: SiN-TiN_Dispatch dispatch/desk_events.jsonl and STATUS.md.
+# Encoding these rules is not launch authorization: the A2 launch is the PI's separate approval.
 schema_version: 1
 type_map: [Si, N, Ti, O]  # the historical DeePMD order
 sources:
@@ -21,9 +26,21 @@ sources:
     action: exclude
     reason: "TiO-Ideal (8-atom, -84 GPa uniaxial) excluded from every split"
   bulk_SiN-Bulk_300K:
-    action: replace_all  # Gamma label -137.5 meV/atom and 8.2 GPa off (package 21); all 600 geometries
+    action: replace_subset
+    unreplaced: hold
+    label_use: all  # SD016: 3x3x7 converged in every channel (<= 0.0001 GPa), so the virial trains
+    reason: >-
+      Gamma labels off by +137.7 meV/atom, 20 % force, 8.4 GPa (SD004 review). SD004's 150 k_norm relabels
+      (120/15/15, frozen splits) approved for training by the PI 2026-10-16; the other 450 frames are held
+      and their stored labels stay quarantined
   bulk_TiN-Bulk_300K:
-    action: replace_all  # after the 48-frame stage passes; the stage alone does not qualify the rest
+    action: replace_subset
+    unreplaced: hold
+    label_use: energy_forces  # decision 8 as revisited 2026-10-19: SD014 stress off by a systematic 0.15 GPa
+    reason: >-
+      Gamma labels off by +2.7 meV/atom, 15 % force, 5.1 GPa (SD005, SD011 reviews). SD005's 48 + SD011's 102
+      relabels at 3x3x5 (120/15/15, frozen splits) train on energies and forces, virial out (decision 8a/8d,
+      revisited after SD014); the other 450 frames are held and their stored labels stay quarantined
   bulk_TiO-Bulk-Real_300K:
     action: replace_subset
     unreplaced: hold
@@ -33,11 +50,83 @@ sources:
     unreplaced: hold
     reason: "Gamma labels off by 0.08 eV/A force RMSE (package 21); 240-frame relabel subset first, rest held"
   interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term:
+    # STALE (package 23 era), left as it is for the PI to confirm or lift; see
+    # docs/source-rescue-release-a2-2026-10-21.md. Deleting this rule puts the source under the
+    # Ideal Ti-term glob below (keep, energy_forces).
     action: exclude
     reason: "HOLD: package 21 frame_0009 comparison unresolved (package 23 and the owner's ALGO=Normal control)"
+  interface_*K_Ideal_Ti_Term_*:
+    # The 10 Ideal Ti-terminated sources (300/450 K, O 0/0.25/0.5/0.75/1.0). Must stay above interface_*.
+    action: keep
+    label_use: energy_forces
+    reason: >-
+      Decision 4 (PI 2026-10-19, reviewed 2026-10-20): force-ratio limit 6 % for this family, energies and
+      forces in training, virial out (stress misses up to 0.21 GPa), stored labels unedited; 13 of 14 measured
+      frames meet it, SD003 frame_0002 (300 K O 0.25, MD frame 265) is a logged exception
   interface_*:
-    action: keep  # admitted only through the source audit; Gamma use still needs per-family qualification
-replacements: []
-# - id: sin300_k337_v661
-#   path: <reviewed relabel extxyz with source_run, source_frame, label_source, REF_energy/forces/virial>
-#   sha256: <exact>
+    action: keep  # B0 interface criteria (approved 2026-10-15); measured Gamma biases meet them; all labels
+replacements:
+  - id: SD004_si3n4_300k_relabel150
+    path: D:\SiN-TiN_Interface_Dispatch\results\SD004_collect_2026-10-16\labeled.extxyz
+    sha256: ca631014774f03164eba1398ca327e9abe1aed93a728566dad4f57c3b45d137e
+    manifest: D:\MLIP_Work_Folder\sin_tin_a2\SD004_vasp_a2_si3n4_300k_relabel150\manifest.json
+    manifest_sha256: 918e80739a5add820342533524bb144a7f3cd9584d02c164c711f4003c1bd4ac
+    expected_frames: 150
+  - id: SD005_tin_300k_relabel_stage1
+    path: D:\SiN-TiN_Interface_Dispatch\results\SD005_collect_2026-10-19\labeled.extxyz
+    sha256: 3aff2d1c8efeca47275587749a7a86627f127d55286b6711b3e07408a1a59273
+    manifest: D:\MLIP_Work_Folder\sin_tin_a2\SD005_vasp_a2_tin_300k_relabel_stage1\manifest.json
+    manifest_sha256: bdf584804f0adea3b1efd455125d2ce0c621c781580740d395ae61130e78a3a4
+    expected_frames: 48
+  - id: SD011_tin_300k_relabel_stage2
+    path: D:\SiN-TiN_Interface_Dispatch\results\SD011_collect_2026-10-21\labeled.extxyz
+    sha256: 56082c5269a11966f2dcf54943e8ae9f37fde20eba48f8be8594b477559b24fe
+    manifest: D:\MLIP_Work_Folder\sin_tin_a2\SD011_vasp_a2_tin_300k_relabel_stage2\manifest.json
+    manifest_sha256: 1beb96e225e0fb39fd3dcde31729ffc1d2378054e0394b0a03dfc1b132e5e0c5
+    expected_frames: 102
+added_frames:
+  # Strain cells (decision 9, PI 2026-10-19): forces and virial only, energies left out (~1.2 meV/atom
+  # off the deck's Med/Auto energies). Accurate/.FALSE. labels.
+  - id: pkg15_strain
+    # Package 15's OUTCARs (final ionic step for the two relaxations, frames 0022-0023), collected with
+    # sin-tin-a2-gen fa221a6: python campaigns/a2_pilot/a2_campaign.py collect
+    #   D:\MLIP_Work_Folder\sin_tin_a2\15_pilot --output D:\SiN-TiN_Interface_Dispatch\results\pkg15_collect_2026-10-21
+    # (24/24 ok; reproducible byte for byte). Not yet on D:: the desk writes it there.
+    path: D:\SiN-TiN_Interface_Dispatch\results\pkg15_collect_2026-10-21\labeled.extxyz
+    sha256: 75985ad7acf5d1dff31d207e6a6f1e8ed6dbfdf35ce65d1f9216e5d8deec88cf
+    split: train
+    label_use: forces_virial
+    leaf: strain/pkg15
+    expected_frames: 24
+    reason: "Decision 9: package 15 released for training as is (Accurate/.FALSE., meets B5 against Med/.FALSE.)"
+  - id: SD006_strain_train
+    path: D:\SiN-TiN_Interface_Dispatch\results\SD006_collect_2026-10-20\labeled.extxyz
+    sha256: a0a622180d5cb76111202a9b9a9c21b3a14c0ea4dad465b08ab260f4611a6280
+    select: {role: train}
+    split: train
+    label_use: forces_virial
+    leaf: strain/SD006
+    expected_frames: 20
+    reason: "SD006's 20 training strain frames (frame list confirmed by the PI 2026-10-20); decision 9"
+  - id: SD006_strain_holdout
+    path: D:\SiN-TiN_Interface_Dispatch\results\SD006_collect_2026-10-20\labeled.extxyz
+    sha256: a0a622180d5cb76111202a9b9a9c21b3a14c0ea4dad465b08ab260f4611a6280
+    select: {role: holdout}
+    split: holdout  # never trained; checked against every release split
+    label_use: forces_virial
+    expected_frames: 16
+    reason: "SD006's 16 holdouts (+-1 % and mixed strains, q-half 0.045 A, 4 relaxations), never trained"
+leakage_references:
+  - id: pkg14_references
+    # Package 14's 38 elastic / q-half reference cells (input geometries): never training (reference).
+    path: D:\MLIP_Work_Folder\sin_tin_a2\14_references\frames.extxyz
+    sha256: 76ff2359f043d1ef2e20732407f33b870b677e83fb4e04eeae7ec5d7f4b0cb3c
+    forbid: [train, valid, test]
+    expected_frames: 38
+  - id: SD015_ideal_ti_term_test
+    # SD015's 4 independent Ideal Ti-term test frames: deck test-split geometries; A2 reports Ideal Ti-term
+    # errors on them (decision 4, 2026-10-20), so they must not reach train or valid.
+    path: D:\SiN-TiN_Interface_Dispatch\results\SD015_collect_2026-10-20\labeled.extxyz
+    sha256: 4ad1b7e30e317e09a922e5bce3202a811c916d685af358c5f67219c406698c82
+    forbid: [train, valid]
+    expected_frames: 4
