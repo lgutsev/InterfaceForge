@@ -121,6 +121,11 @@ the absence is a policy rule, recorded per frame and per system, and checked on 
 - **TensorFlow backend.** Not checked. A1 is PyTorch.
 - **Fine-tuning from A1.** If A2 fine-tunes from A1 with a bias change (`change_bias` or finetune stats),
   confirm that path also filters on `find_energy`. Only `compute_output_stats` was read.
+- **Fine-tune needs A1's model definition (found by SD018, job 1122976).** A1's input sets `nsel: "auto:1.20"`,
+  which DeePMD resolves from the training data. On A1's full deck it resolved to 132 repinit neighbours, while
+  SD018's systems gave 116, and loading A1's checkpoint failed on the shape. A2's data differ from A1's too. So
+  A2's fine-tune should pass `--use-pretrain-script` (the model comes from the checkpoint) or pin `nsel` to A1's
+  resolved values.
 
 ## Policy as encoded
 
