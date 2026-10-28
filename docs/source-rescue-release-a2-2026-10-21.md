@@ -175,6 +175,36 @@ Release splits: 19,547 train, 2,430 valid and 2,430 test. By `label_use`:
 | valid | 1,815 | 615 | 0 |
 | test | 1,815 | 615 | 0 |
 
+## Assembled release (2026-10-28)
+
+Assembled at the PI's request, relayed from SiN-TiN Dispatch (SD019 in A2, SD020 held for A3). This is not launch
+authorization: the A2 launch is the PI's separate approval of SD021.
+
+| | |
+|---|---|
+| Folder | `D:\MLIP_Work_Folder\sin_tin_a2\releases\a2_release_2026-10-28_7925c34` |
+| InterfaceForge | `source-rescue-2026-10-05` 7925c34 |
+| Policy sha256 | `e826c344671d5a4b2d62398cb36f06442d8ad30e88b3ec1b2af80a0b692e24ca` |
+| Frozen ledger sha256 | `ed7ff1b96c7d706fd26b7f2ac385b6960a0988d72b593cb2acc0c848aaefab56` |
+| `deepmd/systems.json` | `220ec17029d7cff516f1a7e7e4a1483cf253fd187982b17bc45251d8e3c3c3cc` (131 systems) |
+| `release_report.json` | `4b168084991ff326ab6ed26ba0d10312adc861f4bffddfa7662542cdd7c7101d` |
+| `release_ledger.tsv` | `3d75bfa00401c27a33a7f099b512630ddd7bbfe042211296206b18b54b09b59e` |
+| `SHA256SUMS` (LF, 1,411 files) | `d518c846adb149464df407889cc31aa955c6702547642c763eaf450ac220f490` |
+
+Counts: 24,000 kept, 300 replaced, 2,100 held, 2,400 excluded, 107 added to train, 44 holdouts. Splits are
+19,547 train, 2,430 valid and 2,430 test, with no geometry in two splits.
+
+| Split | all | energy_forces | forces_virial |
+|---|---:|---:|---:|
+| train | 14,547 | 4,956 | 44 |
+| valid | 1,815 | 615 | 0 |
+| test | 1,815 | 615 | 0 |
+
+Independent checks after assembly: per-split extxyz frame and label-key counts match the report and the DeePMD
+systems; every system's `energy.npy` / `virial.npy` presence matches its mask; the 44 holdouts are only in
+`holdout.extxyz`, with all labels; all 1,410 file hashes in the report re-check. The release's text files have CRLF
+line endings (written on Windows); `SHA256SUMS` hashes the bytes as written, so copy the folder as is (no git).
+
 ## Open items for the PI
 
 1. **Stale HOLD on `interface_450K_Ideal_Ti_Term_SiN-TiN-Ti-term` (lifted by the PI 2026-10-21).** It was set
