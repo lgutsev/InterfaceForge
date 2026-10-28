@@ -351,7 +351,10 @@ def _resolve(base: Path, value: str) -> Path:
 
 
 def _listed_frames(item: dict[str, Any], base: Path, kind: str) -> list[tuple[int, Any]]:
-    """(file index, atoms) of a hash-pinned extxyz, filtered by ``select`` and counted against ``expected_frames``."""
+    """(file index, atoms) of a hash-pinned extxyz, filtered by ``select`` and counted against ``expected_frames``.
+
+    ``select`` maps info keys to shell-style patterns (``role: train``, ``case_id: "a3r_tin_*"``); a frame
+    without the key never matches."""
     path = _resolve(base, item["path"])
     if sha256_file(path) != item["sha256"]:
         raise SafetyError(f"{kind} {item['id']} changed: {path}")
@@ -360,7 +363,7 @@ def _listed_frames(item: dict[str, Any], base: Path, kind: str) -> list[tuple[in
         (index, atoms)
         for index, text in iter_extxyz(path)
         for atoms in [parse_frame(text)]
-        if all(str(atoms.info.get(k)) == str(v) for k, v in select.items())
+        if all(k in atoms.info and fnmatch.fnmatchcase(str(atoms.info[k]), str(v)) for k, v in select.items())
     ]
     expected = item.get("expected_frames")
     if expected is not None and len(frames) != int(expected):

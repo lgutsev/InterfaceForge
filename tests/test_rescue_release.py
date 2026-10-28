@@ -402,6 +402,42 @@ def test_added_frames_count_overlap_and_hash_are_checked(tmp_path):
         plan(ledger, path)
 
 
+def test_select_patterns_split_one_file_by_material(tmp_path):
+    root, ledger = frozen(tmp_path)
+    frames = [_strain(i, "train") for i in range(5)]
+    for i, atoms in enumerate(frames):
+        atoms.info["case_id"] = f"a3r_{'tin' if i < 3 else 'si3n4'}_r{i}"
+    path = tmp_path / "rattled.extxyz"
+    sha = relabel(path, frames)
+    common = {"path": path.name, "sha256": sha, "split": "train", "reason": "SD019"}
+    entries = [
+        {
+            "id": "tin",
+            **common,
+            "select": {"role": "train", "case_id": "a3r_tin_*"},
+            "label_use": "energy_forces",
+            "expected_frames": 3,
+        },
+        {
+            "id": "si3n4",
+            **common,
+            "select": {"role": "train", "case_id": "a3r_si3n4_*"},
+            "label_use": "all",
+            "expected_frames": 2,
+        },
+    ]
+    summary = plan(ledger, policy(tmp_path, None, b_action="keep", added_frames=entries))
+    assert summary["added_by_entry"] == {"added:si3n4": {"train": 2}, "added:tin": {"train": 3}}
+    assert summary["label_use_by_source"]["added:tin"] == "energy_forces"
+    assert summary["label_use_by_source"]["added:si3n4"] == "all"
+    entries[1]["select"]["case_id"] = "a3r_sin_*"  # a pattern that misses fails on its count
+    with pytest.raises(SafetyError, match="0 frames selected, the policy expects 2"):
+        plan(ledger, policy(tmp_path, None, b_action="keep", added_frames=entries))
+    entries[1]["select"] = {"material": "Si3N4"}  # an absent key never matches
+    with pytest.raises(SafetyError, match="0 frames selected"):
+        plan(ledger, policy(tmp_path, None, b_action="keep", added_frames=entries))
+
+
 def _collector(tmp_path: Path, keys: list[tuple[int, str]], *, manifest_split: str | None = None) -> Path:
     """Collector-style relabels: no source_run, source_frame is the ionic step, identity via the manifest."""
     frames, manifest = [], {"frames": []}
@@ -503,8 +539,19 @@ def test_shipped_policy_lists_the_strain_frames_and_holdouts():
         "pkg15_strain": ("train", "forces_virial", 24),
         "SD006_strain_train": ("train", "forces_virial", 20),
         "SD006_strain_holdout": ("holdout", "forces_virial", 16),
+        "SD019_si3n4_train": ("train", "all", 27),
+        "SD019_tin_train": ("train", "energy_forces", 36),
+        "SD019_si3n4_holdout": ("holdout", "all", 12),
+        "SD019_tin_holdout": ("holdout", "energy_forces", 16),
     }
-    assert {a.get("leaf") for a in shipped["added_frames"] if a["split"] == "train"} == {"strain"}
+    leaves = {a["id"]: a.get("leaf") for a in shipped["added_frames"] if a["split"] == "train"}
+    assert leaves == {
+        "pkg15_strain": "strain",
+        "SD006_strain_train": "strain",
+        "SD019_si3n4_train": "rattled",
+        "SD019_tin_train": "rattled",
+    }
+    assert not any("SD020" in a["id"] or "SD020" in a["path"] for a in shipped["added_frames"])  # held for A3
     assert sum(r["expected_frames"] for r in shipped["replacements"]) == 300
     assert {r["id"]: r["forbid"] for r in shipped["leakage_references"]} == {
         "pkg14_references": ["train", "valid", "test"],

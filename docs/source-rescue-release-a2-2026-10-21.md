@@ -48,7 +48,9 @@ pins an extxyz by sha256 and gives:
 
 - `split`: train, valid, test or holdout;
 - `label_use` and `reason`, both required;
-- optionally `select` (an info-key filter, such as `role: train`), `expected_frames` and `leaf`.
+- optionally `select`, `expected_frames` and `leaf`. `select` maps info keys to shell-style patterns, such as
+  `role: train` or `case_id: "a3r_tin_*"` (added 2026-10-28 for SD019, whose frames carry no material key); a
+  frame without the key never matches, and `expected_frames` catches a pattern that selects the wrong set.
 
 Rules:
 
@@ -113,10 +115,13 @@ the absence is a policy rule, recorded per frame and per system, and checked on 
 
 **Not verified:**
 
-- **Not run yet: SD018.** SiN-TiN Dispatch package SD018 (written 2026-10-21, awaiting the PI's approval) is the
-  run that confirms it. It trains on 9 systems that `assemble` wrote with this policy, on the LONI module A1 uses,
-  and probes the find flags and the installed loss directly. It runs from scratch and fine-tuned from A1, and its
-  `check_mask_smoke.py` gives the verdict. Until it passes, the masking rests on the source reading.
+- **Confirmed by a run: SD018 (reviewed 2026-10-28, SiN-TiN_Dispatch reviews/2026-10-28_SD018_review.md).** On the
+  LONI module A1 uses, 9 systems written by `assemble` with this policy trained from scratch and fine-tuned from A1
+  (revision 2, `--use-pretrain-script`). The probe, training, force and mask checks pass in both: `rmse_e_trn` is
+  NaN on 12 of 20 steps, `rmse_v_trn` on 4 of 20, and `rmse_e_val` is always finite. `dp test` itself failed in both,
+  through DeePMD 3.2.0b0's vesin neighbour list ("ModelOutputDef is not found"); A1 fails the same way, so this is
+  not the masks. A native-neighbour-list evaluation is finite on all 9 systems. A2 must therefore be tested with the
+  native neighbour list.
 - **Version.** I read the v3.2.0b0 tag, not the exact build in the container.
 - **TensorFlow backend.** Not checked. A1 is PyTorch.
 - **Fine-tuning from A1.** If A2 fine-tunes from A1 with a bias change (`change_bias` or finetune stats),
@@ -141,8 +146,13 @@ the absence is a policy rule, recorded per frame and per system, and checked on 
 | Package 15, 24 strain cells | added, train | forces_virial | decision 9 |
 | SD006, 20 training strain frames | added, train (`select: {role: train}`) | forces_virial | decision 9 |
 | SD006, 16 holdouts | added, holdout (`select: {role: holdout}`) | – | never trained |
+| SD019, 27 Si₃N₄ rattled crystals | added, train (`select: {role: train, case_id: "a3r_si3n4_*"}`) | all | PI 2026-10-28 "SD019 is in A2"; as SD004/SD016 |
+| SD019, 36 TiN rattled crystals | added, train (`case_id: "a3r_tin_*"`) | energy_forces | as above; decision 8 |
+| SD019, 28 test frames (12 Si₃N₄, 16 TiN) | added, holdout | – | never trained; score A2's bulk reference energies |
 | Package 14, 38 references | leakage reference, forbidden in train/valid/test | – | |
 | SD015, 4 Ideal Ti-term test frames | leakage reference, forbidden in train/valid | – | |
+
+SD020 (paired strain battery) is held for A3 by the PI (2026-10-28) and is not in this policy.
 
 The dry run used the frozen ledger (`split_ledger.tsv`, sha256 `ed7ff1b9…`, 28,800 frames) and the D: inputs.
 It ran both at digest level and with `--deck D:\Traj_Storage\SiN-TiN_Cer_Interface_BULK`, and passed with no
@@ -154,14 +164,14 @@ leaks.
 | Replaced | 300 |
 | Held | 2,100 |
 | Excluded | 2,400 |
-| Added to train | 44 |
-| Holdout | 16 |
+| Added to train | 107 |
+| Holdout | 44 |
 
-Release splits: 19,484 train, 2,430 valid and 2,430 test. By `label_use`:
+Release splits: 19,547 train, 2,430 valid and 2,430 test. By `label_use`:
 
 | Split | all | energy_forces | forces_virial |
 |---|---:|---:|---:|
-| train | 14,520 | 4,920 | 44 |
+| train | 14,547 | 4,956 | 44 |
 | valid | 1,815 | 615 | 0 |
 | test | 1,815 | 615 | 0 |
 

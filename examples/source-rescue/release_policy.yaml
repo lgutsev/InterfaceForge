@@ -113,6 +113,44 @@ added_frames:
     label_use: forces_virial
     expected_frames: 16
     reason: "SD006's 16 holdouts (+-1 % and mixed strains, q-half 0.045 A, 4 relaxations), never trained"
+  # SD019 rattled bulk crystals (PI 2026-10-28: "SD019 is in A2"; SD020 is held for A3 and is not here).
+  # 91 frames in one collector file (manifest D:\MLIP_Work_Folder\sin_tin_a2\SD019_vasp_a3_bulk_rattled\manifest.json,
+  # sha256 24a515f25d9a313b8dd1431cdc8eb1d7af42ff266c798fe86bac372fef8fbf47, stamped in every frame). The frames carry
+  # no material key, so the material is selected by case_id prefix; expected_frames pins every count.
+  - id: SD019_si3n4_train
+    path: D:\SiN-TiN_Interface_Dispatch\results\SD019_collect_2026-10-26\labeled.extxyz
+    sha256: 37e1b22441f10f793779fb013b13470762085d7ec23bbc08aec9432630ec3f26
+    select: {role: train, case_id: "a3r_si3n4_*"}
+    split: train
+    label_use: all  # k-converged deck settings, as SD004 (SD016: 3x3x7 converged in stress)
+    leaf: rattled
+    expected_frames: 27
+    reason: "SD019 review SiN-TiN_Dispatch reviews/2026-10-27_SD019_review.md; PI 2026-10-28 'SD019 is in A2'"
+  - id: SD019_tin_train
+    path: D:\SiN-TiN_Interface_Dispatch\results\SD019_collect_2026-10-26\labeled.extxyz
+    sha256: 37e1b22441f10f793779fb013b13470762085d7ec23bbc08aec9432630ec3f26
+    select: {role: train, case_id: "a3r_tin_*"}
+    split: train
+    label_use: energy_forces  # decision 8: TiN stress at this mesh carries SD014's 0.15 GPa offset
+    leaf: rattled
+    expected_frames: 36
+    reason: "SD019 review SiN-TiN_Dispatch reviews/2026-10-27_SD019_review.md; PI 2026-10-28 'SD019 is in A2'"
+  - id: SD019_si3n4_holdout
+    path: D:\SiN-TiN_Interface_Dispatch\results\SD019_collect_2026-10-26\labeled.extxyz
+    sha256: 37e1b22441f10f793779fb013b13470762085d7ec23bbc08aec9432630ec3f26
+    select: {role: test, case_id: "a3r_si3n4_*"}
+    split: holdout  # never trained; scores A2's bulk reference energies
+    label_use: all
+    expected_frames: 12
+    reason: "SD019 review SiN-TiN_Dispatch reviews/2026-10-27_SD019_review.md; PI 2026-10-28 'SD019 is in A2'"
+  - id: SD019_tin_holdout
+    path: D:\SiN-TiN_Interface_Dispatch\results\SD019_collect_2026-10-26\labeled.extxyz
+    sha256: 37e1b22441f10f793779fb013b13470762085d7ec23bbc08aec9432630ec3f26
+    select: {role: test, case_id: "a3r_tin_*"}
+    split: holdout  # never trained; scores A2's bulk reference energies
+    label_use: energy_forces
+    expected_frames: 16
+    reason: "SD019 review SiN-TiN_Dispatch reviews/2026-10-27_SD019_review.md; PI 2026-10-28 'SD019 is in A2'"
 leakage_references:
   - id: pkg14_references
     # Package 14's 38 elastic / q-half reference cells (input geometries): never training (reference).
