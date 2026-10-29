@@ -108,6 +108,52 @@ recipe from the start.
 `grouped` assigns every retained frame from an OUTCAR to one split. It is the
 default because it provides the clearest defense against temporal leakage.
 
+### Keeping all runs of one system in one split
+
+By default `grouped` treats every OUTCAR as an independent unit and balances
+within its stage folder (the run directory's parent). When several runs share a
+start structure, for example a 300 K and a 450 K MD of the same system in
+`Step2_300K/` and `Step2_450K/`, they can land in different splits, and the
+validation frames are then near-duplicates of training frames. Opt in to
+system-level grouping:
+
+```yaml
+dataset:
+  strategy: grouped
+  split_group_by: system        # default: trajectory (historical behaviour)
+  split_system:
+    components: [0, 2]          # OH25/Step2_450K/<system>/OUTCAR -> "OH25/<system>"
+    # or, instead of components:
+    # regex: '^([^/]+)/Step2_[^/]+/([^/]+)/OUTCAR$'
+```
+
+- `split_system.components` picks indices (negative allowed) of the run
+  directory's path parts relative to the collect source root and joins them
+  with `/`.
+- `split_system.regex` is searched in the OUTCAR path relative to the source
+  root (POSIX separators). The system id is the capture groups joined with `/`,
+  or the whole match if the pattern has no groups.
+- Set exactly one of the two. Every collected run must map to a system; a rule
+  that misses any run stops `iface collect` and lists the unmapped paths.
+  Unmapped runs never become one-run systems on their own.
+- Systems are shuffled with the collect `--seed`, placed largest first and
+  assigned to the split furthest below its target trajectory count, so the
+  result is deterministic per seed. With enough systems, each requested split
+  gets at least one.
+- Whole systems are coarser units, so the achieved fractions differ from
+  `ratios` (e.g. 37 two-run systems at `[0.8, 0.1, 0.1]` give 29/4/4 systems,
+  0.784/0.108/0.108 of trajectories). `manifest.json` reports them under
+  `split_grouping`: rule, seed, system count, `systems_per_split`,
+  `trajectories_per_split`, `requested_fractions`,
+  `achieved_trajectory_fractions` and `achieved_frame_fractions`.
+  `manifest.csv` gains a `system` column. Collection also fails if any system
+  ended up in more than one split.
+- Requires `strategy: grouped`. With the default `split_group_by: trajectory`
+  the split, `manifest.csv` and `manifest.json` are unchanged.
+
+This applies to `iface collect`. Mapped leaf campaigns (`iface-mapped-collect`)
+have their own `collection.split_mode` (use `heritage` for lineage grouping).
+
 `guarded` divides each trajectory into contiguous blocks, rotates block order
 between trajectories, and drops `guard_frames` between blocks. It is useful
 when too few independent trajectories exist, but it should be treated as a

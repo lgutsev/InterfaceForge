@@ -207,18 +207,73 @@ def discover_outcars(
     return _deduplicate_run_ids(discovered)
 
 
+def system_ids(
+    sources: Sequence[SourceTrajectory],
+    source_root: str | Path,
+    rule: dict[str, Any],
+) -> dict[Path, str]:
+    """Map every trajectory to a system id with a ``dataset.split_system`` rule.
+
+    ``regex`` is searched in the OUTCAR path relative to ``source_root``
+    (POSIX separators); the id is its capture groups joined by "/", or the
+    whole match when it has none. ``components`` picks indices (negative
+    allowed) of the run directory's path parts relative to ``source_root``
+    and joins them by "/". A run the rule cannot map is an error, never a
+    singleton system: a silent singleton would reintroduce the leakage the
+    rule exists to prevent.
+    """
+
+    root = Path(source_root).resolve()
+    pattern = re.compile(rule["regex"]) if "regex" in rule else None
+    mapping: dict[Path, str] = {}
+    unmatched: list[str] = []
+    for source in sources:
+        relative = source.path.relative_to(root)
+        system: str | None = None
+        if pattern is not None:
+            match = pattern.search(relative.as_posix())
+            if match:
+                groups = [item for item in match.groups() if item]
+                system = "/".join(groups) if match.groups() else match.group(0)
+        else:
+            parts = relative.parent.parts
+            try:
+                system = "/".join(parts[index] for index in rule["components"])
+            except IndexError:
+                system = None
+        if system:
+            mapping[source.path] = system
+        else:
+            unmatched.append(relative.as_posix())
+    if unmatched:
+        shown = ", ".join(unmatched[:10]) + (" ..." if len(unmatched) > 10 else "")
+        raise SafetyError(
+            f"dataset.split_system {rule} does not map {len(unmatched)} of {len(sources)} "
+            f"trajectories to a system: {shown}"
+        )
+    return mapping
+
+
 def assign_grouped(
     sources: Sequence[SourceTrajectory],
     ratios: Sequence[float],
     *,
     seed: int = 20260730,
+    systems: dict[Path, str] | None = None,
 ) -> dict[Path, str]:
-    """Assign whole trajectories while balancing category and global counts."""
+    """Assign whole trajectories while balancing category and global counts.
+
+    With ``systems`` (trajectory path -> system id, see ``system_ids``) the
+    unit is a whole system instead: every trajectory of one system lands in
+    the same split. Omitting it keeps the historical per-trajectory split.
+    """
 
     normalized = normalize_ratios(ratios)
     active = [split for split in SPLITS if normalized[split] > 0]
     if not active:
         raise ValueError("At least one split must be active")
+    if systems is not None:
+        return _assign_by_system(sources, normalized, active, seed=seed, systems=systems)
     rng = random.Random(seed)
     by_group: dict[str, list[SourceTrajectory]] = defaultdict(list)
     for source in sources:
@@ -258,6 +313,102 @@ def assign_grouped(
             totals[donor] -= 1
             totals[empty] += 1
     return assignment
+
+
+def _assign_by_system(
+    sources: Sequence[SourceTrajectory],
+    normalized: dict[str, float],
+    active: list[str],
+    *,
+    seed: int,
+    systems: dict[Path, str],
+) -> dict[Path, str]:
+    """Assign whole systems, balancing trajectory counts against the ratios."""
+
+    missing = [str(source.path) for source in sources if source.path not in systems]
+    if missing:
+        raise SafetyError(f"No system id for {len(missing)} trajectories: {', '.join(missing[:10])}")
+    members: dict[str, list[SourceTrajectory]] = defaultdict(list)
+    for source in sources:
+        members[systems[source.path]].append(source)
+
+    rng = random.Random(seed)
+    order = sorted(members)
+    rng.shuffle(order)
+    # Place larger systems first (stable, so equal sizes keep the seeded
+    # order); small systems then fill the remaining per-split deficits.
+    order.sort(key=lambda name: -len(members[name]))
+
+    totals = {split: 0 for split in SPLITS}
+    target = {split: normalized[split] * len(sources) for split in SPLITS}
+    system_split: dict[str, str] = {}
+    for name in order:
+        size = len(members[name])
+        split = min(
+            active,
+            key=lambda item: (totals[item] + size - target[item], SPLITS.index(item)),
+        )
+        system_split[name] = split
+        totals[split] += size
+
+    # As for trajectories: with enough systems, move a whole (smallest)
+    # system into any requested split left empty.
+    if len(members) >= len(active):
+        for empty in [name for name in active if totals[name] == 0]:
+            donor = max(active, key=lambda name: totals[name])
+            candidate = min(
+                (name for name in members if system_split[name] == donor),
+                key=lambda name: (len(members[name]), name),
+            )
+            system_split[candidate] = empty
+            totals[donor] -= len(members[candidate])
+            totals[empty] += len(members[candidate])
+    return {source.path: system_split[systems[source.path]] for source in sources}
+
+
+def split_grouping_report(
+    assignment: dict[Path, str],
+    systems: dict[Path, str],
+    ratios: Sequence[float],
+    frame_counts: dict[str, int] | None = None,
+    *,
+    seed: int,
+    rule: dict[str, Any],
+) -> dict[str, Any]:
+    """Summarize a system-grouped split: requested vs achieved fractions.
+
+    Whole-system units make the achieved fractions coarser than the
+    requested ratios, so both are reported side by side.
+    """
+
+    normalized = normalize_ratios(ratios)
+    trajectories = Counter(assignment.values())
+    system_split: dict[str, set[str]] = defaultdict(set)
+    for path, split in assignment.items():
+        system_split[systems[path]].add(split)
+    straddling = sorted(name for name, splits in system_split.items() if len(splits) > 1)
+    if straddling:
+        raise SafetyError(f"Systems assigned to more than one split: {straddling}")
+    system_counts = Counter(next(iter(splits)) for splits in system_split.values())
+    n_trajectories = sum(trajectories.values())
+    report: dict[str, Any] = {
+        "group_by": "system",
+        "rule": dict(rule),
+        "seed": seed,
+        "systems": len(system_split),
+        "requested_fractions": {split: round(normalized[split], 6) for split in SPLITS},
+        "systems_per_split": {split: system_counts.get(split, 0) for split in SPLITS},
+        "trajectories_per_split": {split: trajectories.get(split, 0) for split in SPLITS},
+        "achieved_trajectory_fractions": {
+            split: round(trajectories.get(split, 0) / n_trajectories, 6) for split in SPLITS
+        },
+    }
+    if frame_counts is not None:
+        n_frames = sum(frame_counts.values())
+        report["achieved_frame_fractions"] = {
+            split: round(frame_counts[split] / n_frames, 6) if n_frames else 0.0 for split in SPLITS
+        }
+    return report
 
 
 def allocate_counts(total: int, ratios: Sequence[float]) -> dict[str, int]:
@@ -529,7 +680,13 @@ def collect_dataset(
     include_virial = bool(settings["include_virial"])
     strategy = str(settings["strategy"])
     type_map = _discover_type_map(sources, settings.get("type_map", []))
-    grouped = assign_grouped(sources, ratios, seed=seed) if strategy == "grouped" else {}
+    group_by = str(settings.get("split_group_by", "trajectory"))
+    systems = (
+        system_ids(sources, source, settings["split_system"]) if group_by == "system" else None
+    )
+    grouped = (
+        assign_grouped(sources, ratios, seed=seed, systems=systems) if strategy == "grouped" else {}
+    )
 
     # Geometry-class metadata for later stratified error reporting (iface
     # validate stratified), not used for split assignment. high_temperature
@@ -665,6 +822,11 @@ def collect_dataset(
         }
         for record in records
     ]
+    if systems is not None:
+        # Only system-grouped exports gain the column, so default manifests
+        # stay byte-identical.
+        for row, record in zip(manifest_rows, records, strict=True):
+            row["system"] = systems[record.source.path]
     with (output / "manifest.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(manifest_rows[0]))
         writer.writeheader()
@@ -696,6 +858,10 @@ def collect_dataset(
         "extxyz": {split: str(path) if path.exists() else None for split, path in extxyz.items()},
         "deepmd": {split: str(path) for split, path in deepmd.items()},
     }
+    if systems is not None:
+        payload["split_grouping"] = split_grouping_report(
+            grouped, systems, ratios, split_counts, seed=seed, rule=settings["split_system"]
+        )
     if kind_counts.get("unclassified"):
         payload["notes"] = [
             f"{kind_counts['unclassified']} of {len(records)} trajectories were not matched "

@@ -5,13 +5,14 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 
 import interfaceforge.data as data_module
-from interfaceforge.config import load_campaign
+from interfaceforge.config import _validate_dataset, load_campaign
 from interfaceforge.data import (
     SourceTrajectory,
     _has_constraint_source,
@@ -19,7 +20,10 @@ from interfaceforge.data import (
     collect_dataset,
     discover_outcars,
     guarded_assignments,
+    split_grouping_report,
+    system_ids,
 )
+from interfaceforge.errors import ConfigurationError, SafetyError
 from interfaceforge.selection import select_indices
 from interfaceforge.validation import (
     EV_A2_TO_J_M2,
@@ -221,11 +225,164 @@ class SplitTests(unittest.TestCase):
         self.assertEqual(set(assignment), {source.path for source in sources})
         self.assertEqual(set(assignment.values()), {"train", "valid", "test"})
 
+    def test_default_grouped_split_is_unchanged(self) -> None:
+        # Golden strings from the pre-split_group_by assign_grouped (r=train,
+        # v=valid, x=test). Note the leak this option exists to fix: e.g.
+        # OH0/Step2_300K/sys0 is test while OH0/Step2_450K/sys0 is train.
+        golden = {
+            20260730: "xrrrrxrrvrrrvrxrvrrrvrrrrrrrrrrrrrxr",
+            7: "vrrrvrrrrrrxrrrrrrrxrrrrrrxvrrrvrrxr",
+        }
+        sources = _two_temperature_sources()
+        letters = {"train": "r", "valid": "v", "test": "x"}
+        for seed, expected in golden.items():
+            assignment = assign_grouped(sources, [0.8, 0.1, 0.1], seed=seed)
+            self.assertEqual("".join(letters[assignment[s.path]] for s in sources), expected)
+            self.assertEqual(assign_grouped(sources, [0.8, 0.1, 0.1], seed=seed, systems=None), assignment)
+
     def test_guarded_blocks_drop_boundary_frames(self) -> None:
         assignment, guards = guarded_assignments(36, [0.6, 0.2, 0.2], 3)
         self.assertEqual(len(guards), 6)
         self.assertFalse(set(assignment).intersection(guards))
         self.assertEqual(len(assignment) + len(guards), 36)
+
+
+def _two_temperature_sources(root: Path = Path("/src")) -> list[SourceTrajectory]:
+    """PVSK-like layout: <coverage>/Step2_<T>/<system>/OUTCAR, two temperatures
+    per system sharing one start structure."""
+
+    sources = []
+    for coverage in ("OH0", "OH25"):
+        for temperature in ("300K", "450K"):
+            for index in range(9):
+                path = root / coverage / f"Step2_{temperature}" / f"sys{index}" / "OUTCAR"
+                sources.append(
+                    SourceTrajectory(
+                        path, f"{coverage}__Step2_{temperature}__sys{index}", f"sys{index}", f"Step2_{temperature}"
+                    )
+                )
+    return sources
+
+
+class SystemSplitTests(unittest.TestCase):
+    RULES = (
+        {"components": [0, 2]},
+        {"regex": r"^([^/]+)/Step2_[^/]+/([^/]+)/OUTCAR$"},
+    )
+
+    def test_rules_map_both_temperatures_to_one_system(self) -> None:
+        root = Path("/src").resolve()
+        sources = _two_temperature_sources(root)
+        for rule in self.RULES:
+            systems = system_ids(sources, root, rule)
+            self.assertEqual(len(set(systems.values())), 18)
+            self.assertEqual(systems[root / "OH25/Step2_450K/sys3/OUTCAR"], "OH25/sys3")
+        regex_no_groups = system_ids(sources[:9], root, {"regex": r"^OH0"})
+        self.assertEqual(set(regex_no_groups.values()), {"OH0"})
+
+    def test_no_system_straddles_splits_across_seeds(self) -> None:
+        root = Path("/src").resolve()
+        sources = _two_temperature_sources(root)
+        systems = system_ids(sources, root, {"components": [0, 2]})
+        for seed in (20260730, 1, 7, 42, 1234, 99991):
+            assignment = assign_grouped(sources, [0.8, 0.1, 0.1], seed=seed, systems=systems)
+            self.assertEqual(set(assignment), {source.path for source in sources})
+            per_system: dict[str, set[str]] = {}
+            for path, split in assignment.items():
+                per_system.setdefault(systems[path], set()).add(split)
+            self.assertTrue(all(len(splits) == 1 for splits in per_system.values()), seed)
+            self.assertEqual(set(assignment.values()), {"train", "valid", "test"})
+            # Deterministic per seed.
+            self.assertEqual(assign_grouped(sources, [0.8, 0.1, 0.1], seed=seed, systems=systems), assignment)
+            report = split_grouping_report(assignment, systems, [0.8, 0.1, 0.1], seed=seed, rule={"components": [0, 2]})
+            self.assertEqual(report["systems"], 18)
+            self.assertEqual(sum(report["systems_per_split"].values()), 18)
+            self.assertEqual(sum(report["trajectories_per_split"].values()), 36)
+            self.assertAlmostEqual(sum(report["achieved_trajectory_fractions"].values()), 1.0, places=5)
+            self.assertGreaterEqual(report["achieved_trajectory_fractions"]["train"], 0.7)
+
+    def test_report_rejects_a_straddling_assignment(self) -> None:
+        root = Path("/src").resolve()
+        sources = _two_temperature_sources(root)
+        systems = system_ids(sources, root, {"components": [0, 2]})
+        leaky = assign_grouped(sources, [0.8, 0.1, 0.1], seed=20260730)
+        with self.assertRaisesRegex(SafetyError, "more than one split"):
+            split_grouping_report(leaky, systems, [0.8, 0.1, 0.1], seed=20260730, rule={})
+
+    def test_rule_matching_nothing_fails_loudly(self) -> None:
+        root = Path("/src").resolve()
+        sources = _two_temperature_sources(root)
+        with self.assertRaisesRegex(SafetyError, "does not map 36 of 36"):
+            system_ids(sources, root, {"regex": r"Step3_"})
+        with self.assertRaisesRegex(SafetyError, "does not map 36 of 36"):
+            system_ids(sources, root, {"components": [5]})
+        partial = system_ids(sources[:9], root, {"regex": r"sys[0-8]"})
+        self.assertEqual(len(partial), 9)
+        with self.assertRaisesRegex(SafetyError, "does not map 4 of 36"):
+            system_ids(sources, root, {"regex": r"/(sys[0-7])/"})
+        with self.assertRaisesRegex(SafetyError, "No system id"):
+            assign_grouped(sources, [0.8, 0.1, 0.1], systems={})
+
+    def test_config_validates_split_grouping(self) -> None:
+        dataset = {"strategy": "grouped"}
+        _validate_dataset(dataset)
+        self.assertEqual(dataset["split_group_by"], "trajectory")
+        self.assertNotIn("split_system", dataset)
+        good = {"strategy": "grouped", "split_group_by": "system", "split_system": {"components": [0, 2]}}
+        _validate_dataset(good)
+        self.assertEqual(good["split_system"], {"components": [0, 2]})
+        bad = [
+            {"split_group_by": "frames"},
+            {"split_group_by": "system"},
+            {"split_group_by": "system", "split_system": {"regex": "(", "components": [0]}},
+            {"split_group_by": "system", "split_system": {"regex": "("}},
+            {"split_group_by": "system", "split_system": {"components": []}},
+            {"split_group_by": "system", "split_system": {"components": ["0"]}},
+            {"split_group_by": "system", "split_system": {"glob": "*"}},
+            {"split_system": {"components": [0]}},
+            {"strategy": "guarded", "split_group_by": "system", "split_system": {"components": [0]}},
+        ]
+        for dataset in bad:
+            with self.assertRaises(ConfigurationError, msg=str(dataset)):
+                _validate_dataset(dict(dataset))
+
+    def test_collect_dataset_reports_system_grouping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = load_campaign(write_campaign(root))
+            for coverage in ("OH0", "OH25"):
+                for temperature in ("300K", "450K"):
+                    for index in range(3):
+                        run = root / "vasp_runs" / coverage / f"Step2_{temperature}" / f"sys{index}"
+                        run.mkdir(parents=True)
+                        (run / "OUTCAR").write_text("", encoding="utf-8")
+                        (run / "POSCAR").write_text("", encoding="utf-8")
+            dataset = dict(campaign.dataset)
+            dataset.update(split_group_by="system", split_system={"components": [0, 2]})
+            grouped_campaign = replace(campaign, dataset=dataset)
+
+            with patch.object(data_module, "_ase_io", side_effect=_fake_ase_io):
+                default = collect_dataset(
+                    campaign, source_root=root / "vasp_runs", output_root=root / "default"
+                )
+                payload = collect_dataset(
+                    grouped_campaign, source_root=root / "vasp_runs", output_root=root / "system"
+                )
+
+            self.assertNotIn("split_grouping", default)
+            with (root / "default" / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+                self.assertNotIn("system", next(csv.reader(handle)))
+            report = payload["split_grouping"]
+            self.assertEqual(report["systems"], 6)
+            self.assertEqual(report["rule"], {"components": [0, 2]})
+            self.assertIn("achieved_frame_fractions", report)
+            with (root / "system" / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            per_system: dict[str, set[str]] = {}
+            for row in rows:
+                per_system.setdefault(row["system"], set()).add(row["assignment"])
+            self.assertEqual(len(per_system), 6)
+            self.assertTrue(all(len(splits) == 1 for splits in per_system.values()))
 
 
 class SelectionTests(unittest.TestCase):

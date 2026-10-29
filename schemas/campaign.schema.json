@@ -59,6 +59,17 @@
           "items": {"type": "number", "minimum": 0}
         },
         "guard_frames": {"type": "integer", "minimum": 0},
+        "split_group_by": {"enum": ["trajectory", "system"]},
+        "split_system": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "properties": {
+            "regex": {"type": "string", "minLength": 1},
+            "components": {"type": "array", "minItems": 1, "items": {"type": "integer"}}
+          },
+          "additionalProperties": false
+        },
         "preserve_raw_forces": {"const": true},
         "include_virial": {"type": "boolean"},
         "type_map": {
