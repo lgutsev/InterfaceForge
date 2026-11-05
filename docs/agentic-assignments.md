@@ -79,6 +79,14 @@ report is valid or not; it exits 2 only when an input cannot be read. It checks:
 - `git_state.before.head == after.head` and the porcelain hashes are equal; a
   changed `branch_header` (e.g. `[behind 1]` after another process fetched) is
   allowed only when a `deviations` entry mentions `branch_header`;
+- `target.commit` is an ancestor of (or equal to) the HEAD the agent observed
+  (`git_state.before.head`), checked in `target.repo` with read-only
+  `rev-parse` and `log`. The output records `target_commit`, `observed_head` and
+  `target_ancestry` (`ok`, `not_ancestor`, `unknown_commit`, or `unchecked` when
+  the repository is not readable on the validating machine; `unchecked` is a
+  warning, the other two are failures). An agent that worked on a HEAD later
+  than the pinned commit is therefore visible, and one that worked on unrelated
+  history fails;
 - every `files_written` path matches a `permissions.write` glob, is outside every
   `permissions.forbid` location, exists, and has the stated sha256;
 - `not_assessed` and `deviations` are present (they may be empty; write

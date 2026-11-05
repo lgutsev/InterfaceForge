@@ -334,6 +334,32 @@ def git_snapshot(repo: str | Path) -> dict[str, str]:
     }
 
 
+def target_ancestry(repo: str | Path, commit: str, head: str) -> str:
+    """Is ``commit`` an ancestor of (or equal to) ``head`` in ``repo``?
+
+    Uses only ``rev-parse`` and ``log`` (read-only, and on the usual allowed list for
+    read-only assignments). Returns ``ok``, ``not_ancestor``, ``unknown_commit`` or
+    ``unchecked`` (no readable git repository at ``repo``).
+    """
+
+    def run(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(repo), *args],
+            capture_output=True, text=True, encoding="utf-8", check=False,
+        )
+
+    if not Path(repo).is_dir() or run("rev-parse", "--git-dir").returncode != 0:
+        return "unchecked"
+    resolved = [run("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}") for ref in (commit, head)]
+    if any(result.returncode != 0 for result in resolved):
+        return "unknown_commit"
+    commit_sha, head_sha = (result.stdout.strip() for result in resolved)
+    history = run("log", "--format=%H", head_sha)
+    if history.returncode != 0:
+        return "unknown_commit"
+    return "ok" if commit_sha in history.stdout.split() else "not_ancestor"
+
+
 # --------------------------------------------------------------------------- validate
 
 
@@ -367,6 +393,7 @@ def validate_report(directory: str | Path, report_path: str | Path) -> dict[str,
     except json.JSONDecodeError as exc:
         raise ConfigurationError(f"{report_path}: not valid JSON: {exc}") from exc
     failures: list[str] = []
+    warnings: list[str] = []
 
     def fail(message: str) -> None:
         failures.append(message)
@@ -442,6 +469,20 @@ def validate_report(directory: str | Path, report_path: str | Path) -> dict[str,
             if not explained:
                 fail("git_state: branch_header changed and no deviation mentions 'branch_header'")
 
+    # The pinned target commit must be in the history the agent actually saw.
+    target_commit = spec["target"]["commit"]
+    observed_head = before.get("head")
+    ancestry = target_ancestry(spec["target"]["repo"], target_commit, observed_head) if observed_head else "unchecked"
+    if ancestry == "not_ancestor":
+        fail(f"target: commit {target_commit} is not an ancestor of the observed HEAD {observed_head}")
+    elif ancestry == "unknown_commit":
+        fail(f"target: {target_commit} or observed HEAD {observed_head} is not a commit in {spec['target']['repo']}")
+    elif ancestry == "unchecked":
+        warnings.append(
+            f"target: ancestry of {target_commit} -> {observed_head} not checked "
+            f"({spec['target']['repo']} is not a readable git repository here)"
+        )
+
     # Writes stayed inside permissions.
     permissions = spec["permissions"]
     for item in report.get("files_written", []) or []:
@@ -466,8 +507,12 @@ def validate_report(directory: str | Path, report_path: str | Path) -> dict[str,
         "assignment_id": spec["id"],
         "report": str(report_path),
         "frozen_sha256": frozen.get("assignment_yaml_sha256"),
+        "target_commit": target_commit,
+        "observed_head": observed_head,
+        "target_ancestry": ancestry,
         "tasks": task_status,
         "failures": failures,
+        "warnings": warnings,
     }
 
 

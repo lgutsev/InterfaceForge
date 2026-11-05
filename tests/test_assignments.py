@@ -267,6 +267,73 @@ class LifecycleTests(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("git"), "git not available")
+class TargetAncestryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self.repo = tmp / "target"
+        self.repo.mkdir()
+
+        def git(*args: str) -> str:
+            return subprocess.run(["git", "-C", str(self.repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+
+        git("init", "-q")
+        git("commit", "-q", "--allow-empty", "-m", "first")
+        self.first = git("rev-parse", "HEAD")
+        git("commit", "-q", "--allow-empty", "-m", "second")
+        self.second = git("rev-parse", "HEAD")
+        self.root = tmp / "DD"
+        self.root.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _validate(self, target_commit: str, observed_head: str) -> dict:
+        spec = _spec(self.root)
+        spec["target"] = {"repo": str(self.repo), "commit": target_commit[:7], "also_read_commits": []}
+        (self.root / "assignment.yaml").write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+        _run_cli(["assignment", "render", str(self.root / "assignment.yaml")])
+        _run_cli(["assignment", "freeze", str(self.root)])
+        frozen = json.loads((self.root / "frozen.json").read_text(encoding="utf-8"))
+        snap = dict(SNAP, head=observed_head)
+        report = {
+            "assignment_id": "DD-TEST", "frozen_sha256": frozen["assignment_yaml_sha256"],
+            "agent": {"name": "t", "date": "2026-11-05"}, "git_state": {"before": snap, "after": snap},
+            "files_written": [], "not_assessed": [], "deviations": ["none"],
+            "tasks": [{"id": "T1", "verdict": "YES", "findings": []},
+                      {"id": "T2", "verdict": "CONSISTENT", "findings": []},
+                      {"id": "T3", "verdict": "BLOCKED", "findings": []}],
+        }
+        path = self.root / "report.json"
+        path.write_text(json.dumps(report), encoding="utf-8")
+        return validate_report(self.root, path)
+
+    def test_target_commit_behind_observed_head_is_ok_and_recorded(self) -> None:
+        result = self._validate(self.first, self.second)
+        self.assertTrue(result["valid"], result["failures"])
+        self.assertEqual((result["target_ancestry"], result["observed_head"]), ("ok", self.second))
+
+    def test_target_commit_not_in_observed_history_fails(self) -> None:
+        result = self._validate(self.second, self.first)
+        self.assertEqual(result["target_ancestry"], "not_ancestor")
+        self.assertTrue(any("not an ancestor" in failure for failure in result["failures"]))
+
+    def test_unknown_head_fails(self) -> None:
+        result = self._validate(self.first, "deadbee")
+        self.assertEqual(result["target_ancestry"], "unknown_commit")
+        self.assertFalse(result["valid"])
+
+
+class AncestryUncheckedTests(unittest.TestCase):
+    def test_missing_target_repo_is_a_warning_not_a_failure(self) -> None:
+        from interfaceforge.assignments import target_ancestry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(target_ancestry(Path(tmp) / "absent", "b877871", "c0ffee1"), "unchecked")
+
+
+@unittest.skipUnless(shutil.which("git"), "git not available")
 class GitSnapshotTests(unittest.TestCase):
     def test_snapshot_hashes_porcelain_without_branch_header(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
