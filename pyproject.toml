@@ -78,7 +78,13 @@ Issues = "https://github.com/lgutsev/InterfaceForge/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-interfaceforge = ["templates/*.yaml", "templates/INCAR.*", "references/*.yaml"]
+interfaceforge = [
+  "templates/*.yaml",
+  "templates/INCAR.*",
+  "references/*.yaml",
+  "schemas/*.json",
+  "assignments/templates/*/*.yaml",
+]
 
 [tool.ruff]
 line-length = 120

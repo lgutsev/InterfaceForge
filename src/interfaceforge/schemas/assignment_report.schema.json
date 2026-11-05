@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lgutsev/InterfaceForge/raw/main/schemas/assignment_report.schema.json",
+  "title": "InterfaceForge agentic assignment report",
+  "description": "The report an agent returns for a frozen assignment. Checked by 'iface assignment validate'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "assignment_id",
+    "frozen_sha256",
+    "agent",
+    "git_state",
+    "files_written",
+    "tasks",
+    "not_assessed",
+    "deviations"
+  ],
+  "properties": {
+    "assignment_id": {"type": "string", "minLength": 1},
+    "frozen_sha256": {
+      "description": "sha256 of assignment.yaml exactly as recorded in frozen.json.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "date"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}"}
+      }
+    },
+    "git_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before", "after"],
+      "properties": {
+        "before": {"$ref": "#/$defs/git_snapshot"},
+        "after": {"$ref": "#/$defs/git_snapshot"}
+      }
+    },
+    "files_written": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "verdict", "findings"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "verdict": {"type": "string", "minLength": 1},
+          "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
+        }
+      }
+    },
+    "not_assessed": {"type": "array", "items": {"type": "string"}},
+    "deviations": {
+      "description": "[\"none\"] when there were none; the field must exist.",
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "$defs": {
+    "git_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["head", "porcelain_sha256", "branch_header"],
+      "properties": {
+        "head": {"type": "string", "pattern": "^[0-9a-fA-F]{7,40}$"},
+        "porcelain_sha256": {
+          "description": "sha256 of 'git --no-optional-locks status --porcelain=v1' output (without the branch header).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "branch_header": {"type": "string"}
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "text", "values"],
+      "properties": {
+        "label": {"enum": ["E", "P", "H", "C", "S"]},
+        "text": {"type": "string", "minLength": 1},
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["value", "unit", "source"],
+            "properties": {
+              "value": {"type": ["number", "string", "null"]},
+              "unit": {"type": "string"},
+              "source": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  }
+}
