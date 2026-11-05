@@ -9,9 +9,9 @@ keywords those schemas use: ``type``, ``required``, ``properties``,
 (``#/$defs/...``). Any other keyword raises, so a schema cannot silently ask for
 a check that is not performed.
 
-The canonical schemas live in the repository's ``schemas/`` directory; the
-copies under ``interfaceforge/schemas/`` are package data, and a test keeps the
-two byte-identical.
+The schemas live only in the repository's ``schemas/`` directory. ``setup.py``
+copies them into ``interfaceforge/schemas/`` when a wheel is built; a source-tree
+or editable install reads ``schemas/`` directly.
 """
 
 from __future__ import annotations
@@ -20,7 +20,10 @@ import json
 import re
 from functools import cache
 from importlib import resources
+from pathlib import Path
 from typing import Any
+
+SOURCE_SCHEMAS = Path(__file__).resolve().parents[2] / "schemas"
 
 _SUPPORTED = {
     "$schema",
@@ -64,8 +67,13 @@ _TYPES: dict[str, Any] = {
 def load_schema(name: str) -> dict[str, Any]:
     """Load a bundled schema by file name, e.g. ``assignment.schema.json``."""
 
-    text = resources.files("interfaceforge").joinpath("schemas", name).read_text(encoding="utf-8")
-    return json.loads(text)
+    packaged = resources.files("interfaceforge").joinpath("schemas", name)
+    if packaged.is_file():  # wheel install: copied in by setup.py at build time
+        return json.loads(packaged.read_text(encoding="utf-8"))
+    source_tree = SOURCE_SCHEMAS / name  # source tree / editable install
+    if source_tree.is_file():
+        return json.loads(source_tree.read_text(encoding="utf-8"))
+    raise FileNotFoundError(f"schema {name!r} is neither packaged nor in {SOURCE_SCHEMAS}")
 
 
 def _pointer(path: tuple[Any, ...]) -> str:

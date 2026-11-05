@@ -82,7 +82,6 @@ interfaceforge = [
   "templates/*.yaml",
   "templates/INCAR.*",
   "references/*.yaml",
-  "schemas/*.json",
   "assignments/templates/*/*.yaml",
 ]
 

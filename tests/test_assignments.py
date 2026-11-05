@@ -64,12 +64,15 @@ SNAP = {"head": "b877871", "porcelain_sha256": "a" * 64, "branch_header": "## ma
 
 
 class SchemaTests(unittest.TestCase):
-    def test_package_schemas_match_repository_schemas(self) -> None:
+    def test_schemas_have_a_single_source_and_load_from_it(self) -> None:
+        from interfaceforge.schema_check import SOURCE_SCHEMAS, load_schema
+
+        self.assertEqual(SOURCE_SCHEMAS, REPO_ROOT / "schemas")
+        self.assertFalse((REPO_ROOT / "src" / "interfaceforge" / "schemas").exists(),
+                         "package copies are generated at build time by setup.py, not committed")
         for name in ("assignment.schema.json", "assignment_report.schema.json",
                      "excess_temperature_input.schema.json"):
-            canonical = (REPO_ROOT / "schemas" / name).read_bytes().replace(b"\r\n", b"\n")
-            packaged = (REPO_ROOT / "src" / "interfaceforge" / "schemas" / name).read_bytes().replace(b"\r\n", b"\n")
-            self.assertEqual(canonical, packaged, name)
+            self.assertEqual(load_schema(name), json.loads((REPO_ROOT / "schemas" / name).read_text(encoding="utf-8")))
 
     def test_kind_specific_requirements(self) -> None:
         spec = _spec(Path("/s"))
