@@ -12,6 +12,7 @@ quick start, and maturity boundaries.
 | [Campaign format](campaign.md) | `campaign.yaml`, systems, stages, scheduler profiles, and reproducibility state |
 | [Verification and maturity](verification.md) | What has run on real scientific data versus automated-test-only or code-only features |
 | [LONI environments](loni-environments.md) | Cluster environments and runtime separation |
+| [Agentic assignments](agentic-assignments.md) | Pre-registered, hash-frozen agent assignments and code-checked reports (`iface assignment`) |
 
 ## VASP and reference calculations
 
@@ -46,6 +47,7 @@ For mapped collections spanning unrelated VASP roots, see the
 | Guide | Use it for |
 |---|---|
 | [Interface energy](interface-energy.md) | Work of adhesion and literature/reference comparison |
+| [Excess-temperature audit](excess-temperature.md) | `iface audit excess-temperature`: one-temperature check and equipartition sanity check for bulk-referenced interface excesses |
 | [Separation energy](separation-energy.md) | Cleavage/separation calculations and DFT-versus-MLIP comparison |
 | [Swap Monte Carlo](swap-mc.md) | Fixed-composition N/O ordering search over MLIP-relaxed interfaces, plus the VASP ordering benchmark that verifies it (after PAIPAI) |
 | [Stratified validation](stratified-validation.md) | Errors by geometry class, temperature, coordination, and other physical groups |
