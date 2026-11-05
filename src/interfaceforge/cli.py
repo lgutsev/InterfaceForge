@@ -1477,24 +1477,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     audit = commands.add_parser(
         "audit",
-        help="Mode-aware VASP-MLFF audit (also: iface audit excess-temperature)",
-        epilog="Deterministic audits: " + ", ".join(f"'iface audit {name} --help'" for name in AUDIT_SUBCOMMANDS),
+        help="Audits: vasp-mlff (mode-aware VASP-MLFF run audit), excess-temperature, ...",
+        description="Audit command group. The legacy form 'iface audit [ROOT] [options]' still works and is "
+        "routed to 'iface audit vasp-mlff' with a deprecation warning.",
     )
-    audit.add_argument("root", nargs="?", default=".")
-    audit.add_argument("-o", "--output")
-    audit.add_argument("--shallow", action="store_true")
-    audit.add_argument(
-        "--readiness-profile",
-        choices=READINESS_PROFILES,
-        default="general",
-        help="Use 'perovskite' for fluxional perovskite sampling plateaus and capacity checkpoints",
-    )
-    audit.add_argument(
-        "--include-archives",
-        action="store_true",
-        help="Include run folders whose relative path contains 'archive'",
-    )
-    audit.set_defaults(func=cmd_audit)
+    register_audit_commands(audit.add_subparsers(dest="audit_command", required=True))
 
     collect = commands.add_parser("collect", help="Create synchronized extxyz and DeePMD datasets")
     add_campaign_option(collect)
@@ -3352,25 +3339,49 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# ``iface audit`` predates these subcommands and takes a positional run root, so
-# argparse cannot hold both; ``iface audit <name>`` for a registered deterministic
-# audit is routed to its own parser before the main parser sees it.
-AUDIT_SUBCOMMANDS = ("excess-temperature",)
+def register_audit_commands(commands: Any) -> None:
+    """Attach every ``iface audit <name>`` subcommand to a subparsers object."""
 
-
-def build_audit_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="iface audit", description="Deterministic, code-checked audits.")
-    commands = parser.add_subparsers(dest="audit_command", required=True)
+    vasp_mlff = commands.add_parser("vasp-mlff", help="Mode-aware VASP-MLFF run audit (formerly 'iface audit ROOT')")
+    vasp_mlff.add_argument("root", nargs="?", default=".")
+    vasp_mlff.add_argument("-o", "--output")
+    vasp_mlff.add_argument("--shallow", action="store_true")
+    vasp_mlff.add_argument(
+        "--readiness-profile",
+        choices=READINESS_PROFILES,
+        default="general",
+        help="Use 'perovskite' for fluxional perovskite sampling plateaus and capacity checkpoints",
+    )
+    vasp_mlff.add_argument(
+        "--include-archives",
+        action="store_true",
+        help="Include run folders whose relative path contains 'archive'",
+    )
+    vasp_mlff.set_defaults(func=cmd_audit)
     register_excess_temperature_commands(commands)
-    return parser
+
+
+AUDIT_SUBCOMMANDS = ("vasp-mlff", "excess-temperature")
+_HELP_FLAGS = ("-h", "--help")
 
 
 def parse_cli_args(parser: argparse.ArgumentParser, argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse ``argv`` with ``parser``, routing ``iface audit <registered audit>`` first."""
+    """Parse ``argv`` with ``parser``, rewriting the legacy ``iface audit [ROOT]`` form.
+
+    ``iface audit`` used to be the VASP-MLFF audit with a positional run root. It is now a
+    command group; anything after ``audit`` that is not a registered subcommand or a help
+    flag is treated as the old form and routed to ``iface audit vasp-mlff``.
+    """
 
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if len(arguments) >= 2 and arguments[0] == "audit" and arguments[1] in AUDIT_SUBCOMMANDS:
-        return build_audit_parser().parse_args(arguments[1:])
+    if arguments[:1] == ["audit"] and (
+        len(arguments) == 1 or arguments[1] not in AUDIT_SUBCOMMANDS + _HELP_FLAGS
+    ):
+        print(
+            "WARNING: 'iface audit [ROOT]' is deprecated; use 'iface audit vasp-mlff [ROOT]'.",
+            file=sys.stderr,
+        )
+        arguments.insert(1, "vasp-mlff")
     return parser.parse_args(arguments)
 
 

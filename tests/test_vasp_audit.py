@@ -638,7 +638,7 @@ class VaspTests(unittest.TestCase):
     def test_cli_exposes_named_perovskite_readiness_profile(self) -> None:
         parser = build_parser()
         audit = parser.parse_args(
-            ["audit", "runs", "--readiness-profile", "perovskite"]
+            ["audit", "vasp-mlff", "runs", "--readiness-profile", "perovskite"]
         )
         status = parser.parse_args(
             ["status", "runs", "--readiness-profile", "perovskite"]

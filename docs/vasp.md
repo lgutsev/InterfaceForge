@@ -854,7 +854,8 @@ axis is labelled W_sep or W_ad depending on the trees' `slab_mode`.
 
 ## Audit
 
-`iface audit` interprets train, refit and run modes differently. It parses
+`iface audit vasp-mlff` (formerly `iface audit ROOT`, which still works with a
+deprecation warning) interprets train, refit and run modes differently. It parses
 ML_LOGFILE error/spilling records, MD progress and temperature, refit outputs,
 normal termination, OOM evidence and common VASP warnings. Results are emitted
 as JSON, CSV and Markdown. With the `report` or `all` installation extra, the
@@ -898,7 +899,7 @@ show.
 
 Run directories with `archive` anywhere in their relative path are excluded by
 default, so recovery snapshots do not distort the current campaign summary.
-Use `iface audit ROOT --include-archives` (or the same option with
+Use `iface audit vasp-mlff ROOT --include-archives` (or the same option with
 `iface status`) when historical archived runs should be inspected explicitly.
 InterfaceForge's internal state remains excluded, except that recovery snapshots
 below `.interfaceforge/archive` are included when `--include-archives` is set.
@@ -922,7 +923,7 @@ Use the named **`perovskite`** profile for fluxional halide-perovskite MLFF
 sampling campaigns:
 
 ```bash
-iface audit runs/vasp --readiness-profile perovskite
+iface audit vasp-mlff runs/vasp --readiness-profile perovskite
 iface status runs/vasp --readiness-profile perovskite
 ```
 

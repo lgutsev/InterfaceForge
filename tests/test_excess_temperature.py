@@ -175,12 +175,19 @@ class CliTests(unittest.TestCase):
         self.assertEqual([case["verdict"] for case in summary["cases"]], ["CONSISTENT", UNDETERMINED])
         self.assertEqual(summary["verdict"], UNDETERMINED)
 
-    def test_plain_audit_command_still_takes_a_root(self) -> None:
+    def test_audit_is_a_group_and_legacy_root_form_is_routed_with_warning(self) -> None:
         from interfaceforge.cli import build_parser, parse_cli_args
 
-        args = parse_cli_args(build_parser(), ["audit", str(self.root)])
-        self.assertEqual(args.command, "audit")
-        self.assertEqual(args.root, str(self.root))
+        args = parse_cli_args(build_parser(), ["audit", "vasp-mlff", str(self.root), "--shallow"])
+        self.assertEqual((args.command, args.audit_command, args.root, args.shallow),
+                         ("audit", "vasp-mlff", str(self.root), True))
+        for legacy, root in ((["audit", str(self.root)], str(self.root)), (["audit"], "."),
+                             (["audit", "--shallow"], ".")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                args = parse_cli_args(build_parser(), legacy)
+            self.assertEqual((args.audit_command, args.root), ("vasp-mlff", root), legacy)
+            self.assertIn("deprecated", err.getvalue())
 
 
 if __name__ == "__main__":

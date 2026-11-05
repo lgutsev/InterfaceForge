@@ -59,7 +59,7 @@ The campaign schema and directory/state model are described in
 ### Existing VASP trajectories → MLIP datasets
 
 ```bash
-iface audit runs/vasp
+iface audit vasp-mlff runs/vasp
 iface collect
 iface train mace
 iface train deepmd

@@ -15,9 +15,9 @@ iface audit excess-temperature --input gamma_input.json [-o OUTDIR] [--force]
     [--tol-ratio 0.10] [--tol-t 1] [--tol-gamma 0.01]
 ```
 
-`iface audit <root>` (the VASP-MLFF audit) is unchanged; `excess-temperature` is
-routed to its own parser before the main one, because the older command takes
-a positional run root.
+`iface audit` is a command group; the VASP-MLFF run audit is
+`iface audit vasp-mlff [ROOT]`. The legacy `iface audit [ROOT]` form is still
+accepted and routed there with a deprecation warning on stderr.
 
 ## Why
 

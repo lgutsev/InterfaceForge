@@ -55,7 +55,7 @@ iface submit --system interface_ab_300k --stage train --execute
 Once reference trajectories exist:
 
 ```bash
-iface audit runs/vasp
+iface audit vasp-mlff runs/vasp
 iface collect
 iface train mace
 iface train deepmd
