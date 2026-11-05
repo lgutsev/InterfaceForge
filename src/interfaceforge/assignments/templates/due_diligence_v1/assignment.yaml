@@ -1,0 +1,95 @@
+# due_diligence@1 -- project-agnostic due-diligence assignment.
+# Instantiate with `iface assignment init <dir> --set ID=... --set TARGET_REPO=...` (string.Template
+# placeholders), then replace or extend the three example tasks. Quote hex commits so YAML keeps them strings.
+# Task kinds:
+#   audit        -- a deterministic `iface audit ...` command decides the verdict;
+#   diag_prepare -- a DFT/MLIP diagnostic that is prepared and dry-run only, with a pre-registered criterion;
+#   judgement    -- prose assessment with [E]/[P]/[H]/[C]/[S]-labelled evidence.
+id: "${ID}"
+template: due_diligence@1
+title: "${TITLE}"
+prepared: "Prepared ${DATE} for ${AGENT}."
+context: |
+  ${CONTEXT}
+evidence_labels:
+  E: established from a file
+  P: recorded/probable
+  H: hypothesis
+  C: concern
+  S: suggestion
+target:
+  repo: "${TARGET_REPO}"
+  commit: "${TARGET_COMMIT}"
+  also_read_commits: []
+permissions:
+  read:
+    - "${TARGET_REPO}"
+  write:
+    - "${STAGING_DIR}/*"
+  git_allowed:
+    - log
+    - show
+    - diff
+    - ls-files
+    - rev-parse
+    - "--no-optional-locks status"
+  forbid:
+    - "${FORBIDDEN_DIR}"
+rules:
+  - "Do not run project code from the target repository and do not import its modules; standalone scripts that only read its files go in the staging directory, next to their outputs."
+  - "No network calls, no cluster commands, no job submission. diag_prepare tasks stop at prepare + dry run."
+  - "Never overwrite a dated file; write _v2, _v3 instead."
+  - "If a file is cloud-only, locked or unreadable, list it under not_assessed and continue."
+tasks:
+  - id: T1
+    title: "${AUDIT_TITLE}"
+    kind: audit
+    description: |
+      Convert the recorded inputs to the audit's input format with a standalone, read-only converter
+      in the staging directory. Leave a field null where the records do not state it; never guess.
+      Run the audit and report its verdict verbatim.
+    hypothesis: "${AUDIT_HYPOTHESIS}"
+    command: "${AUDIT_COMMAND}"
+    verdicts: [CONSISTENT, INCONSISTENT, UNDETERMINED]
+    outputs:
+      - converter script and its input JSON
+      - audit outputs (<stage>_manifest.json, <stage>_audit.{json,tsv,md})
+  - id: T2
+    title: "${DIAG_TITLE}"
+    kind: diag_prepare
+    description: |
+      Write the diagnostic proposal: structures, settings and the exact prepare/dry-run commands.
+      The decision rule below is pre-registered; write it before any result exists. Do not --execute.
+    hypothesis: "${DIAG_HYPOTHESIS}"
+    command: "${DIAG_COMMAND}"
+    criterion:
+      metric: "${DIAG_METRIC}"
+      unit: "${DIAG_UNIT}"
+      threshold: "${DIAG_THRESHOLD}"
+      rule: "${DIAG_RULE}"
+    cost: not_inferable
+    verdicts: [PROPOSAL_WRITTEN, BLOCKED]
+    outputs:
+      - proposal Markdown with the pre-registered rule and a cost line ("priced from <source>" or "not inferable")
+  - id: T3
+    title: "${JUDGEMENT_TITLE}"
+    kind: judgement
+    description: |
+      ${JUDGEMENT_DESCRIPTION}
+    hypothesis: "${JUDGEMENT_HYPOTHESIS}"
+    verdicts: [SUPPORTED, NOT_SUPPORTED, UNDETERMINED]
+    outputs:
+      - findings section with labelled evidence and cited sources
+deliverables:
+  - "WORKER_REPORT_<date>.md in the staging directory"
+  - "commands_run_<date>.txt: every command, in order, with the target git state at start and end"
+done_when:
+  - "Every task has exactly one verdict from its vocabulary, or UNDETERMINED with the reason and the missing file."
+  - "diag_prepare proposals contain the pre-registered rule and a cost line."
+  - "`iface assignment validate` reports no failure other than tasks explicitly left for the PI."
+  - "`git --no-optional-locks status` of the target shows the same HEAD and working tree at start and end."
+report_back:
+  - "Paths of all deliverables."
+  - "Each task's verdict in one line, with the deciding evidence."
+  - "Any hard rule you could not follow, and why."
+  - "The `iface assignment validate` output."

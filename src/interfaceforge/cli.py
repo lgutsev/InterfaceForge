@@ -23,6 +23,7 @@ from .ai2kit import (
     stage_import,
 )
 from .aimd import AIMD_PROTOCOLS, sample_step2_runs, switch_step1_protocol
+from .assignments import register_commands as register_assignment_commands
 from .audit import READINESS_PROFILES, run_audit
 from .beef import plot_beef_campaign
 from .campaign import build_plan, prepare_campaign, submit_campaign
@@ -2320,6 +2321,11 @@ def build_parser() -> argparse.ArgumentParser:
     surface_select.add_argument("--max-per-state", type=int, default=2)
     surface_select.add_argument("--uncertainty-weight", type=float, default=0.65)
     surface_select.set_defaults(func=cmd_surface_select)
+
+    assignment = commands.add_parser(
+        "assignment", help="Pre-registered agent assignments: render, freeze, validate reports"
+    )
+    register_assignment_commands(assignment.add_subparsers(dest="assignment_command", required=True))
 
     swap_mc = commands.add_parser(
         "swap-mc",
