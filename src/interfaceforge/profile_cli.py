@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .cli import build_parser
+from .cli import build_parser, parse_cli_args
 from .errors import InterfaceForgeError, SafetyError
 from .vasp import prepare_step1_series
 
@@ -166,7 +166,7 @@ def build_profile_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_profile_parser()
-    args = parser.parse_args(argv)
+    args = parse_cli_args(parser, argv)
     try:
         return int(args.func(args))
     except (InterfaceForgeError, FileNotFoundError, ValueError, KeyError) as exc:

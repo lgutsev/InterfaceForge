@@ -31,6 +31,7 @@ from .committee import collect_committee, verify_committee_bundle
 from .config import load_campaign, merge_interface_metadata, references_for
 from .data import collect_dataset
 from .errors import InterfaceForgeError, SafetyError
+from .excess_temperature import register_commands as register_excess_temperature_commands
 from .exploration import generate_exploration
 from .geometry import (
     batch_slab_vacuum,
@@ -1474,7 +1475,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status.set_defaults(func=cmd_status)
 
-    audit = commands.add_parser("audit", help="Mode-aware VASP-MLFF audit")
+    audit = commands.add_parser(
+        "audit",
+        help="Mode-aware VASP-MLFF audit (also: iface audit excess-temperature)",
+        epilog="Deterministic audits: " + ", ".join(f"'iface audit {name} --help'" for name in AUDIT_SUBCOMMANDS),
+    )
     audit.add_argument("root", nargs="?", default=".")
     audit.add_argument("-o", "--output")
     audit.add_argument("--shallow", action="store_true")
@@ -3347,9 +3352,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# ``iface audit`` predates these subcommands and takes a positional run root, so
+# argparse cannot hold both; ``iface audit <name>`` for a registered deterministic
+# audit is routed to its own parser before the main parser sees it.
+AUDIT_SUBCOMMANDS = ("excess-temperature",)
+
+
+def build_audit_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="iface audit", description="Deterministic, code-checked audits.")
+    commands = parser.add_subparsers(dest="audit_command", required=True)
+    register_excess_temperature_commands(commands)
+    return parser
+
+
+def parse_cli_args(parser: argparse.ArgumentParser, argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse ``argv`` with ``parser``, routing ``iface audit <registered audit>`` first."""
+
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if len(arguments) >= 2 and arguments[0] == "audit" and arguments[1] in AUDIT_SUBCOMMANDS:
+        return build_audit_parser().parse_args(arguments[1:])
+    return parser.parse_args(arguments)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_cli_args(parser, argv)
     try:
         return int(args.func(args))
     except (InterfaceForgeError, FileNotFoundError, ValueError, KeyError) as exc:
