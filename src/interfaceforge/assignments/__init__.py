@@ -116,7 +116,7 @@ def hard_rules(spec: dict[str, Any]) -> list[str]:
     else:
         rules.append("Git: none.")
     for location in permissions["forbid"]:
-        rules.append(f"Never open, write or modify: {location}")
+        rules.append(f"Never create, edit, move or delete anything in: {location}")
     rules.extend(spec.get("rules", []))
     rules.append(
         "Every number in the report must come from a command you ran or a file you read, cited in its `source`. "
