@@ -130,6 +130,56 @@ def _validate_dataset(dataset: dict[str, Any]) -> None:
     if len(set(type_map)) != len(type_map):
         raise ConfigurationError("dataset.type_map contains duplicates")
     dataset["type_map"] = [str(item) for item in type_map]
+    _validate_split_grouping(dataset)
+
+
+def _validate_split_grouping(dataset: dict[str, Any]) -> None:
+    """Validate the opt-in system-level grouping of the grouped split.
+
+    ``split_group_by: trajectory`` (the default) keeps the historical
+    one-trajectory-per-unit split. ``split_group_by: system`` requires a
+    ``split_system`` rule that maps every collected run to a system id, so all
+    runs of one system (e.g. 300 K and 450 K MD from the same start
+    structure) land in the same split.
+    """
+
+    group_by = str(dataset.get("split_group_by", "trajectory")).lower()
+    if group_by not in {"trajectory", "system"}:
+        raise ConfigurationError("dataset.split_group_by must be 'trajectory' or 'system'")
+    dataset["split_group_by"] = group_by
+    rule = dataset.get("split_system")
+    if group_by == "trajectory":
+        if rule is not None:
+            raise ConfigurationError(
+                "dataset.split_system is only used with dataset.split_group_by: system"
+            )
+        return
+    if dataset["strategy"] != "grouped":
+        raise ConfigurationError("dataset.split_group_by: system requires dataset.strategy: grouped")
+    if not isinstance(rule, Mapping) or len(rule) != 1 or not {"regex", "components"} >= set(rule):
+        raise ConfigurationError(
+            "dataset.split_system must set exactly one of 'regex' or 'components'"
+        )
+    if "regex" in rule:
+        pattern = rule["regex"]
+        if not isinstance(pattern, str) or not pattern:
+            raise ConfigurationError("dataset.split_system.regex must be a non-empty string")
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ConfigurationError(f"dataset.split_system.regex is invalid: {exc}") from exc
+        dataset["split_system"] = {"regex": pattern}
+        return
+    components = rule["components"]
+    if (
+        not isinstance(components, list)
+        or not components
+        or any(isinstance(item, bool) or not isinstance(item, int) for item in components)
+    ):
+        raise ConfigurationError(
+            "dataset.split_system.components must be a non-empty list of integer path indices"
+        )
+    dataset["split_system"] = {"components": list(components)}
 
 
 _FINETUNE_ARCHS = {"dpa2_ft": "dpa2", "dpa3_ft": "dpa3"}
