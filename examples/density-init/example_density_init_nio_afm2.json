@@ -1,0 +1,190 @@
+{
+  "_note": "Illustrative output generated with the unit-test FakeRunner (mocked neural_paw_dft); timings and model hashes are placeholders, not real inference.",
+  "active": true,
+  "backend": "neural-paw",
+  "backend_info": {
+    "backend": "neural-paw",
+    "device": "cpu",
+    "interpreter": "/path/to/envs/ndi/bin/python",
+    "models": {
+      "augnet_total": {
+        "name": "augnet_total_full",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "electrafi": {
+        "name": "electrafi_total",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    "package": "neural_paw_dft",
+    "package_commit": "abc1234",
+    "package_source_url": null,
+    "package_version": "0.1.0",
+    "python": "3.11.0",
+    "settings": {
+      "allow_potcar_variant": false,
+      "augnet_mag_checkpoint": null,
+      "augnet_total_checkpoint": null,
+      "config": null,
+      "device": "auto",
+      "electrafi_checkpoint": null,
+      "python": "/path/to/envs/ndi/bin/python",
+      "timeout_s": null,
+      "weights_dir": null
+    },
+    "torch": "2.4.1"
+  },
+  "backend_probe": {
+    "available": true,
+    "commit": "abc1234",
+    "detail": "fake",
+    "python": "/path/to/envs/ndi/bin/python",
+    "version": "0.1.0"
+  },
+  "files": {
+    "generated": [
+      "CHGCAR.neural_init",
+      "CHGCAR"
+    ],
+    "incar_backup": "INCAR.pre_density_init",
+    "log": "density_init.log",
+    "promoted": "CHGCAR",
+    "promoted_sha256": "9ec669415fa596ecb412518cf425b89a968420b7ce37f6ec818a109c6264ef3d",
+    "staged": "CHGCAR.neural_init",
+    "staged_sha256": "9ec669415fa596ecb412518cf425b89a968420b7ce37f6ec818a109c6264ef3d"
+  },
+  "finished_at": "2026-09-24T12:00:00+00:00",
+  "format": "interfaceforge-density-init",
+  "grid": {
+    "dims": [
+      24,
+      24,
+      24
+    ],
+    "source": "explicit --grid"
+  },
+  "grid_dry_run_command": null,
+  "incar": {
+    "ICHARG_before": null,
+    "ISTART": "0"
+  },
+  "incar_changes": [
+    {
+      "after": "1",
+      "before": null,
+      "reason": "read promoted CHGCAR",
+      "tag": "ICHARG"
+    }
+  ],
+  "initializer_output": {
+    "grid": null,
+    "lmaxmix": null,
+    "m_total_constraint": null,
+    "nelect": null,
+    "spin_integral": null,
+    "total_integral": 44.0
+  },
+  "inputs": {
+    "required": [
+      "INCAR",
+      "POSCAR",
+      "POTCAR",
+      "KPOINTS"
+    ],
+    "sha256_after": {
+      "INCAR": "1b61019ae05997751f9c432c6a3c85a9d78a044cb1eb8c27b80b6940d607c392",
+      "KPOINTS": "ee3cf0da6c455d3236880a2638d0eb839be73c692a372dacfdaa260d2278c652",
+      "POSCAR": "2a210caa8bdd2287a2e7816dcc79a61037fe8b1e77e9b1b5520197d3b47be9b4",
+      "POTCAR": "cd8cc2153d3e9f210b6851a0d76cbb2685bccdc037b293c6ec72490be03efc34"
+    },
+    "sha256_before": {
+      "INCAR": "0385077ba07b626823a5208ba89b25a0f45cbac8242287086fc7b138ec09ace9",
+      "KPOINTS": "ee3cf0da6c455d3236880a2638d0eb839be73c692a372dacfdaa260d2278c652",
+      "POSCAR": "2a210caa8bdd2287a2e7816dcc79a61037fe8b1e77e9b1b5520197d3b47be9b4",
+      "POTCAR": "cd8cc2153d3e9f210b6851a0d76cbb2685bccdc037b293c6ec72490be03efc34"
+    },
+    "unchanged_except_incar_icharg": true
+  },
+  "interfaceforge": {
+    "commit": "<interfaceforge git commit>",
+    "dirty": true,
+    "version": "0.1.0"
+  },
+  "lmaxmix": 4,
+  "magnetism": {
+    "automatic_magnetic_initialization": "overridden: INCAR MAGMOM is authoritative; the initializer's automatic moment estimate was not used",
+    "incar_magmom": [
+      1.7,
+      -1.7,
+      0.0,
+      0.0
+    ],
+    "incar_magmom_raw": "1.7 -1.7 2*0",
+    "initial_moments_in_vasp_from": "INCAR MAGMOM (charge-only CHGCAR carries no magnetization density)",
+    "initializer_moments": null,
+    "ispin": 2,
+    "magmom_source": "incar",
+    "mixed_sign": true,
+    "net_moment": 0.0,
+    "notes": [
+      "mixed-sign (e.g. AFM-II) MAGMOM preserved exactly: charge-only seed, signed INCAR moments initialize the spin state"
+    ],
+    "nupdown": null,
+    "order": "mixed-sign",
+    "site_moments_passed": null,
+    "spin_channel": false,
+    "spin_channel_requested": "auto",
+    "spin_channel_written": false,
+    "use_initializer_moments": false
+  },
+  "mode": "executed",
+  "nelect": {
+    "source": "POTCAR ZVAL",
+    "value": 44.0
+  },
+  "request": {
+    "backend": "neural-paw",
+    "backend_settings": {
+      "allow_potcar_variant": false,
+      "augnet_mag_checkpoint": null,
+      "augnet_total_checkpoint": null,
+      "config": null,
+      "device": "auto",
+      "electrafi_checkpoint": null,
+      "weights_dir": null
+    },
+    "grid": [
+      24,
+      24,
+      24
+    ],
+    "magmom_source": "incar",
+    "spin_channel": "auto"
+  },
+  "run_dir": "/scratch/project/NiO_AFM2",
+  "schema_version": 1,
+  "started_at": "2026-09-24T12:00:00+00:00",
+  "status": "PROMOTED",
+  "structure": {
+    "composition": {
+      "Ni": 2,
+      "O": 2
+    },
+    "geometry_sha256": "2a210caa8bdd2287a2e7816dcc79a61037fe8b1e77e9b1b5520197d3b47be9b4",
+    "n_ions": 4,
+    "poscar_sha256": "2a210caa8bdd2287a2e7816dcc79a61037fe8b1e77e9b1b5520197d3b47be9b4",
+    "species_order": [
+      "Ni",
+      "O"
+    ]
+  },
+  "timing": {
+    "inference_s": 1.25,
+    "model_load_s": 2.0,
+    "overhead_s": 3.7,
+    "subprocess_s": 3.6,
+    "total_s": 3.7,
+    "write_s": 0.1
+  },
+  "warnings": []
+}
