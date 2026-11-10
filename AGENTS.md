@@ -18,3 +18,11 @@ If you were given an InterfaceForge assignment directory:
    tasks the assignment explicitly leaves to the PI.
 
 Background: [docs/agentic-assignments.md](docs/agentic-assignments.md).
+
+## Data audits
+
+If you are asked to audit a dataset, a model or a result from its records,
+follow the order of operations in [docs/data-audit.md](docs/data-audit.md). It
+is read-only: record problems for the owner and change no register, ledger,
+dataset or acceptance state. Inside an assignment, the assignment's own report
+schema and claim labels still apply.

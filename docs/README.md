@@ -13,6 +13,7 @@ quick start, and maturity boundaries.
 | [Verification and maturity](verification.md) | What has run on real scientific data versus automated-test-only or code-only features |
 | [LONI environments](loni-environments.md) | Cluster environments and runtime separation |
 | [Agentic assignments](agentic-assignments.md) | Pre-registered, hash-frozen agent assignments and code-checked reports (`iface assignment`) |
+| [Data audit: order of operations](data-audit.md) | Read-only procedure for auditing a dataset, model or result from its records: which records to trust first, hash and membership checks, how to label findings |
 
 ## VASP and reference calculations
 
